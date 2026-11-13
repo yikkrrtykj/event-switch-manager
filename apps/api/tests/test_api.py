@@ -138,8 +138,10 @@ def test_vite_proxy_must_preserve_same_origin(tmp_path: Path) -> None:
     vite_url = "http://127.0.0.1:5173"
     with TestClient(create_app(settings), base_url=vite_url) as client:
         data = {"name": "Lab"}
-        assert client.post(f"{API}/events", json=data, headers={"Origin": ORIGIN}).status_code == 403
-        assert client.post(f"{API}/events", json=data, headers={"Origin": vite_url}).status_code == 201
+        foreign = client.post(f"{API}/events", json=data, headers={"Origin": ORIGIN})
+        local = client.post(f"{API}/events", json=data, headers={"Origin": vite_url})
+        assert foreign.status_code == 403
+        assert local.status_code == 201
 
 
 def test_plan_survives_server_restart(tmp_path: Path) -> None:

@@ -30,6 +30,21 @@ Each milestone starts as a Draft PR and can be split into independently testable
 | 10 Windows Release & Full Acceptance | REL-01 | Offline installer via PyInstaller or verified equivalent, loopback service and browser auto-open, no Docker, upgrades preserving event data, Windows credential storage, encryption, redaction, audit, anti-CSRF, SSH host/TLS verification and Settings. |
 | 10 Windows Release & Full Acceptance | REL-02 | End-to-end offline Windows acceptance and sanitized evidence for every model/version/Stack and integration profile. Verify failures, restoration, reports and UI certification labels against the support matrix. |
 
+## GitHub tasks
+
+| Milestone | GitHub task |
+| --- | --- |
+| 01 Project Foundation | [PR #1](https://github.com/yikkrrtykj/event-switch-manager/pull/1) |
+| 02 Event & Network Data Model | [#2](https://github.com/yikkrrtykj/event-switch-manager/issues/2) |
+| 03 Network Planner Web | [#5](https://github.com/yikkrrtykj/event-switch-manager/issues/5) |
+| 04 Cisco Configuration Engine | [#4](https://github.com/yikkrrtykj/event-switch-manager/issues/4) |
+| 05 Console Read-Only & Backup | [#9](https://github.com/yikkrrtykj/event-switch-manager/issues/9) |
+| 06 Cisco Clean Deploy | [#3](https://github.com/yikkrrtykj/event-switch-manager/issues/3) |
+| 07 Kea + Stork | [#7](https://github.com/yikkrrtykj/event-switch-manager/issues/7) |
+| 08 Proxmox + ESXi | [#6](https://github.com/yikkrrtykj/event-switch-manager/issues/6) |
+| 09 Hillstone Planning & Read-Only | [#10](https://github.com/yikkrrtykj/event-switch-manager/issues/10) |
+| 10 Windows Release & Full Acceptance | [#8](https://github.com/yikkrrtykj/event-switch-manager/issues/8) |
+
 ## Evidence and delivery
 
 - Report unit, config fixture, Console simulation, service integration, OS end-to-end and hardware evidence separately. Each result records the revision, environment and reproducible evidence.

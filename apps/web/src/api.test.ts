@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createEvent, getDevices, getHealth } from './api'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 describe('planning API client', () => {
   it('loads health from the local API', async () => {

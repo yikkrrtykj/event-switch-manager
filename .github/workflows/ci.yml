@@ -3,7 +3,7 @@ name: Foundation CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, foundation]
 
 permissions:
   contents: read
@@ -54,9 +54,6 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm install --no-audit --no-fund
-      - name: Capture initial lockfile
-        if: runner.os == 'Linux'
-        run: python -c "import base64,zlib; data=base64.b64encode(zlib.compress(open('package-lock.json','rb').read())).decode(); [print('LOCKPART-'+str(i)+'-'+data[i:i+1024]) for i in range(0,len(data),1024)]"
       - run: npm test
       - run: npm run build
       - run: python -m pip install ../api
