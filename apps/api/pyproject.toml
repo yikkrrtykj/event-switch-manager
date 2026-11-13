@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["httpx>=0.28,<1", "mypy>=1.15,<3", "pytest>=8.3,<10", "ruff>=0.11,<1"]
+dev = ["httpx2>=2,<3", "mypy>=1.15,<3", "pytest>=8.3,<10", "ruff>=0.11,<1"]
 
 [project.scripts]
 esm = "event_switch_manager.__main__:main"

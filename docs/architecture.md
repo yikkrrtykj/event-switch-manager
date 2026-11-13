@@ -17,6 +17,15 @@ The built frontend and API share an origin and have no CDN dependencies. In Vite
 
 Alembic runs with a SQLite writer lock at startup. Foreign keys are enabled for every connection. Inventory records use case-insensitive uniqueness for hostnames and serials. Inventory POST and PUT edit only the planning database. The launcher defaults to the operating system's per-user data directory so source and web asset changes do not replace event data.
 
+## Inventory identity and revision compatibility
+
+PR #1's `Device.id` identifies a device assignment within an event. The same serial can appear in separate events with different roles, hostnames and IP addresses. The optional serial is a planning hint. A deployment cannot rely on that hint as verified identity.
+
+- Preserve existing event and assignment UUIDs in the next schema migration. Introduce independent, stable physical chassis IDs and a verified hardware identity with vendor and serial. Allow an assignment to exist before hardware is linked. Backfill from serial hints only when unambiguous. Keep conflicting or missing values available for reconciliation.
+- Keep event role, intended hostname, management IP and location on the assignment. Model Stack members as physical chassis referenced from a Stack membership snapshot. Member numbers and interface mappings belong to that snapshot and can change independently of chassis identity.
+- Link deployment history to the event, assignment, actual hardware and Stack membership snapshot, and the immutable plan revision. Link generated configurations, backups and verification evidence to the deployment attempt. Retain historical references when hardware is reused, moved, or reassigned.
+- A plan revision needs a stable ID, schema version and deterministic content hash. Approval evidence binds the revision, the generated artifact hash, the target identity and Stack snapshot, and the intended operation. Store who approved it and when. Any changes to those inputs require a new approval.
+
 ## V1 dependencies and ownership
 
 - **Event / Network Planner** owns the desired state. Use stable entity IDs and versioned import/export. Network revisions must be captured as immutable inputs to previews and deployments. Editing a plan must invalidate approvals bound to a previous revision.

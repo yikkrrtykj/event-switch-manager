@@ -129,6 +129,14 @@ def test_local_web_guard(client: TestClient) -> None:
     request = client.build_request("POST", f"{API}/events", json={"name": "Lab"})
     del request.headers["origin"]
     assert client.send(request).status_code == 403
+    preflight = client.options(
+        f"{API}/events",
+        headers={
+            "Origin": "https://example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert "access-control-allow-origin" not in preflight.headers
     assert client.get(f"{API}/events").json() == []
     assert client.post(f"{API}/devices/deploy", json={}).status_code == 404
 
