@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  color: #172b3b;
+  background: #f1f5f7;
+  font-synthesis: none;
+}
+
+.masthead { background: #101f2b; color: #f4f8fb; border-bottom: 3px solid #2d8b80; }
+.shell { width: min(100% - 2.5rem, 68rem); margin-inline: auto; }
+.masthead-inner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .5rem 1rem; min-height: 4rem; padding-block: .65rem; }
+.brand { font-weight: 650; letter-spacing: -.02em; }
+.local-label { color: #c7d9e5; font-size: .85rem; }
+main { padding-block: clamp(1.75rem, 5vw, 3.5rem); }
+h1 { margin-bottom: 1.35rem; font-size: clamp(2rem, 5vw, 3rem); font-weight: 700; letter-spacing: -.05em; line-height: 1.1; }
+h2 { margin-bottom: .9rem; font-size: 1.25rem; font-weight: 650; letter-spacing: -.02em; }
+h3 { margin-top: 1.4rem; margin-bottom: .45rem; font-size: 1rem; font-weight: 650; }
+p { margin-block: .55rem; color: #465d70; font-size: .92rem; }
+strong { font-weight: 650; }
+.status-tile, .panel { background: #fff; border: 1px solid #cdd9e1; border-radius: .65rem; min-width: 0; }
+.status-tile { padding: .85rem 1rem; display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .25rem .75rem; }
+.status-tile span { color: #465d70; font-size: .86rem; }
+.status-tile strong { font-size: .9rem; }
+.ready { color: #14685c; }
+.workspace { margin-top: 1.25rem; align-items: start; }
+.panel { padding: clamp(1rem, 3vw, 1.5rem); }
+label { display: block; font-size: .9rem; font-weight: 600; margin-bottom: .3rem; }
+input, select { display: block; width: 100%; border: 1px solid #9bafbe; border-radius: .35rem; padding: .55rem .65rem; background: #fff; margin-bottom: .8rem; }
+button { background: #155f57; color: #fff; border-radius: .35rem; padding: .55rem .9rem; font-weight: 650; cursor: pointer; }
+button:hover:not(:disabled) { background: #104a44; }
+button:disabled { opacity: .65; cursor: not-allowed; }
+:focus-visible { outline: 2px solid #2074b3; outline-offset: 3px; }
+[role="alert"] { color: #9c271f; }
+table { width: 100%; margin-top: .8rem; font-size: .875rem; border-collapse: collapse; }
+th, td { text-align: left; padding: .6rem .5rem; border-bottom: 1px solid #d9e3eb; }
