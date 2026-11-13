@@ -73,4 +73,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Scan Git history
-        run: docker run --rm -v "$GITHUB_WORKSPACE:/repo" ghcr.io/gitleaks/gitleaks:v8.24.3 git /repo --redact --no-banner
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
+            ghcr.io/gitleaks/gitleaks:v8.24.3 git /repo --redact --no-banner

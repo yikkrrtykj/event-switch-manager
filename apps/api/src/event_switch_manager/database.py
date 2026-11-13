@@ -20,7 +20,7 @@ def create_database_engine(path: Path) -> Engine:
 
 def upgrade_database(engine: Engine) -> None:
     config = Config()
-    config.set_main_option("script_location", "event_switch_manager.migrations:")
+    config.set_main_option("script_location", "event_switch_manager:migrations")
     with engine.connect() as connection:
         # Take the SQLite writer lock before reading the migration version.
         connection.exec_driver_sql("BEGIN IMMEDIATE")

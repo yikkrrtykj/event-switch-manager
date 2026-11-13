@@ -19,8 +19,9 @@ def upgrade() -> None:
     op.create_table(
         "devices",
         sa.Column("id", sa.Uuid(), primary_key=True),
-        sa.Column("event_id", sa.Uuid(), sa.ForeignKey("events.id", ondelete="RESTRICT"),
-                  nullable=False),
+        sa.Column(
+            "event_id", sa.Uuid(), sa.ForeignKey("events.id", ondelete="RESTRICT"), nullable=False
+        ),
         sa.Column("hostname", sa.String(63, collation="NOCASE"), nullable=False),
         sa.Column("family", sa.String(14), nullable=False),
         sa.Column("role", sa.String(21), nullable=False),
