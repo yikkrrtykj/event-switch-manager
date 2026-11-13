@@ -3,7 +3,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, URL, create_engine, event
+from sqlalchemy import URL, Engine, create_engine, event
 
 
 def create_database_engine(path: Path) -> Engine:
