@@ -23,4 +23,14 @@ test('creates an event and displays its persisted inventory', async ({ page, req
   await page.getByLabel('Selected event').selectOption(eventId)
   await expect(page.getByRole('row', { name: /Finals-Core/ })).toBeVisible()
   await expect(page.getByText('120', { exact: true })).toBeVisible()
+
+  await page.getByLabel('Event name').fill('Rehearsal')
+  await page.getByRole('button', { name: 'Create event' }).click()
+  const selectedEvent = page.getByLabel('Selected event')
+  await expect(selectedEvent.locator('option:checked')).toHaveText('Rehearsal')
+  await expect(page.getByText('No devices recorded for this event.')).toBeVisible()
+  await expect(page.getByRole('row', { name: /Finals-Core/ })).toHaveCount(0)
+
+  await selectedEvent.selectOption(eventId)
+  await expect(page.getByRole('row', { name: /Finals-Core/ })).toBeVisible()
 })

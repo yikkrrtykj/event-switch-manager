@@ -26,6 +26,8 @@ PR #1's `Device.id` identifies a device assignment within an event. The same ser
 - Link deployment history to the event, assignment, actual hardware and Stack membership snapshot, and the immutable plan revision. Link generated configurations, backups and verification evidence to the deployment attempt. Retain historical references when hardware is reused, moved, or reassigned.
 - A plan revision needs a stable ID, schema version and deterministic content hash. Approval evidence binds the revision, the generated artifact hash, the target identity and Stack snapshot, and the intended operation. Store who approved it and when. Any changes to those inputs require a new approval.
 
+See the [PR #2 data model design](pr2-data-model.md) for migration inputs, domain boundaries and validation cases.
+
 ## V1 dependencies and ownership
 
 - **Event / Network Planner** owns the desired state. Use stable entity IDs and versioned import/export. Network revisions must be captured as immutable inputs to previews and deployments. Editing a plan must invalidate approvals bound to a previous revision.
