@@ -15,23 +15,23 @@ def check_addressing(v: Validation) -> None:
                   "Management VLAN must be defined")
     subnets = v.index("subnets", p.subnets, lambda x: x.id)
     svis = {x.id: x for x in p.logical_interfaces if x.kind == "svi"}
-    for i, subnet in enumerate(p.subnets):
-        v.require(subnet.vlan in vlans, f"subnets.{i}.vlan", "vlan_reference", "Unknown VLAN")
+    for i, record in enumerate(p.subnets):
+        v.require(record.vlan in vlans, f"subnets.{i}.vlan", "vlan_reference", "Unknown VLAN")
     for i, j in pairs(len(p.subnets)):
-        first, second = p.subnets[i], p.subnets[j]
-        v.require(not first.network.overlaps(second.network), f"subnets.{j}.network",
-                  "subnet_overlap", f"{second.network} overlaps subnets.{i} ({first.network})")
+        left, right = p.subnets[i], p.subnets[j]
+        v.require(not left.network.overlaps(right.network), f"subnets.{j}.network",
+                  "subnet_overlap", f"{right.network} overlaps subnets.{i} ({left.network})")
     gateways = v.index("gateways", p.gateways, lambda x: x.subnet_id)
     v.index("gateways", p.gateways, lambda x: x.address)
     v.index("gateways", p.gateways, lambda x: x.svi_id)
-    for i, gateway in enumerate(p.gateways):
+    for i, entry in enumerate(p.gateways):
         path = f"gateways.{i}"
-        subnet = subnets.get(gateway.subnet_id)
-        svi = svis.get(gateway.svi_id)
-        v.require(subnet and usable(gateway.address, subnet.network), f"{path}.address",
+        subnet = subnets.get(entry.subnet_id)
+        svi = svis.get(entry.svi_id)
+        v.require(subnet and usable(entry.address, subnet.network), f"{path}.address",
                   "gateway_address", "Gateway must be usable in its subnet")
         v.require(subnet and svi and svi.vlan == subnet.vlan and svi.address
-                  and svi.address.ip == gateway.address and svi.address.network == subnet.network,
+                  and svi.address.ip == entry.address and svi.address.network == subnet.network,
                   f"{path}.svi_id", "gateway_svi", "SVI VLAN, IP and prefix must match the gateway")
     v.index("dhcp_pools", p.dhcp_pools, lambda x: x.id)
     for i, pool in enumerate(p.dhcp_pools):

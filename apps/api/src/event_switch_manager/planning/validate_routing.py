@@ -5,7 +5,7 @@ from uuid import UUID
 from event_switch_manager.domain import DeviceRole
 
 from .plan import EventPlan
-from .routing import IpNextHop, StaticRoute, TunnelNextHop
+from .routing import IpNextHop, NatExemption, PolicyBasedRoute, StaticRoute, TunnelNextHop
 from .types import usable
 from .validation import Validation, pairs
 
@@ -107,10 +107,10 @@ def check_routes(v: Validation) -> None:
     v.index("isps", p.isps, lambda x: (x.assignment_id, x.interface_id))
     for i, isp in enumerate(p.isps):
         path = f"isps.{i}"
-        port = ports.get(isp.interface_id)
-        v.require(isp.assignment_id in assignments and port
-                  and port.assignment_id == isp.assignment_id and port.settings.mode == "routed"
-                  and port.settings.address == isp.address,
+        wan = ports.get(isp.interface_id)
+        v.require(isp.assignment_id in assignments and wan
+                  and wan.assignment_id == isp.assignment_id and wan.settings.mode == "routed"
+                  and wan.settings.address == isp.address,
                   f"{path}.interface_id", "isp_port", "ISP needs a matching routed interface")
         v.require(usable(isp.address.ip, isp.address.network)
                   and usable(isp.gateway, isp.address.network) and isp.gateway != isp.address.ip,
@@ -119,8 +119,9 @@ def check_routes(v: Validation) -> None:
             v.require(isp.track_id in tracks, f"{path}.track_id", "reference", "Unknown ISP Track")
     for i, tunnel in enumerate(p.ipsec_tunnels):
         path = f"ipsec_tunnels.{i}"
-        isp = isps.get(tunnel.isp_id)
-        v.require(isp and isp.assignment_id == tunnel.assignment_id and tunnel.track_id in tracks,
+        uplink = isps.get(tunnel.isp_id)
+        v.require(uplink and uplink.assignment_id == tunnel.assignment_id
+                  and tunnel.track_id in tracks,
                   path, "tunnel_reference", "Tunnel requires an ISP on its owner and a Track")
         v.require(usable(tunnel.inside.ip, tunnel.inside.network)
                   and usable(tunnel.remote_gateway, tunnel.inside.network)
@@ -129,18 +130,19 @@ def check_routes(v: Validation) -> None:
     v.index("vpn_remote_prefixes", p.vpn_remote_prefixes, lambda x: (x.tunnel_id, x.network))
     for i, prefix in enumerate(p.vpn_remote_prefixes):
         path = f"vpn_remote_prefixes.{i}"
-        tunnel = tunnels.get(prefix.tunnel_id)
-        v.require(tunnel and prefix.network.prefixlen > 0, path, "vpn_prefix",
+        remote_tunnel = tunnels.get(prefix.tunnel_id)
+        v.require(remote_tunnel and prefix.network.prefixlen > 0, path, "vpn_prefix",
                   "VPN prefix requires a tunnel and a non-default remote network")
         for j, subnet in enumerate(p.subnets):
             v.require(not prefix.network.overlaps(subnet.network), path, "vpn_local_overlap",
                       f"{prefix.network} overlaps subnets.{j} ({subnet.network})")
-        if tunnel:
-            _check_vpn_paths(v, tunnel.assignment_id, tunnel.id, prefix.network, path)
-            for interface in connected[tunnel.assignment_id]:
-                v.require(not prefix.network.overlaps(interface.network), path,
+        if remote_tunnel:
+            owner = remote_tunnel.assignment_id
+            _check_vpn_paths(v, owner, remote_tunnel.id, prefix.network, path)
+            for address in connected[owner]:
+                v.require(not prefix.network.overlaps(address.network), path,
                           "vpn_connected_overlap",
-                          f"{prefix.network} overlaps connected network {interface.network}")
+                          f"{prefix.network} overlaps connected network {address.network}")
     for i, j in pairs(len(p.vpn_remote_prefixes)):
         a, b = p.vpn_remote_prefixes[i], p.vpn_remote_prefixes[j]
         owner_a, owner_b = tunnels.get(a.tunnel_id), tunnels.get(b.tunnel_id)
@@ -156,8 +158,8 @@ def check_routes(v: Validation) -> None:
         v.require(route.assignment_id in assignments and route.destination.prefixlen > 0,
                   path, "static_route", "Use an existing assignment and a non-default prefix")
         if isinstance(route.next_hop, TunnelNextHop):
-            tunnel = tunnels.get(route.next_hop.tunnel_id)
-            v.require(tunnel and tunnel.assignment_id == route.assignment_id,
+            route_tunnel = tunnels.get(route.next_hop.tunnel_id)
+            v.require(route_tunnel and route_tunnel.assignment_id == route.assignment_id,
                       f"{path}.next_hop", "tunnel_reference", "Tunnel belongs to another owner")
         elif isinstance(route.next_hop, IpNextHop):
             _check_ip(v, connected[route.assignment_id], route.next_hop.address, f"{path}.next_hop")
@@ -206,7 +208,10 @@ def _check_policies(v: Validation, vlans: set[int]) -> None:
     v.index("nat_exemptions", p.nat_exemptions, lambda x: x.id)
     v.index("nat_exemptions", p.nat_exemptions,
             lambda x: (x.assignment_id, x.source_vlan, x.destination, x.tunnel_id))
-    for group, rules in (("policy_routes", p.policy_routes), ("nat_exemptions", p.nat_exemptions)):
+    vpn_rules: tuple[tuple[str, tuple[PolicyBasedRoute | NatExemption, ...]], ...] = (
+        ("policy_routes", p.policy_routes), ("nat_exemptions", p.nat_exemptions),
+    )
+    for group, rules in vpn_rules:
         for i, rule in enumerate(rules):
             tunnel = tunnels.get(rule.tunnel_id)
             v.require(rule.source_vlan in vlans and tunnel
