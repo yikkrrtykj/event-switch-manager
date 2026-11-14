@@ -1,8 +1,23 @@
 import { expect, test } from '@playwright/test'
 
 test('creates an event and displays its persisted inventory', async ({ page, request }) => {
-  await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible()
+  const browserErrors: string[] = []
+  page.on('pageerror', (error) => browserErrors.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') browserErrors.push(message.text())
+  })
+  page.on('response', (response) => {
+    if (response.status() >= 400) browserErrors.push(`${response.status()} ${response.url()}`)
+  })
+
+  const responseFromDashboard = await page.goto('/')
+  expect(responseFromDashboard?.status(), 'Dashboard document status').toBe(200)
+  try {
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible()
+  } catch (error) {
+    console.error('Dashboard startup browser errors:', browserErrors)
+    throw error
+  }
   await expect(page.getByText('Connected', { exact: true })).toBeVisible()
   await expect(page.getByText('Disabled', { exact: true })).toBeVisible()
 
