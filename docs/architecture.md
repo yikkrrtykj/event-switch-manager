@@ -17,6 +17,10 @@ The built frontend and API share an origin and have no CDN dependencies. In Vite
 
 Alembic runs with a SQLite writer lock at startup. Foreign keys are enabled for every connection. Inventory records use case-insensitive uniqueness for hostnames and serials. Inventory POST and PUT edit only the planning database. The launcher defaults to the operating system's per-user data directory so source and web asset changes do not replace event data.
 
+## Web design tooling
+
+The [frontend design standard](frontend-design.md) uses Hallmark v2 App Screens for development and design review. React, TypeScript, Vite and Tailwind build the local frontend, with shadcn/ui primitives added locally as the planner needs them. Hallmark, sloplint and browser audit dependencies run in development. The runtime serves built assets from the workstation and requires neither Hallmark nor a network connection.
+
 ## Inventory identity and revision compatibility
 
 PR #1's `Device.id` identifies a device assignment within an event. The same serial can appear in separate events with different roles, hostnames and IP addresses. The optional serial is a planning hint. A deployment cannot rely on that hint as verified identity.
