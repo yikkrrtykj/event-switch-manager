@@ -1,9 +1,8 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint
 from sqlalchemy import Enum as SqlEnum
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from .domain import DeviceFamily, DeviceRole
