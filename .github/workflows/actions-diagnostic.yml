@@ -1,0 +1,16 @@
+name: Actions Bootstrap Diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    name: Bootstrap probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Print diagnostic marker and commit SHA
+        shell: bash
+        run: printf 'ACTIONS_BOOTSTRAP_OK\nGITHUB_SHA=%s\n' "$GITHUB_SHA"
