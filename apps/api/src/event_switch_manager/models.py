@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Enum as SqlEnum
+import sqlalchemy as sa
 from sqlalchemy import CheckConstraint, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -32,10 +32,10 @@ class Device(Base):
     event_id: Mapped[UUID] = mapped_column(ForeignKey("events.id", ondelete="RESTRICT"))
     hostname: Mapped[str] = mapped_column(String(63, collation="NOCASE"))
     family: Mapped[DeviceFamily] = mapped_column(
-        SqlEnum(DeviceFamily, native_enum=False, values_callable=lambda cls: [e.value for e in cls])
+        sa.Enum(DeviceFamily, native_enum=False, values_callable=lambda cls: [e.value for e in cls])
     )
     role: Mapped[DeviceRole] = mapped_column(
-        SqlEnum(DeviceRole, native_enum=False, values_callable=lambda cls: [e.value for e in cls])
+        sa.Enum(DeviceRole, native_enum=False, values_callable=lambda cls: [e.value for e in cls])
     )
     model: Mapped[str | None] = mapped_column(String(80))
     serial_number: Mapped[str | None] = mapped_column(String(64, collation="NOCASE"))
