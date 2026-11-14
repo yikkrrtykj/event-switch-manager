@@ -16,8 +16,10 @@ export function Dashboard() {
   const [events, setEvents] = useState<EventRecord[] | null>(null)
   const [eventError, setEventError] = useState('')
   const [selectedId, setSelectedId] = useState('')
-  const [inventory, setInventory] = useState<{ eventId: string; devices: DeviceRecord[] } | null>(null)
-  const [inventoryError, setInventoryError] = useState('')
+  const [inventory, setInventory] = useState<{
+    eventId: string
+    devices: DeviceRecord[] | null
+  } | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
 
@@ -41,9 +43,10 @@ export function Dashboard() {
   useEffect(() => {
     if (!selectedId) return
     let active = true
+    setInventory(null)
     void getDevices(selectedId).then(
       (devices) => { if (active) setInventory({ eventId: selectedId, devices }) },
-      () => { if (active) setInventoryError(selectedId) },
+      () => { if (active) setInventory({ eventId: selectedId, devices: null }) },
     )
     return () => { active = false }
   }, [selectedId])
@@ -121,8 +124,8 @@ export function Dashboard() {
               <>
                 <h3>Device inventory</h3>
                 <p>Management VLAN <strong>{selected.management_vlan}</strong></p>
-                {inventoryError === selectedId && <p role="alert">Unable to load devices.</p>}
-                {!devices && inventoryError !== selectedId && <p role="status">Loading devices…</p>}
+                {devices === null && <p role="alert">Unable to load devices.</p>}
+                {devices === undefined && <p role="status">Loading devices…</p>}
                 {devices?.length === 0 && <p>No devices recorded for this event.</p>}
                 {devices && devices.length > 0 && (
                   <div className="overflow-x-auto">
