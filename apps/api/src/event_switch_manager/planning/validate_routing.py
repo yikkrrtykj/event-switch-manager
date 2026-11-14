@@ -52,31 +52,63 @@ def check_transit(v: Validation) -> None:
               and svi.vlan == transit.vlan and svi.address
               and svi.address.ip == transit.core_ip and svi.address.network == transit.network,
               "transit.core_svi_id", "transit_svi", "Core SVI must match transit VLAN, IP and CIDR")
-    v.require(any(x.assignment_id == transit.core_assignment_id
-                  and x.next_hop.address == transit.hillstone_ip for x in p.default_routes),
-              "transit", "core_default", "Cisco Core needs a default route via Hillstone")
+    core_default = min(
+        (route for route in p.default_routes if route.assignment_id == transit.core_assignment_id),
+        key=lambda route: route.preference,
+        default=None,
+    )
+    v.require(core_default and core_default.next_hop.address == transit.hillstone_ip,
+              "transit", "core_default", "Preferred Cisco Core default must use Hillstone")
     for i, gateway in enumerate(p.gateways):
         interface = svis.get(gateway.svi_id)
         v.require(interface and interface.assignment_id == transit.core_assignment_id,
                   f"gateways.{i}.svi_id", "core_gateway", "Cisco Core owns VLAN gateways")
-    return_routes = [(i, x) for i, x in enumerate(p.static_routes)
-                     if x.assignment_id == transit.hillstone_assignment_id
-                     and isinstance(x.next_hop, IpNextHop)
-                     and x.next_hop.address == transit.core_ip]
+    firewall_routes = [(i, route) for i, route in enumerate(p.static_routes)
+                       if route.assignment_id == transit.hillstone_assignment_id]
+    return_routes = [(i, route) for i, route in firewall_routes
+                     if _via_core(route, transit.core_ip)]
     for i, subnet in enumerate(p.subnets):
         v.require(subnet.vlan == transit.vlan if subnet.network == transit.network
                   else subnet.vlan != transit.vlan and not subnet.network.overlaps(transit.network),
                   f"subnets.{i}.network", "transit_overlap", "Subnet conflicts with transit CIDR")
         if subnet.vlan != transit.vlan:
-            has_return = any(subnet.network.subnet_of(x.destination) for _, x in return_routes)
-            v.require(has_return, f"subnets.{i}.network", "return_route",
-                      "Hillstone needs a return route via Core")
+            _check_core_return(v, subnet.network, transit.core_ip, firewall_routes,
+                               f"subnets.{i}.network")
     for i, prefix in enumerate(p.vpn_remote_prefixes):
         for j, route in return_routes:
             v.require(not prefix.network.overlaps(route.destination), f"vpn_remote_prefixes.{i}",
                       "vpn_return_overlap",
                       f"{prefix.network} overlaps static_routes.{j} ({route.destination}) on "
                       f"Hillstone {route.assignment_id}. Tunnel loss can send VPN traffic to Core.")
+
+
+def _via_core(route: StaticRoute, address: IPv4Address) -> bool:
+    return isinstance(route.next_hop, IpNextHop) and route.next_hop.address == address
+
+
+def _check_core_return(
+    v: Validation,
+    network: IPv4Network,
+    core_ip: IPv4Address,
+    routes: list[tuple[int, StaticRoute]],
+    path: str,
+) -> None:
+    covering = min(
+        (route for _, route in routes if network.subnet_of(route.destination)),
+        key=lambda route: (-route.destination.prefixlen, route.preference),
+        default=None,
+    )
+    v.require(covering and _via_core(covering, core_ip), path, "return_route",
+              f"Hillstone needs a preferred return route via Core for {network}")
+    best_by_prefix: dict[IPv4Network, tuple[int, StaticRoute]] = {}
+    for index, route in routes:
+        if route.destination != network and route.destination.subnet_of(network):
+            current = best_by_prefix.get(route.destination)
+            if current is None or route.preference < current[1].preference:
+                best_by_prefix[route.destination] = (index, route)
+    for index, winner in best_by_prefix.values():
+        v.require(_via_core(winner, core_ip), f"static_routes.{index}", "return_route",
+                  f"More-specific route {winner.destination} diverts {network} from Core")
 
 
 def check_routes(v: Validation) -> None:

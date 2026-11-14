@@ -181,6 +181,23 @@ def test_more_specific_route_cannot_bypass_vpn() -> None:
     assert {issue.code for issue in issues} >= {"vpn_tunnel_route", "vpn_down_route"}
 
 
+def test_transit_rejects_shadowed_forward_and_return_routes() -> None:
+    raw = plan_model().model_dump(mode="json")
+    raw["default_routes"][0]["preference"] = 100
+    raw["default_routes"].append({
+        "id": uid(41), "assignment_id": uid(4),
+        "next_hop": {"kind": "ip", "address": "192.168.10.2"},
+    })
+    raw["static_routes"].append({
+        "id": uid(42), "assignment_id": uid(5), "destination": "192.168.10.0/25",
+        "next_hop": {"kind": "discard"},
+    })
+    issues = validate_plan(EventPlan.model_validate(raw))
+    assert {(issue.path, issue.code) for issue in issues} >= {
+        ("transit", "core_default"), ("static_routes.3", "return_route"),
+    }
+
+
 def test_nested_subnets_and_duplicate_gateway_are_rejected() -> None:
     raw = plan_model().model_dump(mode="json")
     raw["subnets"].append({"id": uid(40), "vlan": 20, "network": "192.168.10.0/25"})
