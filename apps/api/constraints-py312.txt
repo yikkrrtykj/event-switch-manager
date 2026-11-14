@@ -1,0 +1,36 @@
+# Exact runtime and development versions for Python 3.12 on Windows and Linux.
+# Install the project with this constraint file, then run pip check.
+alembic==1.18.4
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.13.0
+ast-serialize==0.5.0
+click==8.4.1
+colorama==0.4.6
+fastapi==0.136.3
+greenlet==3.5.1
+h11==0.16.0
+httpcore2==2.16.0
+httpx2==2.16.0
+idna==3.18
+iniconfig==2.3.0
+librt==0.11.0
+mako==1.3.12
+markupsafe==3.0.3
+mypy==2.1.0
+mypy-extensions==1.1.0
+packaging==26.2
+pathspec==1.1.1
+platformdirs==4.10.0
+pluggy==1.6.0
+pydantic==2.13.4
+pydantic-core==2.46.4
+pygments==2.20.0
+pytest==9.0.3
+ruff==0.15.15
+sqlalchemy==2.0.50
+starlette==1.2.1
+truststore==0.10.5
+typing-extensions==4.15.0
+typing-inspection==0.4.2
+uvicorn==0.48.0
