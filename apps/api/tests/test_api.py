@@ -168,9 +168,13 @@ def test_migration_is_repeatable_and_enforces_foreign_keys(tmp_path: Path) -> No
     try:
         upgrade_database(engine)
         upgrade_database(engine)
-        assert set(inspect(engine).get_table_names()) == {"events", "devices", "alembic_version"}
+        assert set(inspect(engine).get_table_names()) == {
+            "events", "devices", "alembic_version", "physical_assets",
+            "assignment_identities", "event_plan_revisions",
+        }
         with engine.connect() as connection:
-            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            version = connection.scalar(text("SELECT version_num FROM alembic_version"))
+            assert version == "0002_event_plans"
             with pytest.raises(IntegrityError):
                 connection.execute(
                     text(

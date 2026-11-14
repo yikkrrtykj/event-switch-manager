@@ -28,3 +28,20 @@ Model ordinary destination lookup independently from SBR and PBR. Record VPN sel
 - Bind evidence to a revision, an assignment and the observed hardware/Stack snapshot. Approval evidence can reference the revision hash, artifact hash and operation. Historical links must survive later edits or chassis reuse.
 
 PR #2 delivers domain types, migration, validation, versioned exchange and tests using synthetic fixtures. CLI rendering, device writes, live discovery, hypervisor deployment and production configuration remain future milestones. See [Issue #2](https://github.com/yikkrrtykj/event-switch-manager/issues/2).
+
+## Planning API
+
+All routes are under `/api/v1/events/{event_id}`. The server keeps the existing event and device API.
+
+| Method and path | Result |
+| --- | --- |
+| GET `/plan/seed` | Create a plan in memory from Foundation inventory. Existing assignment UUIDs are preserved and hardware bindings start empty. |
+| POST `/plan/validate` | Return validation issues with paths and stable codes. Structural errors use the API's 422 response. |
+| POST `/plan-revisions` | Validate and append a schema version 1 plan. Submitting the same content returns its existing revision. |
+| GET `/plan-revisions` | List revision metadata in sequence order. |
+| GET `/plan-revisions/{revision_id}` | Read the revision and plan. |
+| GET `/plan-revisions/{revision_id}/export` | Export canonical JSON with the SHA-256 content hash as its ETag. |
+
+The document's event UUID must match the URL. Array order is canonicalized for set-like collections. SBR ISP priority retains its order. Revision rows are append-only. SQLite serializes revision imports and the chassis registry enforces verified vendor/serial identity across events.
+
+VPN validation checks longest-prefix preference, the selected route when the tunnel is active and the discard route after it goes down. Overlapping Core return summaries must be corrected before a plan can be imported. PBR and VPN NAT exemption reference the same tunnel and remote destination independently of ordinary VLAN ISP selection. These checks operate on the plan. Vendor capability and configuration syntax are handled in later milestones.
