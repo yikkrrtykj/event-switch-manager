@@ -6,6 +6,7 @@ from .addressing import Vlan
 from .inventory import LogicalInterface, PhysicalInterface, PortSettings
 from .validation import Validation
 
+MAX_HALF_DUPLEX_SPEED_MBPS = 1000
 STACK_PORT = re.compile(r"^[A-Za-z]+(\d+)/\d+/\d+(?:[:.]\d+)?$")
 
 
@@ -39,10 +40,10 @@ def check_port_intent(
         if aggregate:
             v.error(f"{path}.{field}", "port_physical_only",
                     "Apply media or power settings to physical interfaces")
-        elif field == "duplex" and half_speed > 1000:
+        elif field == "duplex" and half_speed > MAX_HALF_DUPLEX_SPEED_MBPS:
             v.error(f"{path}.duplex", "port_speed_duplex",
                     "Half duplex is incompatible with fixed speeds above 1000 Mbps")
-        elif field == "duplex" and half_speed == 1000:
+        elif field == "duplex" and half_speed == MAX_HALF_DUPLEX_SPEED_MBPS:
             v.warning(f"{path}.duplex", "port_gigabit_half_unverified",
                       "Verify 1000 Mbps half duplex on the exact interface and media")
         else:
@@ -67,20 +68,37 @@ def check_port_intent(
 
 
 def check_member_intent(
-    v: Validation, settings: PortSettings, members: list[PortSettings], path: str,
+    v: Validation, settings: PortSettings, members: list[tuple[int, PortSettings]], path: str,
 ) -> None:
-    for field in ("speed", "duplex"):
-        values = [getattr(member, field) for member in members]
-        fixed = {value for value in values if value is not None and value != "auto"}
+    # Auto and unset leave negotiation open. Fixed intent must share one speed/duplex pair.
+    fixed_speeds = {member.speed for _, member in members if isinstance(member.speed, int)}
+    fixed_duplexes = {member.duplex for _, member in members if member.duplex in ("full", "half")}
+    speed = next(iter(fixed_speeds)) if len(fixed_speeds) == 1 else None
+    joint_conflict = (
+        speed is not None and speed > MAX_HALF_DUPLEX_SPEED_MBPS and fixed_duplexes == {"half"}
+    )
+    for field, fixed in (("speed", fixed_speeds), ("duplex", fixed_duplexes)):
         if len(fixed) > 1:
-            v.error(f"{path}.member_ids", f"port_channel_{field}_conflict",
-                    f"Port-Channel members have conflicting fixed {field} settings")
-        elif fixed and any(value is None or value == "auto" for value in values):
+            for index, member in members:
+                if getattr(member, field) in fixed:
+                    v.error(f"physical_interfaces.{index}.settings.{field}",
+                            f"port_channel_{field}_conflict",
+                            f"Members of {path} have conflicting fixed {field} settings")
+        elif joint_conflict:
+            for index, member in members:
+                # A same-port contradiction already has an error from check_port_intent.
+                local_conflict = member.speed == speed and member.duplex == "half"
+                if getattr(member, field) in fixed and not local_conflict:
+                    v.error(f"physical_interfaces.{index}.settings.{field}",
+                            "port_channel_speed_duplex_conflict",
+                            f"Members of {path} cannot share {speed} Mbps and half duplex")
+        elif fixed and any(getattr(member, field) in (None, "auto") for _, member in members):
             v.warning(f"{path}.member_ids", f"port_channel_{field}_unverified",
                       f"Verify member {field} with both fixed and negotiated or default settings")
 
     for field in ("portfast", "bpdu_guard"):
-        stp_values = {getattr(record, field) for record in (settings, *members)}
+        stp_values = {getattr(member, field) for _, member in members}
+        stp_values.add(getattr(settings, field))
         stp_values.discard(None)
         if len(stp_values) > 1:
             v.error(f"{path}.settings.{field}", "port_channel_stp_conflict",
@@ -135,6 +153,7 @@ def check_inventory(v: Validation) -> None:
             v.require(chassis in devices and owner == stack.assignment_id,
                       f"{path}.members.{j}", "stack_chassis", "Invalid or already assigned chassis")
     ports = v.index("physical_interfaces", p.physical_interfaces, lambda x: x.id)
+    port_indices = {port.id: i for i, port in enumerate(p.physical_interfaces)}
     logical = v.index("logical_interfaces", p.logical_interfaces, lambda x: x.id)
     interfaces: tuple[PhysicalInterface | LogicalInterface, ...] = (
         *p.physical_interfaces, *p.logical_interfaces,
@@ -188,7 +207,7 @@ def check_inventory(v: Validation) -> None:
         check_port(v, channel.settings, f"{path}.settings", vlans)
         check_port_intent(v, channel.settings, f"{path}.settings", aggregate=True)
         v.require(channel.member_ids, f"{path}.member_ids", "empty", "Port-Channel needs members")
-        members_settings: list[PortSettings] = []
+        member_settings: list[tuple[int, PortSettings]] = []
         for j, port_id in enumerate(channel.member_ids):
             member_port = ports.get(port_id)
             v.require(member_port and aggregate
@@ -205,8 +224,8 @@ def check_inventory(v: Validation) -> None:
                       "Physical port may join only one aggregate")
             member_owner.add(port_id)
             if member_port and aggregate and member_port.assignment_id == aggregate.assignment_id:
-                members_settings.append(member_port.settings)
-        check_member_intent(v, channel.settings, members_settings, path)
+                member_settings.append((port_indices[port_id], member_port.settings))
+        check_member_intent(v, channel.settings, member_settings, path)
     for i, interface in enumerate(p.logical_interfaces):
         if interface.kind == "port-channel":
             v.require(interface.id in channels, f"logical_interfaces.{i}", "port_channel_interface",

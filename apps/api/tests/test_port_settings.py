@@ -1,13 +1,17 @@
 import json
+from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlalchemy import text
 from test_event_plans import API, ORIGIN, plan_model, synthetic_plan, uid
 
 from event_switch_manager.app import create_app
+from event_switch_manager.database import create_database_engine
 from event_switch_manager.planning.checks import validate_plan
 from event_switch_manager.planning.inventory import PortSettings
 from event_switch_manager.planning.plan import EventPlan, canonical_plan, plan_hash
@@ -166,8 +170,14 @@ def test_stack_channel_members_report_conflicting_or_unverified_intent(
     for value, member_index in zip(values, (2, 3), strict=True):
         raw["physical_interfaces"][member_index]["settings"][name] = value
     issues = validate_plan(EventPlan.model_validate(raw))
-    assert any(issue.path.startswith("port_channels.0.") and issue.code == code
-               and issue.severity == severity for issue in issues)
+    if code in ("port_channel_speed_conflict", "port_channel_duplex_conflict"):
+        expected_paths = {f"physical_interfaces.{index}.settings.{name}" for index in (2, 3)}
+    elif code == "port_channel_stp_conflict":
+        expected_paths = {f"port_channels.0.settings.{name}"}
+    else:
+        expected_paths = {"port_channels.0.member_ids"}
+    assert {issue.path for issue in issues if issue.code == code
+            and issue.severity == severity} == expected_paths
     if severity == "WARNING":
         assert not any(issue.severity == "ERROR" for issue in issues)
 
@@ -268,3 +278,239 @@ def test_port_intent_api_preserves_revisions_and_isolates_shared_chassis(tmp_pat
                    for issue in findings.json())
         assert client.post(url, json=raw).status_code == 422
         assert len(client.get(url).json()) == 2
+
+
+@pytest.mark.parametrize(("intents", "expected_errors", "expected_warnings"), [
+    pytest.param(
+        ({"speed": 10000}, {"duplex": "half"}),
+        {(2, "speed", "port_channel_speed_duplex_conflict"),
+         (3, "duplex", "port_channel_speed_duplex_conflict")},
+        set(), id="cross-stack-10g-half",
+    ),
+    pytest.param(
+        ({"duplex": "half"}, {"speed": "auto", "duplex": "auto"}, {"speed": 2500}),
+        {(2, "duplex", "port_channel_speed_duplex_conflict"),
+         (6, "speed", "port_channel_speed_duplex_conflict")},
+        set(), id="three-members-reversed-constraints",
+    ),
+    pytest.param(
+        ({"speed": 10000, "duplex": "half"}, {}),
+        {(2, "duplex", "port_speed_duplex")}, set(), id="same-member-10g-half",
+    ),
+    pytest.param(
+        ({"speed": 10000, "duplex": "full"}, {"speed": 10000, "duplex": "full"}),
+        set(), {"port_setting_unverified"}, id="both-10g-full",
+    ),
+    pytest.param(
+        ({"speed": 10000, "duplex": "full"}, {"speed": "auto", "duplex": "auto"}),
+        set(), {"port_channel_speed_unverified", "port_channel_duplex_unverified"},
+        id="fixed-and-auto",
+    ),
+    pytest.param(
+        ({"speed": 10000, "duplex": "full"}, {}, {"duplex": "auto"}),
+        set(), {"port_channel_speed_unverified", "port_channel_duplex_unverified"},
+        id="three-members-with-unset-and-auto",
+    ),
+    pytest.param(
+        ({"speed": 1000}, {"duplex": "half"}),
+        set(), {"port_channel_speed_unverified", "port_channel_duplex_unverified"},
+        id="gigabit-half-needs-evidence",
+    ),
+    pytest.param(
+        ({"speed": 100, "duplex": "half"}, {"speed": 100, "duplex": "half"}, {}),
+        set(), {"port_channel_speed_unverified", "port_channel_duplex_unverified"},
+        id="common-fast-ethernet-half",
+    ),
+])
+def test_stack_channel_members_need_a_common_speed_and_duplex(
+    intents: tuple[dict[str, object], ...],
+    expected_errors: set[tuple[int, str, str]],
+    expected_warnings: set[str],
+) -> None:
+    raw = fixture_plan(uid(99))
+    ports = raw["physical_interfaces"]
+    if len(intents) == 3:
+        ports.append({
+            **ports[3], "id": uid(80), "name": "Gi2/0/20", "settings": dict(ports[3]["settings"]),
+        })
+        raw["port_channels"][0]["member_ids"].append(uid(80))
+    for index, intent in zip((2, 3, 6)[:len(intents)], intents, strict=True):
+        ports[index]["settings"].update(intent)
+
+    # An independent port can use a different feasible combination.
+    ports.append({
+        **ports[2], "id": uid(81), "name": "Gi1/0/21",
+        "settings": {"mode": "access", "access_vlan": 20, "speed": 100, "duplex": "half"},
+    })
+    issues = validate_plan(EventPlan.model_validate(raw))
+    assert {(issue.path, issue.code) for issue in issues if issue.severity == "ERROR"} == {
+        (f"physical_interfaces.{index}.settings.{field}", code)
+        for index, field, code in expected_errors
+    }
+    assert {issue.code for issue in issues if issue.severity == "WARNING"} >= expected_warnings
+    if expected_errors:
+        assert not any(issue.code in {
+            "port_channel_speed_unverified", "port_channel_duplex_unverified",
+        } for issue in issues)
+
+
+@pytest.mark.parametrize(("core", "hillstone", "down_indices"), [
+    pytest.param({"admin_state": "down"}, {}, (0,), id="core-down"),
+    pytest.param({}, {"admin_state": "down"}, (1,), id="hillstone-down"),
+    pytest.param({"admin_state": "down"}, {"admin_state": "down"}, (0, 1), id="both-down"),
+    pytest.param({"admin_state": "up"}, {"admin_state": "up"}, (), id="both-up"),
+    pytest.param({}, {}, (), id="implicit-default"),
+    pytest.param({"admin_state": None}, {"admin_state": None}, (), id="explicit-null"),
+])
+def test_transit_shutdown_is_reported_at_each_referenced_endpoint(
+    core: dict[str, str | None], hillstone: dict[str, str | None], down_indices: tuple[int, ...],
+) -> None:
+    raw = fixture_plan(uid(99))
+    ports = raw["physical_interfaces"]
+    ports[0]["settings"].update(core)
+    ports[1]["settings"].update(hillstone)
+    ports.append({
+        **ports[0], "id": uid(80), "name": "Gi1/0/20",
+        "settings": {"mode": "access", "access_vlan": 20, "admin_state": "down"},
+    })
+    errors = [issue for issue in validate_plan(EventPlan.model_validate(raw))
+              if issue.severity == "ERROR"]
+    assert [(issue.path, issue.code) for issue in errors] == [
+        (f"physical_interfaces.{index}.settings.admin_state", "transit_port_shutdown")
+        for index in down_indices
+    ]
+    for issue, index in zip(errors, down_indices, strict=True):
+        side = ("core_port_id", "hillstone_port_id")[index]
+        assert f"transit.{side}" in issue.message
+
+
+def test_plan_without_transit_can_shut_down_an_independent_port() -> None:
+    fixture = fixture_plan(uid(99))
+    port = fixture["physical_interfaces"][1]
+    port["settings"]["admin_state"] = "down"
+    raw = {
+        "schema_version": 1, "event_id": uid(99), "physical_interfaces": [port],
+        "physical_devices": [fixture["physical_devices"][2]],
+        "assignments": [fixture["assignments"][1]],
+        "vlans": fixture["vlans"],
+    }
+    issues = validate_plan(EventPlan.model_validate(raw))
+    assert not any(issue.severity == "ERROR" for issue in issues)
+
+
+def test_transit_shutdown_keeps_vlan_link_and_route_diagnostics() -> None:
+    raw = fixture_plan(uid(99))
+    raw["physical_interfaces"][0]["settings"].update(admin_state="down", access_vlan=20)
+    raw["default_routes"].clear()
+    raw["static_routes"].pop(0)
+    raw["links"].clear()
+    issues = validate_plan(EventPlan.model_validate(raw))
+    assert {issue.code for issue in issues if issue.severity == "ERROR"} >= {
+        "transit_port_shutdown", "transit_port", "transit_link", "core_default", "return_route",
+    }
+
+
+SafetyCase = Literal["channel", "transit"]
+
+
+def unsafe_plan(event_id: str, case: SafetyCase) -> tuple[dict[str, Any], str, set[str]]:
+    raw = fixture_plan(event_id)
+    ports = raw["physical_interfaces"]
+    if case == "channel":
+        ports[2]["settings"]["speed"] = 10000
+        ports[3]["settings"]["duplex"] = "half"
+        return raw, "port_channel_speed_duplex_conflict", {
+            "physical_interfaces.2.settings.speed", "physical_interfaces.3.settings.duplex",
+        }
+    ports[0]["settings"]["admin_state"] = "down"
+    return raw, "transit_port_shutdown", {"physical_interfaces.0.settings.admin_state"}
+
+
+@pytest.mark.parametrize("case", ["channel", "transit"])
+def test_unsafe_port_configuration_is_rejected_by_plan_api(
+    tmp_path: Path, case: SafetyCase,
+) -> None:
+    app = create_app(Settings(database_path=tmp_path / "unsafe-port.sqlite3"))
+    with TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
+        event_id = client.post(f"{API}/events", json={"name": "Unsafe port plan"}).json()["id"]
+        event_url = f"{API}/events/{event_id}"
+        revisions_url = f"{event_url}/plan-revisions"
+        raw, code, paths = unsafe_plan(event_id, case)
+        findings = client.post(f"{event_url}/plan/validate", json=raw)
+        assert findings.status_code == 200
+        assert {(issue["code"], issue["path"]) for issue in findings.json()
+                if issue["severity"] == "ERROR"} == {(code, path) for path in paths}
+        assert any(issue["severity"] == "WARNING" for issue in findings.json())
+
+        rejected = client.post(revisions_url, json=raw)
+        assert rejected.status_code == 422
+        assert rejected.json()["detail"] == findings.json()
+        assert client.get(revisions_url).json() == []
+
+
+@pytest.mark.parametrize("case", ["channel", "transit"])
+def test_pre_fix_unsafe_port_revisions_keep_identity_and_become_invalid(
+    tmp_path: Path, case: SafetyCase,
+) -> None:
+    event_id, revision_id = uid(99), uid(98)
+    raw, code, _ = unsafe_plan(event_id, case)
+    expected_paths = {
+        "channel": {
+            "physical_interfaces.1.settings.speed", "physical_interfaces.2.settings.duplex",
+        },
+        "transit": {"physical_interfaces.0.settings.admin_state"},
+    }
+    old_content = canonical_plan(EventPlan.model_validate(raw))
+    old_hash = sha256(old_content.encode("utf-8")).hexdigest()
+    settings = Settings(database_path=tmp_path / "old-port-plan.sqlite3")
+    with TestClient(create_app(settings), base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
+        # Store the revision as the pre-fix build did, bypassing the current import check.
+        engine = create_database_engine(settings.database_path)
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(
+                    "INSERT INTO events (id, name, management_vlan) VALUES (:id, 'Legacy', 10)"
+                ), {"id": UUID(event_id).hex})
+                connection.execute(text(
+                    "INSERT INTO event_plan_revisions "
+                    "(id, event_id, number, schema_version, created_at, content_hash, "
+                    "canonical_json) "
+                    "VALUES (:id, :event, 1, 1, '2026-11-15 00:00:00', :hash, :content)"
+                ), {"id": UUID(revision_id).hex, "event": UUID(event_id).hex,
+                    "hash": old_hash, "content": old_content})
+        finally:
+            engine.dispose()
+
+        url = f"{API}/events/{event_id}/plan-revisions"
+        detail = client.get(f"{url}/{revision_id}")
+        assert detail.status_code == 200
+        legacy = detail.json()
+        assert (legacy["id"], legacy["content_hash"], legacy["schema_version"]) == (
+            revision_id, old_hash, 1,
+        )
+        assert legacy["validation_status"] == "INVALID"
+        assert {(issue["code"], issue["path"], issue["severity"])
+                for issue in legacy["validation_errors"]} == {
+            (code, path, "ERROR") for path in expected_paths[case]
+        }
+
+        export_url = f"{url}/{revision_id}/export"
+        exported = client.get(export_url)
+        assert exported.status_code == 200
+        assert exported.content == old_content.encode("utf-8")
+        assert exported.headers["etag"] == f'"{old_hash}"'
+
+        repeated = client.post(url, json=exported.json())
+        assert repeated.status_code == 200
+        assert repeated.json() == legacy
+        edited = exported.json()
+        edited["vlans"][2]["name"] = "Modified players"
+        rejected = client.post(url, json=edited)
+        assert rejected.status_code == 422
+        assert [issue for issue in rejected.json()["detail"] if issue["severity"] == "ERROR"] == (
+            legacy["validation_errors"]
+        )
+        assert [revision["id"] for revision in client.get(url).json()] == [revision_id]
+        unchanged = client.get(export_url)
+        assert unchanged.content == exported.content
+        assert unchanged.headers["etag"] == exported.headers["etag"]

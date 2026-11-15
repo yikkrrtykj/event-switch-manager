@@ -24,15 +24,20 @@ evaluate exact SKU, port medium, software and license evidence.
 ## Validation and compatibility
 
 All legacy interface, VLAN, Stack and Port-Channel checks still apply. Physical media
-settings and PoE belong to member interfaces. Explicit conflicting fixed speeds or
-duplexes within an aggregate produce errors. Fixed members mixed with automatic or default
-members produce warnings. Where spanning-tree intent is specified in more than one place
+settings and PoE belong to member interfaces. All members of an aggregate must be able to
+share one speed and duplex combination. Conflicting fixed speeds or duplexes, or a fixed
+speed above 1000 Mbps paired with explicit half duplex on any member, produce field errors.
+Compatible fixed settings mixed with automatic or default settings produce warnings.
+Where spanning-tree intent is specified in more than one place
 in a group, explicit settings must agree. Descriptions, member administrative state and
 PoE intent remain local to their respective interfaces.
 
 Explicit spanning-tree settings require Layer 2 mode. Half duplex with a fixed speed
-above 1000 Mbps is rejected. For a 1000 Mbps half-duplex plan, verify the exact port and medium. The references document
-specific platform behavior and model differences.
+above 1000 Mbps is rejected on individual ports as well. For a 1000 Mbps half-duplex plan,
+verify the exact port and medium. Explicitly shutting down either referenced physical
+endpoint of Core–Hillstone Transit is an error. An unspecified or explicitly enabled
+administrative state leaves the operational link state unverified. The references
+document specific platform behavior and model differences.
 [Catalyst interface guide](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-17/configuration_guide/int_hw/b_1717_int_and_hw_9300_cg.pdf) ·
 [Power over Ethernet](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-13/configuration_guide/int_hw/b_1713_int_and_hw_9300_cg/configuring_poe.html) ·
 [Spanning-tree features](https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-17/configuration_guide/lyr2/b_1717_lyr2_9300_cg/configuring_optional_spanning_tree_features.html) ·

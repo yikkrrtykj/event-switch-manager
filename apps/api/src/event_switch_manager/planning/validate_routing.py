@@ -46,6 +46,11 @@ def check_transit(v: Validation) -> None:
                   and port.settings.access_vlan == transit.vlan, f"transit.{field}", "transit_port",
                   "Transit ports must be access ports on their designated assignments and VLAN")
     endpoints = {transit.core_port_id, transit.hillstone_port_id}
+    for i, port in enumerate(p.physical_interfaces):
+        if port.id in endpoints and port.settings.admin_state == "down":
+            field = "core_port_id" if port.id == transit.core_port_id else "hillstone_port_id"
+            v.error(f"physical_interfaces.{i}.settings.admin_state", "transit_port_shutdown",
+                    f"Core–Hillstone Transit requires an enabled port at transit.{field}")
     v.require(any(set(link.endpoints) == endpoints for link in p.links), "transit",
               "transit_link", "Add a topology link between the transit ports")
     svi = svis.get(transit.core_svi_id)
