@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { expect, test } from '@playwright/test'
 import type { APIRequestContext, Page } from '@playwright/test'
-import type { Plan, Revision, Summary } from '../src/planner/model'
+import type { Plan, RecordValue, Revision, Summary } from '../src/planner/model'
 
 const api = '/api/v1/events'
 const headers = { Origin: 'http://127.0.0.1:8765' }
@@ -155,7 +155,17 @@ test('reads an INVALID historical revision without offering a direct save', asyn
     physical_devices: [{ id: chassis, vendor: 'cisco' }] })
   await planRecord(request, { event_id: second, schema_version: 1, management_vlan: 10,
     physical_devices: [{ id: chassis, vendor: 'hillstone', verified_serial: 'SYN-PLANNER-FW' }] })
+  const exported = await request.get(revisions(first) + '/' + legacy.id + '/export')
+  const bytes = await exported.body()
+  const tag = exported.headers().etag
+  expect(createHash('sha256').update(bytes).digest('hex')).toBe(legacy.content_hash)
+  expect(tag).toBe('"' + legacy.content_hash + '"')
+  const exact = await request.post(revisions(first), { headers, data: JSON.parse(bytes.toString('utf8')) })
+  expect(exact.status()).toBe(200)
+  expect(await exact.json()).toMatchObject({ id: legacy.id, validation_status: 'INVALID' })
+
   await openWorkspace(page, first, 'devices')
+  await expect(page.getByText('Read-only revision', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Revision history' }).click()
   await page.getByRole('button', { name: 'Open revision 1' }).click()
   await expect(page.getByText('Read-only revision', { exact: true })).toBeVisible()
@@ -165,7 +175,24 @@ test('reads an INVALID historical revision without offering a direct save', asyn
   await page.getByText('Revision 1', { exact: true }).click()
   await expect(page.getByText(legacy.content_hash, { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Copy to draft' }).click()
+  await expect(page.getByText('NOT VALIDATED', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Save revision' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Validate plan' }).click()
+  await expect(page.getByText('INVALID', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Save revision' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Edit chassis cisco' }).click()
+  await page.getByLabel('Vendor', { exact: true }).selectOption('hillstone')
+  await page.getByRole('button', { name: 'Apply to draft' }).click()
+  await expect(page.getByRole('button', { name: 'Save revision' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Validate plan' }).click()
+  await expect(page.getByText('VALID_WITH_WARNINGS', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Save revision' }).click()
+  await expect(page.getByText('Revision 2 saved.')).toBeVisible()
+  const original = await request.get(revisions(first) + '/' + legacy.id)
+  expect(await original.json()).toMatchObject({ id: legacy.id, number: 1, content_hash: legacy.content_hash })
+  const unchanged = await request.get(revisions(first) + '/' + legacy.id + '/export')
+  expect(await unchanged.body()).toEqual(bytes)
+  expect(unchanged.headers().etag).toBe(tag)
 })
 
 test('captures responsive workbench views and keyboard, contrast, motion and data states', async ({ page, request }, info) => {
@@ -232,4 +259,351 @@ test('captures responsive workbench views and keyboard, contrast, motion and dat
   await openWorkspace(page, empty)
   await expect(page.getByText('No records yet.').first()).toBeVisible()
   await page.screenshot({ path: info.outputPath('empty-1440.png'), fullPage: true })
+})
+
+
+function portsOf(plan: Plan) {
+  return plan.physical_interfaces as RecordValue[]
+}
+
+test('resets port selections on filters, event and revision changes and saves only confirmed targets', async ({ page, request }) => {
+  const id = await createEvent(request, 'Synthetic selection scope')
+  const other = await createEvent(request, 'Synthetic separate port scope')
+  const plan = stackPlan(id)
+  const external = randomUUID()
+  const chassis = randomUUID()
+  plan.physical_devices = [...plan.physical_devices as RecordValue[], { id: chassis, vendor: 'cisco' }]
+  plan.assignments = [...plan.assignments as RecordValue[], {
+    id: external, hostname: 'Synthetic-Access', role: 'access', physical_device_id: chassis,
+  }]
+  plan.vlans = [...plan.vlans as RecordValue[], { id: 30, name: 'Observers' }]
+  const firstPort = portsOf(plan)[0]!
+  plan.physical_interfaces = [
+    { ...firstPort, settings: { mode: 'trunk', native_vlan: 10, allowed_vlans: [10, 20] } },
+    portsOf(plan)[1]!,
+    { ...firstPort, id: randomUUID(), name: 'Gi1/0/9' },
+    {
+      id: randomUUID(), assignment_id: external, physical_device_id: chassis, name: 'Gi0/1',
+      settings: { mode: 'trunk', native_vlan: 20, allowed_vlans: [10, 20] },
+    },
+  ]
+  const baseline = await planRecord(request, plan)
+  await planRecord(request, { ...plan, vlans: (plan.vlans as RecordValue[]).map((vlan) =>
+    vlan.id === 20 ? { ...vlan, name: 'Players next' } : vlan) })
+  await planRecord(request, stackPlan(other))
+
+  await openWorkspace(page, id, 'ports')
+  const member = page.getByLabel('Filter ports by Stack member')
+  const device = page.getByLabel('Filter ports by device')
+  const search = page.getByRole('searchbox', { name: 'Search Physical ports' })
+  const port = (name: string) => page.getByRole('checkbox', { name: 'Select port ' + name, exact: true })
+  const cleared = () => expect(page.getByRole('button', { name: 'Batch edit (0)' })).toBeDisabled()
+
+  await member.selectOption('1')
+  await port('Gi1/0/7').check()
+  await member.selectOption('2')
+  await cleared()
+  await expect(port('Gi2/0/7')).not.toBeChecked()
+  await member.selectOption('')
+  await expect(port('Gi1/0/7')).not.toBeChecked()
+
+  await port('Gi1/0/7').check()
+  await device.selectOption(external)
+  await cleared()
+  await expect(port('Gi0/1')).not.toBeChecked()
+  await device.selectOption('')
+  await port('Gi2/0/7').check()
+  await search.fill('Gi0/1')
+  await cleared()
+  await search.fill('')
+  await expect(port('Gi2/0/7')).not.toBeChecked()
+
+  await port('Gi1/0/7').check()
+  await page.getByLabel('Event', { exact: true }).selectOption(other)
+  await expect(port('Gi1/0/7')).toBeVisible()
+  await cleared()
+  await page.getByLabel('Event', { exact: true }).selectOption(id)
+  await port('Gi1/0/7').check()
+  await page.getByRole('button', { name: 'Revision history' }).click()
+  await page.getByRole('button', { name: 'Open revision 1' }).click()
+  await expect(page.getByText('Read-only revision', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Copy to draft' }).click()
+  await cleared()
+  await expect(port('Gi1/0/7')).not.toBeChecked()
+
+  await port('Gi1/0/7').check()
+  await port('Gi0/1').check()
+  await page.getByRole('button', { name: 'Batch edit (2)' }).click()
+  const targets = page.getByRole('table', { name: 'Target ports' })
+  await expect(targets.getByRole('row', { name: /Synthetic-Core Stack member 1 Gi1\/0\/7/ })).toBeVisible()
+  await expect(targets.getByRole('row', { name: /Synthetic-Access Standalone Gi0\/1/ })).toBeVisible()
+  await expect(targets.getByText('Gi2/0/7', { exact: true })).toHaveCount(0)
+  await page.getByLabel('Mode', { exact: true }).selectOption('trunk')
+  for (const [index, vlan] of ['10', '20', '30'].entries()) {
+    await page.getByRole('button', { name: 'Add entry', exact: true }).click()
+    await page.getByRole('combobox', { name: 'Allowed VLANs ' + (index + 1), exact: true }).selectOption(vlan)
+  }
+  await page.getByRole('button', { name: 'Apply to 2 ports' }).click()
+  await cleared()
+  await expect(page.getByRole('button', { name: 'Save revision' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Validate plan' }).click()
+  await expect(page.getByText('VALID_WITH_WARNINGS', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Save revision' }).click()
+  await expect(page.getByText('Revision 3 saved.')).toBeVisible()
+
+  const history = await (await request.get(revisions(id))).json() as Summary[]
+  const latest = await (await request.get(revisions(id) + '/' + history.at(-1)!.id)).json() as Revision
+  const originals = portsOf(baseline.plan)
+  expect(portsOf(latest.plan)).toHaveLength(originals.length)
+  const edited = new Set(['Gi1/0/7', 'Gi0/1'])
+  for (const original of originals) {
+    const saved = portsOf(latest.plan).find((item) => item.id === original.id)
+    expect(saved).toEqual(edited.has(String(original.name)) ? {
+      ...original, settings: { ...original.settings as RecordValue, allowed_vlans: [10, 20, 30] },
+    } : original)
+  }
+  expect((await (await request.get(revisions(other))).json() as Summary[])).toHaveLength(1)
+})
+
+
+async function holdResponse(page: Page, url: string) {
+  let captured!: () => void
+  let resume!: () => void
+  let done!: () => void
+  const arrived = new Promise<void>((resolve) => { captured = resolve })
+  const hold = new Promise<void>((resolve) => { resume = resolve })
+  const completed = new Promise<void>((resolve) => { done = resolve })
+  await page.route(url, async (route) => {
+    try {
+      const response = await route.fetch()
+      captured()
+      await hold
+      await route.fulfill({ response })
+    } catch {
+      // The browser can cancel the intercepted request when the operation is abandoned.
+    } finally { done() }
+  }, { times: 1 })
+  return { arrived, release: async () => { resume(); await completed } }
+}
+
+test('a dismissed revision read cannot replace the next revision', async ({ page, request }) => {
+  const id = await createEvent(request, 'Synthetic revision race')
+  const first = await planRecord(request, {
+    event_id: id, schema_version: 1, management_vlan: 10, vlans: [{ id: 10, name: 'Older VLAN' }],
+  })
+  await planRecord(request, {
+    ...first.plan, vlans: [{ id: 10, name: 'Current VLAN' }],
+  })
+  await openWorkspace(page, id)
+  const older = await holdResponse(page, '**' + revisions(id) + '/' + first.id)
+  try {
+    await page.getByRole('button', { name: 'Revision history' }).click()
+    await page.getByRole('button', { name: 'Open revision 1' }).click()
+    await older.arrived
+    await page.keyboard.press('Escape')
+    await page.getByRole('button', { name: 'Revision history' }).click()
+    await page.getByRole('button', { name: 'Open revision 2' }).click()
+    await expect(page.getByText('Read-only revision', { exact: true })).toBeVisible()
+  } finally { await older.release() }
+  await expect(page.getByRole('cell', { name: 'Current VLAN', exact: true })).toBeVisible()
+  await expect(page.getByText('Older VLAN', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Revision 2', { exact: true })).toBeVisible()
+})
+
+test('switching events during pre-save validation abandons the pending save', async ({ page, request }) => {
+  const first = await createEvent(request, 'Synthetic pending save')
+  const second = await createEvent(request, 'Synthetic destination event')
+  await planRecord(request, {
+    event_id: first, schema_version: 1, management_vlan: 10, vlans: [{ id: 10, name: 'Old event VLAN' }],
+  })
+  await planRecord(request, {
+    event_id: second, schema_version: 1, management_vlan: 10, vlans: [{ id: 10, name: 'New event VLAN' }],
+  })
+  await openWorkspace(page, first)
+  await page.getByRole('button', { name: 'Edit VLAN 10' }).click()
+  await page.getByLabel('Name', { exact: true }).fill('Abandoned draft VLAN')
+  await page.getByRole('button', { name: 'Apply to draft' }).click()
+  const check = await holdResponse(page, '**' + api + '/' + first + '/plan/validate')
+  const sent: string[] = []
+  page.on('request', (req) => {
+    if (req.method() === 'POST' && new URL(req.url()).pathname === revisions(first)) sent.push(req.url())
+  })
+  try {
+    await page.getByRole('button', { name: 'Save revision' }).click()
+    await check.arrived
+    page.once('dialog', (dialog) => dialog.accept())
+    await page.getByLabel('Event', { exact: true }).selectOption(second)
+    await expect(page.getByRole('cell', { name: 'New event VLAN', exact: true })).toBeVisible()
+  } finally { await check.release() }
+  await expect(page.getByRole('cell', { name: 'New event VLAN', exact: true })).toBeVisible()
+  await expect(page.getByText('Abandoned draft VLAN', { exact: true })).toHaveCount(0)
+  expect(sent).toEqual([])
+  expect(await (await request.get(revisions(first))).json()).toHaveLength(1)
+  expect(await (await request.get(revisions(second))).json()).toHaveLength(1)
+})
+
+function auditPlan(eventId: string): Plan {
+  const [core1, core2, fw, core, firewall, coreTransit, fwTransit, member1, member2,
+    primaryWan, secondaryWan, transitSvi, mgmtSvi, aggregate, link, subnet, pool, reservation,
+    uplinkTrack, backupTrack, tunnelTrack, primary, backup, tunnel, returnRoute,
+    vpnRoute, drop, defaultRoute, sbr, pbr, snat1, snat2, exempt] = Array.from({ length: 33 }, () => randomUUID()) as string[]
+  const access = { mode: 'access', access_vlan: 9 }
+  const trunk = { mode: 'trunk', native_vlan: 10, allowed_vlans: [10, 20] }
+  const id = (value: string | undefined) => value!
+  return {
+    event_id: eventId, schema_version: 1, management_vlan: 10,
+    physical_devices: [{ id: id(core1), vendor: 'cisco' }, { id: id(core2), vendor: 'cisco' }, { id: id(fw), vendor: 'hillstone' }],
+    assignments: [
+      { id: id(core), hostname: 'Audit-Core', role: 'core', physical_device_id: id(core1),
+        software: { image: 'SYN-17.12', license: 'SYN-ADV', capabilities: [] } },
+      { id: id(firewall), hostname: 'Audit-FW', role: 'access', physical_device_id: id(fw) },
+    ],
+    stacks: [{ assignment_id: id(core), members: [{ number: 1, physical_device_id: id(core1) },
+      { number: 2, physical_device_id: id(core2) }] }],
+    physical_interfaces: [
+      { id: id(coreTransit), assignment_id: id(core), physical_device_id: id(core1), name: 'Gi1/0/1', stack_member: 1, settings: access },
+      { id: id(fwTransit), assignment_id: id(firewall), physical_device_id: id(fw), name: 'ethernet0/0', settings: access },
+      { id: id(member1), assignment_id: id(core), physical_device_id: id(core1), name: 'Gi1/0/2', stack_member: 1, settings: trunk },
+      { id: id(member2), assignment_id: id(core), physical_device_id: id(core2), name: 'Gi2/0/2', stack_member: 2, settings: trunk },
+      { id: id(primaryWan), assignment_id: id(firewall), physical_device_id: id(fw), name: 'ethernet0/1', settings: { mode: 'routed', address: '192.0.2.2/30' } },
+      { id: id(secondaryWan), assignment_id: id(firewall), physical_device_id: id(fw), name: 'ethernet0/2', settings: { mode: 'routed', address: '198.51.100.2/30' } },
+    ],
+    logical_interfaces: [
+      { id: id(transitSvi), assignment_id: id(core), name: 'Vlan9', kind: 'svi', vlan: 9, address: '10.0.0.1/30' },
+      { id: id(mgmtSvi), assignment_id: id(core), name: 'Vlan10', kind: 'svi', vlan: 10, address: '192.168.10.1/24' },
+      { id: id(aggregate), assignment_id: id(core), name: 'Port-channel1', kind: 'port-channel' },
+    ],
+    port_channels: [{ interface_id: id(aggregate), number: 1, member_ids: [id(member1), id(member2)], settings: trunk }],
+    links: [{ id: id(link), endpoints: [id(coreTransit), id(fwTransit)] }],
+    vlans: [{ id: 9, name: 'Transit', purpose: 'transit' }, { id: 10, name: 'Management', purpose: 'management' }, { id: 20, name: 'Players' }],
+    subnets: [{ id: id(subnet), vlan: 10, network: '192.168.10.0/24' }],
+    gateways: [{ subnet_id: id(subnet), address: '192.168.10.1', svi_id: id(mgmtSvi) }],
+    dhcp_pools: [{ id: id(pool), subnet_id: id(subnet), start: '192.168.10.20', end: '192.168.10.40' }],
+    dhcp_reservations: [{ id: id(reservation), subnet_id: id(subnet), address: '192.168.10.10', client_mac: '02:00:00:00:00:01' }],
+    dhcp_relays: [{ subnet_id: id(subnet), svi_id: id(mgmtSvi), servers: ['192.168.10.5'] }],
+    transit: { core_assignment_id: id(core), hillstone_assignment_id: id(firewall), core_port_id: id(coreTransit),
+      hillstone_port_id: id(fwTransit), core_svi_id: id(transitSvi), network: '10.0.0.0/30', core_ip: '10.0.0.1', hillstone_ip: '10.0.0.2' },
+    tracks: [{ id: id(uplinkTrack), target: '192.0.2.1' }, { id: id(backupTrack), target: '198.51.100.1' },
+      { id: id(tunnelTrack), target: '10.0.1.2', tunnel_id: id(tunnel) }],
+    isps: [
+      { id: id(primary), name: 'Primary', assignment_id: id(firewall), interface_id: id(primaryWan), address: '192.0.2.2/30', gateway: '192.0.2.1',
+        track_id: id(uplinkTrack), routed_public_blocks: [{ network: '203.0.113.8/29', reason: 'Synthetic routed block' }] },
+      { id: id(backup), name: 'Secondary', assignment_id: id(firewall), interface_id: id(secondaryWan), address: '198.51.100.2/30',
+        gateway: '198.51.100.1', track_id: id(backupTrack) },
+    ],
+    ipsec_tunnels: [{ id: id(tunnel), name: 'Audit VPN', assignment_id: id(firewall), isp_id: id(primary),
+      peer: '203.0.113.2', inside: '10.0.1.1/30', remote_gateway: '10.0.1.2', track_id: id(tunnelTrack) }],
+    vpn_remote_prefixes: [{ tunnel_id: id(tunnel), network: '172.16.20.0/24' }],
+    static_routes: [
+      { id: id(returnRoute), assignment_id: id(firewall), destination: '192.168.0.0/16', next_hop: { kind: 'ip', address: '10.0.0.1' } },
+      { id: id(vpnRoute), assignment_id: id(firewall), destination: '172.16.20.0/24', next_hop: { kind: 'tunnel', tunnel_id: id(tunnel) },
+        activation: { kind: 'track', track_id: id(tunnelTrack), state: 'up' } },
+      { id: id(drop), assignment_id: id(firewall), destination: '172.16.20.0/24', next_hop: { kind: 'discard' }, preference: 200, activation: { kind: 'always' } },
+    ],
+    default_routes: [{ id: id(defaultRoute), assignment_id: id(core), next_hop: { kind: 'ip', address: '10.0.0.2' } }],
+    source_routes: [{ id: id(sbr), assignment_id: id(firewall), source_vlan: 20, isp_priority: [id(primary), id(backup)] }],
+    policy_routes: [{ id: id(pbr), assignment_id: id(firewall), source_vlan: 20, destination: '172.16.20.0/24', tunnel_id: id(tunnel) }],
+    snat: [
+      { id: id(snat1), assignment_id: id(firewall), source_vlan: 20, isp_id: id(primary), translated_ip: '192.0.2.2' },
+      { id: id(snat2), assignment_id: id(firewall), source_vlan: 20, isp_id: id(backup), translated_ip: '198.51.100.2' },
+    ],
+    nat_exemptions: [{ id: id(exempt), assignment_id: id(firewall), source_vlan: 20, destination: '172.16.20.0/24', tunnel_id: id(tunnel) }],
+  }
+}
+
+test('saves a consistent network through the planner forms and preserves untouched plan data', async ({ page, request }) => {
+  test.setTimeout(60_000)
+  const id = await createEvent(request, 'Synthetic plan editor round trip')
+  const original = await planRecord(request, auditPlan(id))
+  await openWorkspace(page, id, 'planner/dhcp')
+  const apply = () => page.getByRole('button', { name: 'Apply to draft' }).click()
+  const edit = (name: string | RegExp) => page.getByRole('button', { name }).click()
+  const records = (plan: Plan, key: string) => plan[key] as RecordValue[]
+
+  await edit(/^Edit pool/)
+  await page.getByLabel('Lease seconds', { exact: true }).fill('7200')
+  await apply()
+  await edit(/^Edit relay/)
+  await page.getByLabel('Relay server addresses (JSON array)', { exact: true }).fill('["192.168.10.6","192.168.10.7"]')
+  await apply()
+
+  await page.getByRole('link', { name: 'Transit', exact: true }).click()
+  await edit('Edit transit 9 — Transit')
+  const coreSvi = page.getByLabel('Core SVI', { exact: true })
+  await expect(coreSvi.locator('option').filter({ hasText: 'Port-channel1' })).toHaveCount(0)
+  await apply()
+
+  await page.getByRole('link', { name: 'ISP & NAT', exact: true }).click()
+  await edit('Edit Track 192.0.2.1')
+  await page.getByLabel('Interval seconds', { exact: true }).fill('8')
+  await apply()
+  await edit('Edit ISP Primary')
+  await expect(page.getByLabel('WAN interface', { exact: true }).locator('option')
+    .filter({ hasText: 'Audit-Core' })).toHaveCount(0)
+  await page.getByLabel('Name', { exact: true }).fill('Primary planned')
+  await apply()
+  await edit(/^Edit SBR rule/)
+  await page.getByRole('button', { name: 'Move ISP failover order 2 up', exact: true }).click()
+  await apply()
+  const primary = records(original.plan, 'isps').find((entry) => entry.name === 'Primary')!
+  const sourceNatRow = page.getByRole('row', { name: /Primary planned.*192\.0\.2\.2/ })
+  await sourceNatRow.getByRole('button', { name: /^Edit SNAT rule/ }).click()
+  await page.getByLabel('Translated IPv4 address', { exact: true }).fill('203.0.113.10')
+  await apply()
+
+  await page.getByRole('link', { name: 'VPN & routing', exact: true }).click()
+  await edit('Edit tunnel Audit VPN')
+  await page.getByLabel('Tunnel state', { exact: true }).selectOption('up')
+  await apply()
+  await page.getByRole('row', { name: /172\.16\.20\.0\/24.*tunnel/ })
+    .getByRole('button', { name: 'Edit static route 172.16.20.0/24' }).click()
+  await page.getByLabel('Preference', { exact: true }).fill('2')
+  await apply()
+  await edit(/^Edit PBR rule/)
+  await page.getByLabel('When tunnel is down', { exact: true }).selectOption('route-table')
+  await apply()
+  await edit(/^Edit NAT exemption/)
+  await apply()
+
+  await page.getByRole('link', { name: 'Devices / Topology', exact: true }).click()
+  await edit('Edit assignment Audit-Core')
+  await page.getByLabel('Location', { exact: true }).fill('A desk')
+  await apply()
+  await edit(/^Edit Stack Audit-Core/)
+  await expect(page.getByLabel('Member number', { exact: true })).toHaveCount(2)
+  await apply()
+  await page.getByRole('link', { name: 'Port Editor', exact: true }).click()
+  await edit('Edit Port-Channel 1')
+  await expect(page.getByLabel('Port-Channel interface', { exact: true }).locator('option')
+    .filter({ hasText: 'Vlan9' })).toHaveCount(0)
+  await page.getByLabel('LACP mode', { exact: true }).selectOption('passive')
+  await apply()
+  await page.getByRole('button', { name: 'Save revision' }).click()
+  await expect(page.getByText('Revision 2 saved.')).toBeVisible()
+
+  const expected = structuredClone(original.plan)
+  records(expected, 'dhcp_pools')[0]!.lease_seconds = 7200
+  records(expected, 'dhcp_relays')[0]!.servers = ['192.168.10.6', '192.168.10.7']
+  records(expected, 'tracks').find((entry) => entry.target === '192.0.2.1')!.interval_seconds = 8
+  records(expected, 'isps').find((entry) => entry.id === primary.id)!.name = 'Primary planned'
+  records(expected, 'source_routes')[0]!.isp_priority = [...records(expected, 'source_routes')[0]!.isp_priority as string[]].reverse()
+  records(expected, 'snat').find((entry) => entry.isp_id === primary.id)!.translated_ip = '203.0.113.10'
+  records(expected, 'ipsec_tunnels')[0]!.state = 'up'
+  records(expected, 'static_routes').find((entry) => (entry.next_hop as RecordValue).kind === 'tunnel')!.preference = 2
+  records(expected, 'policy_routes')[0]!.on_tunnel_down = 'route-table'
+  records(expected, 'assignments').find((entry) => entry.hostname === 'Audit-Core')!.location = 'A desk'
+  records(expected, 'port_channels')[0]!.lacp = 'passive'
+
+  const summaries = await (await request.get(revisions(id))).json() as Summary[]
+  const latest = await (await request.get(revisions(id) + '/' + summaries.at(-1)!.id)).json() as Revision
+  // The backend canonicalizes set-like collections independently of the UI table order.
+  for (const [key, value] of Object.entries(expected)) {
+    if (Array.isArray(value)) {
+      expect(latest.plan[key], key).toHaveLength(value.length)
+      expect(latest.plan[key], key).toEqual(expect.arrayContaining(value))
+    } else {
+      expect(latest.plan[key], key).toEqual(value)
+    }
+  }
+  expect(latest.validation_status).toBe('VALID_WITH_WARNINGS')
 })
