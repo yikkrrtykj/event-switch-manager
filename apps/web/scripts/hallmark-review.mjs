@@ -19,7 +19,7 @@ function capture(label, workdir, ...args) {
   const output = (result.stdout ?? '') + (result.stderr ?? '') + (result.error ? String(result.error) : '')
   writeFileSync(join(evidence, label + '.txt'), output)
   process.stdout.write(output)
-  const skipped = /render tier skipped|render not run|no puppeteer-core|no Chrome or Chromium/i.test(output)
+  const skipped = /render (?:tier )?(?:skipped|not run)|no puppeteer-core|no Chrome or Chromium/i.test(output)
   results.push({ label, code: result.status, skipped })
 }
 
