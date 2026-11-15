@@ -5,7 +5,7 @@ import type { Field } from './catalog'
 import { Fields, useFieldFocus } from './Editor'
 import { fingerprint } from './model'
 import type { Issue, Plan, RecordValue } from './model'
-import { aggregatePortLabel, commonPortValue, describePortValue, editPort, isPortSetting, modeKey,
+import { aggregatePortLabel, commonPortValue, describePortValue, editPort, hasPortValue, isPortSetting, modeKey,
   physicalPortLabel, portFieldApplies, portMode } from './portSettings'
 import type { Operations, PortTarget } from './portSettings'
 
@@ -27,7 +27,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
   const controls = fields.filter(isPortSetting)
   const identity = fields.filter((field) => !isPortSetting(field))
   const isAvailable = (field: Field) => modes.every((mode) => portFieldApplies(field, mode))
-  const canResetHidden = (field: Field) => !batch && get(original, field.key) != null &&
+  const canResetHidden = (field: Field) => !batch && hasPortValue(get(original, field.key)) &&
     get(original, modeKey) === modes[0]
   const canApply = (field: Field) => isAvailable(field) ||
     (canResetHidden(field) && operations[field.key]?.kind === 'reset')
@@ -38,7 +38,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
   })
   const changed = creating || proposed.some((item) => item.changed)
   const hasCleanup = proposed.some(({ changes }) => changes.some((change) => change.operation === 'Clear on mode change'))
-  const mixedFields = new Set(controls.filter((field) => commonPortValue(field, targets).mixed).map((field) => field.key))
+  const currentValues = new Map(controls.map((field) => [field.key, commonPortValue(field, targets)]))
 
   useEffect(() => { onFormDirty(dirty) }, [dirty, onFormDirty])
   useEffect(() => () => onFormDirty(false), [onFormDirty])
@@ -71,7 +71,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
             <tr key={index + ':' + field.key}>
               <td>{device}</td><td>{member}</td><td className="data-mono">{name}</td><th scope="row">{field.label}</th>
               <td>{describePortValue(plan, field, before)}</td><td>{describePortValue(plan, field, after)}</td>
-              <td>{operation}{mixedFields.has(field.key) && <small className="muted"> · Mixed before edit</small>}</td>
+              <td>{operation}{currentValues.get(field.key)?.mixed && <small className="muted"> · Mixed before edit</small>}</td>
             </tr>)) : <tr key={index}><td>{device}</td><td>{member}</td>
               <td className="data-mono">{name}</td><td colSpan={4}>No changes</td></tr>
         })}</tbody></Table>
@@ -95,8 +95,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
           const available = isAvailable(field)
           if (!available && !canResetHidden(field)) return null
           const operation = operations[field.key]
-          const mixed = mixedFields.has(field.key)
-          const common = commonPortValue(field, targets).value
+          const { mixed, value: common } = currentValues.get(field.key)!
           const current = operation?.kind === 'set' ? operation.value : operation ? undefined : common
           const control: Field = { ...field, when: undefined,
             optional: operation?.kind !== 'set' || field.preserveEmpty,

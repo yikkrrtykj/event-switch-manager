@@ -77,7 +77,8 @@ export function Fields({ fields, plan, record, path, issues, update }: FieldsPro
             try { change(input.value.trim() ? JSON.parse(input.value) as Value : null); input.setCustomValidity('') }
             catch { input.setCustomValidity('Enter valid JSON.') }
           }} />
-          : <Input id={key} {...attributes} type={field.type === 'number' ? 'number' : 'text'} required={!field.optional}
+          : <Input id={key} {...attributes} type={field.type === 'number' ? 'number' : 'text'}
+            maxLength={field.maxLength} required={!field.optional}
             value={String(value ?? '')} onChange={(event) => {
               const next = event.target.value
               change(!next && !field.preserveEmpty ? null : field.type === 'number' ? Number(next) : next)

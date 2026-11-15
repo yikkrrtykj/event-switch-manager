@@ -27,7 +27,12 @@ export function portFieldApplies(field: Field, mode: Value | undefined) {
 }
 
 function normalized(field: Field, value: Value | undefined) {
-  return field.type === 'refs' && !Array.isArray(value) ? [] : value ?? null
+  if (field.type === 'refs') return Array.isArray(value) ? [...value].sort() : []
+  return value ?? null
+}
+
+export function hasPortValue(value: Value | undefined) {
+  return value != null && (!Array.isArray(value) || value.length > 0)
 }
 
 export function commonPortValue(field: Field, targets: PortTarget[]) {
@@ -72,21 +77,19 @@ export function editPort(item: RecordValue, base: RecordValue, fields: Field[], 
     const operation = permit(field) ? operations[field.key] : undefined
     let label = 'Keep'
     if (operation?.kind === 'reset') {
-      next = reset(next, field)
+      if (hasPortValue(before)) next = reset(next, field)
       label = 'Reset'
     } else if (operation?.kind === 'set') {
       next = set(next, field.key, operation.value)
       label = 'Set'
-    } else if (isPortSetting(field) && modeChanges && before != null &&
+    } else if (isPortSetting(field) && modeChanges && hasPortValue(before) &&
       needsModeClear(field, mode, before)) {
       next = reset(next, field)
       label = 'Clear on mode change'
     }
     const after = get(next, field.key)
     if (!isPortSetting(field) && fingerprint(before) !== fingerprint(after)) label = 'Set'
-    if (label !== 'Clear on mode change' || fingerprint(normalized(field, before)) !== fingerprint(normalized(field, after))) {
-      changes.push({ field, before, after, operation: label })
-    }
+    changes.push({ field, before, after, operation: label })
   }
   return { next, changes }
 }

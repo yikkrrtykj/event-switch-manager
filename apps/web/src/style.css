@@ -233,7 +233,12 @@ dialog:has(.port-editor) { width: min(68rem, calc(100% - 1rem)); }
 .port-editor table { min-width: 36rem; }
 .port-editor table th { text-align: left; }
 .port-editor table td, .port-editor table th { overflow-wrap: anywhere; }
-.port-editor .port-mode-warning { background: var(--muted); padding: .45rem .65rem; border-inline-start: 3px solid var(--warning); }
+.port-editor .port-mode-warning { background: var(--warning-surface); color: var(--warning); padding: .45rem .65rem; border: 1px solid var(--border); }
 .port-config > summary { max-width: 19rem; overflow: hidden; text-overflow: ellipsis; }
 .port-config dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .2rem .6rem; margin: .35rem 0 0; white-space: normal; }
 .port-config dd { margin: 0; overflow-wrap: anywhere; }
+
+.diagnostics button { white-space: nowrap; overflow-wrap: normal; }
+@media (max-width: 38rem) {
+  .port-list [data-port-name] { position: sticky; inset-inline-start: 0; z-index: 1; background: var(--card); }
+}

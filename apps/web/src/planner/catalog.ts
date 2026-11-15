@@ -8,6 +8,7 @@ export type Field = {
   optional?: boolean
   choices?: (string | number)[]
   preserveEmpty?: boolean
+  maxLength?: number
   reference?: string
   initial?: Value
   when?: [string, string]
@@ -56,7 +57,7 @@ const layer2Fields = [
   { ...choice('settings.portfast', 'PortFast', ['edge', 'edge-trunk', 'disabled']), initial: undefined },
   { ...choice('settings.bpdu_guard', 'BPDU Guard', ['enabled', 'disabled']), initial: undefined },
 ]
-const portDescription: Field = { ...field('settings.description', 'Description', true), preserveEmpty: true }
+const portDescription: Field = { ...field('settings.description', 'Description', true), preserveEmpty: true, maxLength: 240 }
 const adminState = { ...choice('settings.admin_state', 'Administrative state', ['up', 'down']), initial: undefined }
 const physicalMedia: Field[] = [
   { key: 'settings.speed', label: 'Speed (Mbps)', type: 'choice',

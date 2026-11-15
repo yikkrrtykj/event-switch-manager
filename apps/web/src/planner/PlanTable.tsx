@@ -131,10 +131,10 @@ export function PlanTable({ group, plan, issues, location, locked, update, onFor
       </>}
     </div>}
     {!malformed && (!visible.length ? <p className="empty">{all.length ? 'No records match the filters.' : 'No records yet.'}</p>
-      : <Table label={group.title}><thead><tr>
+      : <Table label={group.title} className={isPort ? 'port-list' : undefined}><thead><tr>
         {isPort && !locked && <th scope="col"><input type="checkbox" aria-label="Select all visible ports" checked={allSelected}
           onChange={() => setSelected(allSelected ? [] : visible.map(({ item }) => item))} /></th>}
-        {columns.map((field) => <th scope="col" key={field.key}>{field.label}</th>)}
+        {columns.map((field) => <th scope="col" key={field.key} data-port-name={isPort && field.key === 'name' || undefined}>{field.label}</th>)}
         {(isPort || isChannel) && <th scope="col">Configuration</th>}
         <th scope="col">Validation</th>{!locked && <th scope="col">Actions</th>}
       </tr></thead><tbody>{visible.map(({ item, index }, position) => {
@@ -154,7 +154,8 @@ export function PlanTable({ group, plan, issues, location, locked, update, onFor
                 const checked = event.target.checked
                 setSelected((current) => checked ? [...current, item] : current.filter((port) => port !== item))
               }} /></td>}
-            {columns.map((field) => <td key={field.key} className={/address|network|destination|serial/.test(field.key) ? 'data-mono' : ''}>
+            {columns.map((field) => <td key={field.key} data-port-name={isPort && field.key === 'name' || undefined}
+              className={/address|network|destination|serial/.test(field.key) ? 'data-mono' : ''}>
               {display(plan, field, get(item, field.key))}
             </td>)}
             {(isPort || isChannel) && <td><details className="port-config">

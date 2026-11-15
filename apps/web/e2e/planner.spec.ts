@@ -346,11 +346,11 @@ test('resets port selections on filters, event and revision changes and saves on
   await expect(targets.getByRole('row', { name: /Synthetic-Access Standalone Gi0\/1/ })).toBeVisible()
   await expect(targets.getByText('Gi2/0/7', { exact: true })).toHaveCount(0)
   await page.screenshot({ path: info.outputPath('confirmed-port-targets.png') })
-  await page.getByLabel('Mode', { exact: true }).selectOption('trunk')
-  for (const [index, vlan] of ['10', '20', '30'].entries()) {
-    await page.getByRole('button', { name: 'Add entry', exact: true }).click()
-    await page.getByRole('combobox', { name: 'Allowed VLANs ' + (index + 1), exact: true }).selectOption(vlan)
-  }
+  await expect(page.getByLabel('Mode', { exact: true })).toHaveValue('trunk')
+  await expect(page.getByLabel('Allowed VLANs 1', { exact: true })).toHaveValue('10')
+  await expect(page.getByLabel('Allowed VLANs 2', { exact: true })).toHaveValue('20')
+  await page.getByRole('button', { name: 'Add entry', exact: true }).click()
+  await page.getByLabel('Allowed VLANs 3', { exact: true }).selectOption('30')
   await previewPorts(page, 'Apply to 2 ports')
   await cleared()
   await expect(page.getByRole('button', { name: 'Save revision' })).toBeDisabled()
@@ -725,6 +725,7 @@ test('edits all port settings and persists Keep, Reset, Set and empty descriptio
 })
 
 test('previews a Mixed Shutdown edit across devices and Stack members without touching other fields', async ({ page, request }, info) => {
+  test.setTimeout(60_000)
   const id = await createEvent(request, 'Synthetic mixed port intent')
   const other = await createEvent(request, 'Synthetic independent port intent')
   const plan = stackPlan(id)
@@ -778,12 +779,30 @@ test('previews a Mixed Shutdown edit across devices and Stack members without to
   await modal.getByLabel('Administrative state', { exact: true }).selectOption('down')
   await previewPorts(page, 'Apply to 3 ports')
   await expect(page.getByText('Unsaved changes', { exact: true })).toBeVisible()
+  page.once('dialog', (prompt) => prompt.dismiss())
+  await page.getByLabel('Event', { exact: true }).selectOption(other)
+  await expect(page.getByLabel('Event', { exact: true })).toHaveValue(id)
+  await expect(page.getByText('Unsaved changes', { exact: true })).toBeVisible()
   expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
   const latest = await checkedSave(page, request, id, 2)
   for (const port of portsOf(original.plan)) {
     const name = String(port.name)
     const expected = settingsOf(original.plan, name)
     expect(settingsOf(latest.plan, name)).toEqual(port.id === untouched.id ? expected : { ...expected, admin_state: 'down' })
+  }
+  for (const name of ['Gi1/0/7', 'Gi2/0/7']) {
+    await page.getByRole('checkbox', { name: 'Select port ' + name, exact: true }).check()
+  }
+  await page.getByRole('button', { name: 'Batch edit (2)', exact: true }).click()
+  const reset = page.getByRole('dialog', { name: 'Batch edit 2 ports' })
+  await reset.getByLabel('Administrative state operation', { exact: true }).selectOption('reset')
+  await reset.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  await expect(reset.getByRole('row', { name: /Gi2\/0\/7 Administrative state down Platform default Reset/ })).toBeVisible()
+  await reset.getByRole('button', { name: 'Apply to 2 ports', exact: true }).click()
+  const resetRevision = await checkedSave(page, request, id, 3)
+  for (const name of ['Gi1/0/7', 'Gi2/0/7', 'Gi0/1', 'Gi1/0/9']) {
+    const retained = settingsOf(latest.plan, name)
+    expect(settingsOf(resetRevision.plan, name)).toEqual(name.endsWith('/7') ? { ...retained, admin_state: null } : retained)
   }
   expect(await (await request.get(revisions(other))).json()).toHaveLength(1)
 })
