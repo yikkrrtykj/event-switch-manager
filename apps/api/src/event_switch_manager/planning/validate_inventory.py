@@ -80,9 +80,9 @@ def check_member_intent(
                       f"Verify member {field} with both fixed and negotiated or default settings")
 
     for field in ("portfast", "bpdu_guard"):
-        values = {getattr(record, field) for record in (settings, *members)}
-        values.discard(None)
-        if len(values) > 1:
+        stp_values = {getattr(record, field) for record in (settings, *members)}
+        stp_values.discard(None)
+        if len(stp_values) > 1:
             v.error(f"{path}.settings.{field}", "port_channel_stp_conflict",
                     f"Port-Channel and members must agree on explicit {field} intent")
 
