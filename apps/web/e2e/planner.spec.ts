@@ -132,7 +132,7 @@ test('groups real interface names by Stack member and saves a warning-only bulk 
   await page.getByLabel('Mode', { exact: true }).selectOption('trunk')
   await page.getByRole('button', { name: 'Add entry' }).click()
   await page.getByRole('combobox', { name: 'Allowed VLANs 1', exact: true }).selectOption('20')
-  await page.getByRole('button', { name: 'Apply to 2 ports' }).click()
+  await previewPorts(page, 'Confirm and apply to draft')
   await expect(page.getByRole('row', { name: /Gi2\/0\/7.*trunk/ })).toBeVisible()
   await page.getByRole('button', { name: 'Validate plan' }).click()
   await expect(page.getByText('VALID_WITH_WARNINGS', { exact: true })).toBeVisible()
@@ -351,7 +351,7 @@ test('resets port selections on filters, event and revision changes and saves on
     await page.getByRole('button', { name: 'Add entry', exact: true }).click()
     await page.getByRole('combobox', { name: 'Allowed VLANs ' + (index + 1), exact: true }).selectOption(vlan)
   }
-  await page.getByRole('button', { name: 'Apply to 2 ports' }).click()
+  await previewPorts(page, 'Apply to 2 ports')
   await cleared()
   await expect(page.getByRole('button', { name: 'Save revision' })).toBeDisabled()
   await page.getByRole('button', { name: 'Validate plan' }).click()
@@ -582,10 +582,11 @@ test('saves a consistent network through the planner forms and preserves untouch
   await apply()
   await page.getByRole('link', { name: 'Port Editor', exact: true }).click()
   await edit('Edit Port-Channel 1')
+  await page.getByText('Aggregate interface and members', { exact: true }).click()
   await expect(page.getByLabel('Port-Channel interface', { exact: true }).locator('option')
     .filter({ hasText: 'Vlan9' })).toHaveCount(0)
   await page.getByLabel('LACP mode', { exact: true }).selectOption('passive')
-  await apply()
+  await previewPorts(page)
   await page.getByRole('button', { name: 'Save revision' }).click()
   await expect(page.getByText('Revision 2 saved.')).toBeVisible()
 
@@ -614,4 +615,290 @@ test('saves a consistent network through the planner forms and preserves untouch
     }
   }
   expect(latest.validation_status).toBe('VALID_WITH_WARNINGS')
+})
+
+
+async function previewPorts(page: Page, action = 'Apply to draft') {
+  await page.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Before / After' })).toBeFocused()
+  await page.getByRole('button', { name: action, exact: true }).click()
+}
+
+async function checkedSave(page: Page, request: APIRequestContext, id: string, number: number) {
+  await page.getByRole('button', { name: 'Validate plan', exact: true }).click()
+  await expect(page.getByText('VALID_WITH_WARNINGS', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Save revision', exact: true }).click()
+  await expect(page.getByText('Revision ' + number + ' saved.', { exact: true })).toBeVisible()
+  const list = await (await request.get(revisions(id))).json() as Summary[]
+  expect(list).toHaveLength(number)
+  const read = await request.get(revisions(id) + '/' + list.at(-1)!.id)
+  expect(read.status()).toBe(200)
+  return await read.json() as Revision
+}
+
+function settingsOf(plan: Plan, name: string) {
+  return portsOf(plan).find((item) => item.name === name)!.settings as RecordValue
+}
+
+test('edits all port settings and persists Keep, Reset, Set and empty descriptions', async ({ page, request }, info) => {
+  test.setTimeout(70_000)
+  const id = await createEvent(request, 'Synthetic single port configuration')
+  const saved = await planRecord(request, stackPlan(id))
+  const exportUrl = revisions(id) + '/' + saved.id + '/export'
+  const before = await request.get(exportUrl)
+  const historical = await before.body()
+  const hash = createHash('sha256').update(historical).digest('hex')
+  expect(hash).toBe(saved.content_hash)
+  expect(before.headers().etag).toBe('"' + hash + '"')
+  await openWorkspace(page, id, 'ports')
+  const edit = page.getByRole('button', { name: 'Edit port Gi1/0/7', exact: true })
+  await edit.click()
+  const modal = page.getByRole('dialog', { name: 'Edit port', exact: true })
+  const setting = (name: string) => modal.getByLabel(name, { exact: true })
+  const close = modal.getByRole('button', { name: 'Close Edit port', exact: true })
+  await expect(close).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(modal.locator('summary')).toBeFocused()
+  await expect(modal.locator('summary')).toHaveCSS('outline-style', 'solid')
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  const preview = modal.getByRole('button', { name: 'Preview changes', exact: true })
+  await expect(preview).toHaveCSS('transition-duration', '0s')
+  const contrast = await preview.evaluate((node) => {
+    const style = getComputedStyle(node)
+    const luminance = (color: string) => color.match(/[\d.]+/g)!.slice(0, 3).map(Number)
+      .map((channel) => channel / 255)
+      .map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+      .reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index]!, 0)
+    const levels = [luminance(style.color), luminance(style.backgroundColor)]
+    return (Math.max(...levels) + .05) / (Math.min(...levels) + .05)
+  })
+  expect(contrast).toBeGreaterThanOrEqual(4.5)
+  await expect(modal.getByText('NOT VERIFIED', { exact: true })).toBeVisible()
+  await setting('Description').fill('Players patch panel 7')
+  await setting('Administrative state').selectOption('up')
+  await setting('Speed (Mbps)').selectOption('1000')
+  await setting('Duplex').selectOption('full')
+  await setting('PoE mode').selectOption('static')
+  await setting('PortFast').selectOption('edge')
+  await setting('BPDU Guard').selectOption('enabled')
+  await setting('Access VLAN').selectOption('10')
+
+  for (const width of [1280, 1440, 1920, 800, 320]) {
+    await page.setViewportSize({ width, height: 1000 })
+    await expect(modal).toBeVisible()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width + 1)
+    expect(await modal.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1)
+    await close.evaluate((node) => { node.closest('dialog')?.scrollTo(0, 0) })
+    await page.screenshot({ path: info.outputPath('single-port-' + width + '.png') })
+  }
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await previewPorts(page)
+  const first = await checkedSave(page, request, id, 2)
+  expect(settingsOf(first.plan, 'Gi1/0/7')).toMatchObject({
+    mode: 'access', access_vlan: 10, description: 'Players patch panel 7', admin_state: 'up',
+    speed: 1000, duplex: 'full', poe_mode: 'static', portfast: 'edge', bpdu_guard: 'enabled',
+  })
+  expect(settingsOf(first.plan, 'Gi2/0/7')).toEqual(settingsOf(saved.plan, 'Gi2/0/7'))
+
+  await edit.click()
+  await expect(setting('Duplex operation')).toHaveValue('keep')
+  await setting('PoE mode operation').selectOption('reset')
+  await setting('Speed (Mbps)').selectOption('auto')
+  await setting('Description').fill('')
+  await previewPorts(page)
+  const second = await checkedSave(page, request, id, 3)
+  expect(settingsOf(second.plan, 'Gi1/0/7')).toMatchObject({
+    description: '', speed: 'auto', poe_mode: null, duplex: 'full', admin_state: 'up',
+    mode: 'access', portfast: 'edge', bpdu_guard: 'enabled',
+  })
+  expect(second.content_hash).not.toBe(first.content_hash)
+  const exported = await request.get(revisions(id) + '/' + second.id + '/export')
+  const stored = settingsOf(await exported.json() as Plan, 'Gi1/0/7')
+  expect(stored).not.toHaveProperty('poe_mode')
+  expect(stored).toMatchObject({ description: '', speed: 'auto' })
+  const original = await request.get(exportUrl)
+  expect(await original.body()).toEqual(historical)
+  expect(original.headers().etag).toBe(before.headers().etag)
+  expect(await (await request.get(revisions(id) + '/' + saved.id)).json()).toMatchObject({
+    id: saved.id, content_hash: hash,
+  })
+})
+
+test('previews a Mixed Shutdown edit across devices and Stack members without touching other fields', async ({ page, request }, info) => {
+  const id = await createEvent(request, 'Synthetic mixed port intent')
+  const other = await createEvent(request, 'Synthetic independent port intent')
+  const plan = stackPlan(id)
+  const [first, second] = portsOf(plan)
+  first!.settings = { mode: 'access', access_vlan: 20, admin_state: 'down', description: 'Hold', speed: 'auto' }
+  second!.settings = { mode: 'access', access_vlan: 20, admin_state: 'up', description: 'Desk', poe_mode: 'never' }
+  const standalone = randomUUID()
+  const chassis = randomUUID()
+  const untouched = { ...first!, id: randomUUID(), name: 'Gi1/0/9' }
+  plan.assignments = [...plan.assignments as RecordValue[], {
+    id: standalone, hostname: 'Synthetic-Edge', role: 'access', physical_device_id: chassis,
+  }]
+  plan.physical_devices = [...plan.physical_devices as RecordValue[], { id: chassis, vendor: 'cisco' }]
+  plan.physical_interfaces = [first!, second!, untouched, {
+    id: randomUUID(), assignment_id: standalone, physical_device_id: chassis, name: 'Gi0/1',
+    settings: { mode: 'access', access_vlan: 10, description: 'Patch A', speed: 1000, duplex: 'full' },
+  }]
+  const original = await planRecord(request, plan)
+  await planRecord(request, stackPlan(other))
+  await openWorkspace(page, id, 'ports')
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  for (const name of ['Gi1/0/7', 'Gi2/0/7', 'Gi0/1']) {
+    await page.getByRole('checkbox', { name: 'Select port ' + name, exact: true }).check()
+  }
+  await page.getByRole('button', { name: 'Batch edit (3)', exact: true }).click()
+  const modal = page.getByRole('dialog', { name: 'Batch edit 3 ports' })
+  const admin = modal.getByRole('group', { name: 'Administrative state', exact: true })
+  await expect(admin.getByText('Mixed', { exact: true })).toBeVisible()
+  await expect(admin.getByLabel('Administrative state operation', { exact: true })).toHaveValue('keep')
+  await page.screenshot({ path: info.outputPath('mixed-values.png') })
+  await admin.getByLabel('Administrative state', { exact: true }).selectOption('down')
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  const changes = modal.getByRole('table', { name: 'Port changes' })
+  await expect(changes.getByRole('row', { name: /Stack member 2 Gi2\/0\/7 Administrative state up down Set/ })).toBeVisible()
+  await expect(changes.getByRole('row', { name: /Synthetic-Edge Standalone Gi0\/1 Administrative state Platform default down Set/ })).toBeVisible()
+  await expect(changes.getByText('Gi1/0/9', { exact: true })).toHaveCount(0)
+  await page.screenshot({ path: info.outputPath('batch-before-after.png') })
+  await modal.getByRole('checkbox', { name: 'Show kept fields' }).check()
+  await expect(changes.getByRole('row', { name: /Gi2\/0\/7 Description Desk Desk Keep/ })).toBeVisible()
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
+
+  page.once('dialog', (prompt) => prompt.dismiss())
+  await page.keyboard.press('Escape')
+  await expect(modal).toBeVisible()
+  page.once('dialog', (prompt) => prompt.accept())
+  await modal.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(modal).toHaveCount(0)
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
+
+  await page.getByRole('button', { name: 'Batch edit (3)', exact: true }).click()
+  await modal.getByLabel('Administrative state', { exact: true }).selectOption('down')
+  await previewPorts(page, 'Apply to 3 ports')
+  await expect(page.getByText('Unsaved changes', { exact: true })).toBeVisible()
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
+  const latest = await checkedSave(page, request, id, 2)
+  for (const port of portsOf(original.plan)) {
+    const name = String(port.name)
+    const expected = settingsOf(original.plan, name)
+    expect(settingsOf(latest.plan, name)).toEqual(port.id === untouched.id ? expected : { ...expected, admin_state: 'down' })
+  }
+  expect(await (await request.get(revisions(other))).json()).toHaveLength(1)
+})
+
+test('confirms incompatible VLAN, IP and STP cleanup before applying each mode change', async ({ page, request }, info) => {
+  test.setTimeout(60_000)
+  const id = await createEvent(request, 'Synthetic mode changes')
+  const plan = stackPlan(id)
+  portsOf(plan)[0]!.settings = { mode: 'access', access_vlan: 20, portfast: 'edge', bpdu_guard: 'enabled', description: 'Keep me' }
+  await planRecord(request, plan)
+  await openWorkspace(page, id, 'ports')
+  const edit = page.getByRole('button', { name: 'Edit port Gi1/0/7', exact: true })
+  const modal = page.getByRole('dialog', { name: 'Edit port', exact: true })
+  const setting = (name: string) => modal.getByLabel(name, { exact: true })
+  const preview = modal.getByRole('button', { name: 'Preview changes', exact: true })
+  const confirm = modal.getByRole('button', { name: 'Confirm and apply to draft', exact: true })
+  const changes = modal.getByRole('table', { name: 'Port changes' })
+
+  await edit.click()
+  await setting('Mode').selectOption('trunk')
+  await setting('Native VLAN').selectOption('10')
+  for (const [index, vlan] of ['10', '20'].entries()) {
+    await modal.getByRole('button', { name: 'Add entry', exact: true }).click()
+    await setting('Allowed VLANs ' + (index + 1)).selectOption(vlan)
+  }
+  await preview.click()
+  await expect(changes.getByRole('row', { name: /Access VLAN 20 .*Platform default Clear on mode change/ })).toBeVisible()
+  await expect(changes.getByRole('row', { name: /PortFast edge Platform default Clear on mode change/ })).toBeVisible()
+  await confirm.click()
+  const trunk = await checkedSave(page, request, id, 2)
+  expect(settingsOf(trunk.plan, 'Gi1/0/7')).toMatchObject({
+    mode: 'trunk', access_vlan: null, native_vlan: 10, allowed_vlans: [10, 20], portfast: null, bpdu_guard: 'enabled',
+  })
+
+  await edit.click()
+  await setting('Mode').selectOption('routed')
+  await expect(setting('PortFast')).toHaveCount(0)
+  await expect(setting('BPDU Guard')).toHaveCount(0)
+  await setting('IPv4 address / prefix').fill('10.10.10.1/24')
+  await preview.click()
+  await expect(changes.getByRole('row', { name: /Native VLAN .*Clear on mode change/ })).toBeVisible()
+  await expect(changes.getByRole('row', { name: /Allowed VLANs .*Clear on mode change/ })).toBeVisible()
+  await expect(changes.getByRole('row', { name: /BPDU Guard enabled Platform default Clear on mode change/ })).toBeVisible()
+  await page.screenshot({ path: info.outputPath('confirm-mode-cleanup.png') })
+  await confirm.click()
+  const routed = await checkedSave(page, request, id, 3)
+  expect(settingsOf(routed.plan, 'Gi1/0/7')).toMatchObject({
+    mode: 'routed', address: '10.10.10.1/24', native_vlan: null, allowed_vlans: [], bpdu_guard: null, description: 'Keep me',
+  })
+
+  await edit.click()
+  await setting('Mode').selectOption('access')
+  await setting('Access VLAN').selectOption('20')
+  await preview.click()
+  await expect(changes.getByRole('row', { name: /IPv4 address \/ prefix 10.10.10.1\/24 Platform default Clear on mode change/ })).toBeVisible()
+  await confirm.click()
+  const access = await checkedSave(page, request, id, 4)
+  expect(settingsOf(access.plan, 'Gi1/0/7')).toMatchObject({ mode: 'access', access_vlan: 20, address: null, description: 'Keep me' })
+})
+
+test('keeps Port-Channel hardware settings scoped and blocks unsafe channel and Transit drafts', async ({ page, request }, info) => {
+  test.setTimeout(55_000)
+  const id = await createEvent(request, 'Synthetic port safety validation')
+  const initial = await planRecord(request, auditPlan(id))
+  await openWorkspace(page, id, 'ports')
+  await page.getByRole('button', { name: 'Edit Port-Channel 1', exact: true }).click()
+  const channel = page.getByRole('dialog', { name: 'Edit Port-Channel', exact: true })
+  for (const field of ['Speed (Mbps)', 'Duplex', 'PoE mode']) {
+    await expect(channel.getByLabel(field, { exact: true })).toHaveCount(0)
+    await expect(channel.getByLabel(field + ' operation', { exact: true })).toHaveCount(0)
+  }
+  await channel.getByLabel('LACP mode', { exact: true }).selectOption('passive')
+  await channel.getByLabel('Description', { exact: true }).fill('Aggregate for players')
+  await previewPorts(page)
+  const saved = await checkedSave(page, request, id, 2)
+  expect((saved.plan.port_channels as RecordValue[])[0]).toMatchObject({
+    lacp: 'passive', member_ids: (initial.plan.port_channels as RecordValue[])[0]!.member_ids,
+    settings: { description: 'Aggregate for players', speed: null, duplex: null, poe_mode: null },
+  })
+
+  for (const [name, field, value] of [
+    ['Gi1/0/2', 'Speed (Mbps)', '10000'],
+    ['Gi2/0/2', 'Duplex', 'half'],
+    ['Gi1/0/1', 'Administrative state', 'down'],
+  ] as const) {
+    await page.getByRole('button', { name: 'Edit port ' + name, exact: true }).click()
+    await page.getByLabel(field, { exact: true }).selectOption(value)
+    await previewPorts(page)
+  }
+  const response = page.waitForResponse((res) => res.request().method() === 'POST' && res.url().endsWith('/plan/validate'))
+  await page.getByRole('button', { name: 'Validate plan', exact: true }).click()
+  const findings = await response
+  expect(findings.status()).toBe(200)
+  expect(await findings.json()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ code: 'port_channel_speed_duplex_conflict', severity: 'ERROR', path: expect.stringMatching(/\.settings\.speed$/) }),
+    expect.objectContaining({ code: 'port_channel_speed_duplex_conflict', severity: 'ERROR', path: expect.stringMatching(/\.settings\.duplex$/) }),
+    expect.objectContaining({ code: 'transit_port_shutdown', severity: 'ERROR', path: expect.stringMatching(/\.settings\.admin_state$/) }),
+    expect.objectContaining({ code: 'port_setting_unverified', severity: 'WARNING' }),
+  ]))
+  await expect(page.getByRole('button', { name: 'Save revision', exact: true })).toBeDisabled()
+  await expect(page.getByText('INVALID', { exact: true })).toBeVisible()
+  await expect(page.getByRole('table', { name: 'Validation issues' }).getByText('WARNING', { exact: true }).first()).toBeVisible()
+  await page.screenshot({ path: info.outputPath('port-errors-and-warnings.png'), fullPage: true })
+  for (const [code, path, field] of [
+    ['port_channel_speed_duplex_conflict', 'settings.speed', 'Speed (Mbps)'],
+    ['transit_port_shutdown', 'settings.admin_state', 'Administrative state'],
+  ] as const) {
+    const details = page.getByRole('table', { name: 'Validation issues' })
+    await details.getByRole('row').filter({ hasText: code }).filter({ hasText: path })
+      .getByRole('button', { name: /^Locate/ }).click()
+    const dialog = page.getByRole('dialog', { name: 'Edit port', exact: true })
+    const control = dialog.getByLabel(field, { exact: true })
+    await expect(control).toBeFocused()
+    await expect(control).toHaveAttribute('aria-invalid', 'true')
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  }
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(2)
 })
