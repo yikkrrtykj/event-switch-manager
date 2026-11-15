@@ -624,14 +624,16 @@ async function previewPorts(page: Page, action = 'Apply to draft') {
   await page.getByRole('button', { name: action, exact: true }).click()
 }
 
-async function checkedSave(page: Page, request: APIRequestContext, id: string, number: number) {
+async function checkedSave(page: Page, request: APIRequestContext, id: string, number: number, total = number) {
   await page.getByRole('button', { name: 'Validate plan', exact: true }).click()
   await expect(page.getByText('VALID_WITH_WARNINGS', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Save revision', exact: true }).click()
   await expect(page.getByText('Revision ' + number + ' saved.', { exact: true })).toBeVisible()
   const list = await (await request.get(revisions(id))).json() as Summary[]
-  expect(list).toHaveLength(number)
-  const read = await request.get(revisions(id) + '/' + list.at(-1)!.id)
+  expect(list).toHaveLength(total)
+  const entry = list.find((item) => item.number === number)
+  expect(entry).toBeDefined()
+  const read = await request.get(revisions(id) + '/' + entry!.id)
   expect(read.status()).toBe(200)
   return await read.json() as Revision
 }
@@ -1034,10 +1036,13 @@ test('previews and saves explicit LACP values while Keep preserves the existing 
     await expectLacpPreview(previous, value, 'Set')
     if (value === 'active') await page.screenshot({ path: info.outputPath('lacp-passive-to-active.png') })
     await apply.click()
-    const persisted = await checkedSave(page, request, id, index + 3)
+    const persisted = value === 'passive'
+      ? await checkedSave(page, request, id, kept.number, 4)
+      : await checkedSave(page, request, id, index + 3)
     expect((persisted.plan.port_channels as RecordValue[])[0]).toEqual({
       ...(kept.plan.port_channels as RecordValue[])[0]!, lacp: value,
     })
+    if (value === 'passive') expect(persisted.id).toBe(kept.id)
     previous = value
   }
 
@@ -1055,7 +1060,7 @@ test('previews and saves explicit LACP values while Keep preserves the existing 
   await expectLacpPreview('active', 'active', 'Keep')
   await apply.click()
   const saving = page.waitForRequest((req) => req.method() === 'POST' && req.url().endsWith(revisions(id)))
-  const imported = await checkedSave(page, request, id, 6)
+  const imported = await checkedSave(page, request, id, 5)
   const sent = (await saving).postDataJSON() as Plan
   expect((sent.port_channels as RecordValue[])[0]).not.toHaveProperty('lacp')
   expect((imported.plan.port_channels as RecordValue[])[0]!.lacp).toBe('active')
