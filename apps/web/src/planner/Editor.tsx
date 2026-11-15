@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Button, Dialog, Input, Select } from '../components/ui'
-import { clean, defaults, get, options, set } from './catalog'
+import { defaults, get, options, set } from './catalog'
 import type { Field } from './catalog'
 import { fingerprint, object } from './model'
 import type { Issue, Plan, RecordValue, Value } from './model'
@@ -11,9 +12,19 @@ function Fields({ fields, plan, record, path, issues, update }: FieldsProps) {
     if (field.when && get(record, field.when[0]) !== field.when[1]) return null
     const key = path + '.' + field.key
     const value = get(record, field.key)
-    const change = (next: Value) => update(set(record, field.key, next))
+    const change = (value: Value) => {
+      let next = set(record, field.key, value)
+      for (const dependent of fields) {
+        if (dependent.when?.[0] === field.key && dependent.when[1] === value &&
+          dependent.initial !== undefined && get(next, dependent.key) === undefined) {
+          next = set(next, dependent.key, dependent.initial)
+        }
+      }
+      update(next)
+    }
     const entries = Array.isArray(value) ? value : []
-    const available = field.reference ? options(plan, field.reference)
+    const available = field.reference ? options(plan, field.reference,
+      (candidate) => field.accepts?.(candidate, record, plan) ?? true)
       : (field.choices ?? []).map((id) => ({ id, label: id || 'Unspecified' }))
     const selection = (current: Value | undefined) => <>
       {!available.some((item) => item.id === '') && <option value="">
@@ -77,11 +88,16 @@ function Fields({ fields, plan, record, path, issues, update }: FieldsProps) {
   })}</div>
 }
 
-export function Editor({ title, source, fields, plan, issues, path, focus, commit, close, action = 'Apply to draft', hint }: {
+export function Editor({ title, source, fields, plan, issues, path, focus, commit, close, action = 'Apply to draft', hint, children, onFormDirty }: {
   title: string; source: RecordValue; fields: Field[]; plan: Plan; issues: Issue[]; path: string; focus?: string
-  commit: (record: RecordValue) => void; close: () => void; action?: string; hint?: string
+  commit: (record: RecordValue) => void; close: () => void; action?: string; hint?: string; children?: ReactNode
+  onFormDirty: (dirty: boolean) => void
 }) {
   const [record, update] = useState(source)
+  const [invalidJson, setInvalidJson] = useState(false)
+  const dirty = invalidJson || fingerprint(source) !== fingerprint(record)
+  useEffect(() => { onFormDirty(dirty) }, [dirty, onFormDirty])
+  useEffect(() => () => onFormDirty(false), [onFormDirty])
   const ref = useRef<HTMLFormElement>(null)
   useEffect(() => {
     if (!focus) return
@@ -91,10 +107,14 @@ export function Editor({ title, source, fields, plan, issues, path, focus, commi
     matching?.focus()
   }, [focus])
   function cancel() {
-    if (fingerprint(source) === fingerprint(record) || window.confirm('Discard edits to this form?')) close()
+    if (!dirty || window.confirm('Discard edits to this form?')) close()
   }
   return <Dialog title={title} onClose={cancel}>
-    <form ref={ref} className="dialog-form" onSubmit={(event) => { event.preventDefault(); commit(clean(record)) }}>
+    <form ref={ref} className="dialog-form"
+      onChange={(event) => setInvalidJson([...event.currentTarget.querySelectorAll('textarea')]
+        .some((input) => !input.validity.valid))}
+      onSubmit={(event) => { event.preventDefault(); commit(record) }}>
+      {children}
       {hint && <p className="muted">{hint}</p>}
       <Fields fields={fields} record={record} plan={plan} path={path} issues={issues} update={update} />
       <div className="actions"><Button onClick={cancel}>Cancel</Button><Button type="submit" primary>{action}</Button></div>

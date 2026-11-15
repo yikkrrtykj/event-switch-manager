@@ -11,6 +11,7 @@ export type Field = {
   initial?: Value
   when?: [string, string]
   children?: Field[]
+  accepts?: (candidate: RecordValue, record: RecordValue, plan: Plan) => boolean
 }
 export type Group = { key: string; title: string; singular: string; fields: Field[]; columns: string[]; id: boolean; single?: boolean }
 const field = (key: string, label: string, optional = false): Field => ({ key, label, optional })
@@ -25,14 +26,22 @@ const children = (key: string, label: string, fields: Field[]): Field =>
   ({ key, label, type: 'records', initial: [], children: fields })
 const raw = (key: string, label: string, initial: Value): Field => ({ key, label, initial, optional: true, type: 'json' })
 const when = (item: Field, key: string, value: string): Field => ({ ...item, when: [key, value] })
+const kind = (value: string) => (candidate: RecordValue) => candidate.kind === value
+const owner = (key: string) => (candidate: RecordValue, record: RecordValue) =>
+  !record[key] || candidate.assignment_id === record[key]
+const accepts = (field: Field, predicate: NonNullable<Field['accepts']>): Field =>
+  ({ ...field, accepts: predicate })
 const device = ref('assignment_id', 'Device assignment', 'assignments')
 const subnet = ref('subnet_id', 'Subnet', 'subnets')
-const svi = ref('svi_id', 'SVI', 'logical_interfaces')
+const svi = accepts(ref('svi_id', 'SVI', 'logical_interfaces'), (candidate, record, plan) => {
+  const subnet = records(plan, 'subnets').find((item) => item.id === record.subnet_id)
+  return candidate.kind === 'svi' && (!subnet || candidate.vlan === subnet.vlan)
+})
 const source = ref('source_vlan', 'Source VLAN', 'vlans')
 const target = field('destination', 'Destination CIDR')
 const track = ref('track_id', 'Track', 'tracks')
-const tunnel = ref('tunnel_id', 'Tunnel', 'ipsec_tunnels')
-const isp = ref('isp_id', 'ISP', 'isps')
+const tunnel = accepts(ref('tunnel_id', 'Tunnel', 'ipsec_tunnels'), owner('assignment_id'))
+const isp = accepts(ref('isp_id', 'ISP', 'isps'), owner('assignment_id'))
 const pref = number('preference', 'Preference', 1)
 const priority = number('priority', 'Priority', 10)
 export const portFields = [
@@ -51,13 +60,17 @@ export const catalog = [
   group('subnets', 'Subnets', 'subnet', [ref('vlan', 'VLAN', 'vlans'), field('network', 'IPv4 CIDR')], ['network', 'vlan'], true),
   group('gateways', 'Gateways', 'gateway', [subnet, field('address', 'IPv4 address'), svi], ['subnet_id', 'address', 'svi_id']),
   group('logical_interfaces', 'Logical interfaces', 'logical interface', [device, field('name', 'Interface name'),
-    choice('kind', 'Type', ['svi', 'port-channel', 'loopback']), ref('vlan', 'VLAN', 'vlans', true),
+    choice('kind', 'Type', ['svi', 'port-channel', 'loopback']),
+    when(ref('vlan', 'VLAN', 'vlans'), 'kind', 'svi'),
     field('address', 'IPv4 address / prefix', true)], ['name', 'assignment_id', 'kind', 'address'], true),
   group('vlan_access_policies', 'VLAN policies', 'VLAN policy', [source, ref('destination_vlan', 'Destination VLAN', 'vlans'),
     priority, choice('action', 'Action', ['deny', 'allow'])], ['source_vlan', 'destination_vlan', 'priority', 'action'], true),
   { ...group('transit', 'Core / Hillstone transit', 'transit', [ref('core_assignment_id', 'Cisco Core', 'assignments'),
-    ref('hillstone_assignment_id', 'Hillstone firewall', 'assignments'), ref('core_port_id', 'Core port', 'physical_interfaces'),
-    ref('hillstone_port_id', 'Firewall port', 'physical_interfaces'), ref('core_svi_id', 'Core SVI', 'logical_interfaces'),
+    ref('hillstone_assignment_id', 'Hillstone firewall', 'assignments'),
+    accepts(ref('core_port_id', 'Core port', 'physical_interfaces'), owner('core_assignment_id')),
+    accepts(ref('hillstone_port_id', 'Firewall port', 'physical_interfaces'), owner('hillstone_assignment_id')),
+    accepts(ref('core_svi_id', 'Core SVI', 'logical_interfaces'), (candidate, record) =>
+      candidate.kind === 'svi' && owner('core_assignment_id')(candidate, record)),
     { ...ref('vlan', 'Transit VLAN', 'vlans'), initial: 9 }, field('network', 'Transit CIDR'), field('core_ip', 'Core IP'),
     field('hillstone_ip', 'Hillstone IP')], ['vlan', 'network', 'core_ip', 'hillstone_ip']), single: true },
   group('dhcp_pools', 'DHCP pools', 'pool', [subnet, field('start', 'Start address'), field('end', 'End address'),
@@ -67,11 +80,12 @@ export const catalog = [
   group('dhcp_relays', 'DHCP relays', 'relay', [subnet, svi, raw('servers', 'Relay server addresses (JSON array)', [])], ['subnet_id', 'svi_id', 'servers']),
   group('tracks', 'Tracks', 'Track', [field('target', 'Probe target'), number('interval_seconds', 'Interval seconds', 5),
     number('failure_threshold', 'Failure threshold', 3), { ...tunnel, optional: true }], ['target', 'interval_seconds', 'tunnel_id'], true),
-  group('isps', 'ISP uplinks', 'ISP', [field('name', 'Name'), device, ref('interface_id', 'WAN interface', 'physical_interfaces'),
+  group('isps', 'ISP uplinks', 'ISP', [field('name', 'Name'), device, accepts(ref('interface_id', 'WAN interface', 'physical_interfaces'), (candidate, record) =>
+    get(candidate, 'settings.mode') === 'routed' && owner('assignment_id')(candidate, record)),
     field('address', 'IPv4 address / prefix'), field('gateway', 'Gateway'), { ...track, optional: true },
     children('routed_public_blocks', 'Routed public blocks', [field('network', 'CIDR'), field('reason', 'Reason')])],
     ['name', 'interface_id', 'address', 'gateway', 'track_id'], true),
-  group('source_routes', 'Source-based routes', 'SBR rule', [device, source, refs('isp_priority', 'ISP failover order', 'isps'),
+  group('source_routes', 'Source-based routes', 'SBR rule', [device, source, accepts(refs('isp_priority', 'ISP failover order', 'isps'), owner('assignment_id')),
     children('no_nat', 'No-NAT exceptions', [isp, field('reason', 'Reason')])], ['source_vlan', 'isp_priority', 'no_nat'], true),
   group('snat', 'Source NAT', 'SNAT rule', [device, source, isp, field('translated_ip', 'Translated IPv4 address')],
     ['source_vlan', 'isp_id', 'translated_ip'], true),
@@ -109,8 +123,12 @@ export const catalog = [
     field('name', 'Interface name'), number('stack_member', 'Stack member', undefined, true), ...portFields],
     ['name', 'settings.mode', 'settings.access_vlan', 'settings.native_vlan',
       'settings.allowed_vlans', 'settings.address', 'capability_status'], true),
-  group('port_channels', 'Port-Channels', 'Port-Channel', [ref('interface_id', 'Port-Channel interface', 'logical_interfaces'),
-    number('number', 'Channel number'), refs('member_ids', 'Member ports', 'physical_interfaces'),
+  group('port_channels', 'Port-Channels', 'Port-Channel', [accepts(ref('interface_id', 'Port-Channel interface', 'logical_interfaces'), kind('port-channel')),
+    number('number', 'Channel number'), accepts(refs('member_ids', 'Member ports', 'physical_interfaces'),
+      (candidate, record, plan) => {
+        const aggregate = records(plan, 'logical_interfaces').find((item) => item.id === record.interface_id)
+        return !aggregate || candidate.assignment_id === aggregate.assignment_id
+      }),
     choice('lacp', 'LACP mode', ['active', 'passive', 'static']), ...portFields], ['number', 'interface_id', 'lacp', 'member_ids']),
 ]
 
@@ -136,10 +154,11 @@ export function set(record: RecordValue, key: string, value: Value): RecordValue
   return { ...record, [first]: rest.length ? set(object(record[first]), rest.join('.'), value) : value }
 }
 export function defaults(fields: Field[]): RecordValue {
-  return fields.reduce((record, item) => item.initial === undefined ? record : set(record, item.key, item.initial), {})
+  return fields.reduce((record, item) => item.initial === undefined ||
+    item.when && get(record, item.when[0]) !== item.when[1] ? record : set(record, item.key, item.initial), {})
 }
-export function options(plan: Plan, key: string) {
-  return records(plan, key).flatMap((record) => {
+export function options(plan: Plan, key: string, include: (record: RecordValue) => boolean = () => true) {
+  return records(plan, key).filter(include).flatMap((record) => {
     const id = record.id ?? record.assignment_id
     if (typeof id !== 'string' && typeof id !== 'number') return []
     const label = record.name ?? record.hostname ?? record.network ?? record.target ?? record.model ?? record.vendor ?? id
@@ -159,26 +178,41 @@ export function display(plan: Plan, item: Field, value: Value | undefined): stri
   if (Array.isArray(value)) return value.length && typeof value[0] === 'object' ? String(value.length) : value.join(', ') || '—'
   return String(value)
 }
-export function clean(input: RecordValue): RecordValue {
+export function patchPortSettings(previous: RecordValue, patch: RecordValue): RecordValue {
+  const settings = { ...previous, ...patch }
+  if (settings.mode === previous.mode) return settings
+  if (settings.mode !== 'access') delete settings.access_vlan
+  if (settings.mode !== 'trunk') {
+    delete settings.native_vlan
+    delete settings.allowed_vlans
+  }
+  if (settings.mode !== 'routed') delete settings.address
+  return settings
+}
+
+export function clean(input: RecordValue, previous?: RecordValue): RecordValue {
   const record = { ...input }
   if (record.family === '') record.family = null
-  if (record.kind && record.kind !== 'svi') record.vlan = null
-  if ('settings' in record) {
-    const settings = object(record.settings)
-    const mode = settings.mode
-    record.settings = mode === 'access' ? { mode, access_vlan: settings.access_vlan ?? null }
-      : mode === 'trunk' ? { mode, native_vlan: settings.native_vlan ?? null, allowed_vlans: settings.allowed_vlans ?? [] }
-        : { mode: 'routed', address: settings.address ?? null }
+  if (record.kind !== previous?.kind && record.kind && record.kind !== 'svi') record.vlan = null
+  if ('settings' in record && get(record, 'settings.mode') !== get(previous ?? {}, 'settings.mode')) {
+    record.settings = patchPortSettings(object(previous?.settings), object(record.settings))
   }
   if ('activation' in record) {
-    const activation = object(record.activation)
-    record.activation = activation.kind === 'always' ? { kind: 'always' } : activation.kind === 'track'
-      ? { kind: 'track', track_id: activation.track_id ?? null, state: activation.state ?? 'up' } : null
+    const activation = { ...object(record.activation) }
+    if (activation.kind === '' || activation.kind === null) record.activation = null
+    else if (activation.kind === 'always' && activation.kind !== get(previous ?? {}, 'activation.kind')) {
+      delete activation.track_id
+      delete activation.state
+      record.activation = { ...activation }
+    }
   }
   if ('next_hop' in record) {
-    const hop = object(record.next_hop)
-    record.next_hop = hop.kind === 'discard' ? { kind: 'discard' } : hop.kind === 'tunnel'
-      ? { kind: 'tunnel', tunnel_id: hop.tunnel_id ?? null } : { kind: 'ip', address: hop.address ?? null }
+    const hop = { ...object(record.next_hop) }
+    if (hop.kind !== get(previous ?? {}, 'next_hop.kind')) {
+      if (hop.kind !== 'ip') delete hop.address
+      if (hop.kind !== 'tunnel') delete hop.tunnel_id
+      record.next_hop = hop
+    }
   }
   return record
 }

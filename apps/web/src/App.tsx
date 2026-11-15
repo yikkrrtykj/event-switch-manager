@@ -27,8 +27,12 @@ export function App() {
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
   const dirty = useRef(false)
+  const formDirty = useRef(false)
   const current = useRef(route)
-  const mark = useRef((value: boolean) => { dirty.current = value })
+  const mark = useRef((value: boolean, form = false) => {
+    dirty.current = value
+    formDirty.current = form
+  })
   const selected = events?.find((event) => event.id === selectedId)
   const inWorkspace = workspace(route)
   const section = route === 'devices' ? 'topology' : route === 'ports' ? 'ports' : route.slice(8)
@@ -45,11 +49,12 @@ export function App() {
   useEffect(() => {
     function back() {
       const next = hashRoute()
-      if (dirty.current && workspace(current.current) && !workspace(next) && !window.confirm(en.discard)) {
+      if (next !== current.current && dirty.current && workspace(current.current) &&
+        (!workspace(next) || formDirty.current) && !window.confirm(en.discard)) {
         window.history.pushState(null, '', href(current.current))
         return
       }
-      if (!workspace(next)) dirty.current = false
+      if (!workspace(next)) mark.current(false)
       current.current = next
       setRoute(next)
     }
@@ -66,8 +71,8 @@ export function App() {
 
   function navigate(next: string) {
     if (route === next) return
-    if (dirty.current && inWorkspace && !workspace(next) && !window.confirm(en.discard)) return
-    if (!workspace(next)) dirty.current = false
+    if (dirty.current && inWorkspace && (!workspace(next) || formDirty.current) && !window.confirm(en.discard)) return
+    if (!workspace(next)) mark.current(false)
     current.current = next
     window.history.pushState(null, '', href(next))
     setRoute(next)
@@ -79,7 +84,7 @@ export function App() {
 
   function select(id: string) {
     if (id === selectedId || (inWorkspace && dirty.current && !window.confirm(en.discard))) return
-    dirty.current = false
+    mark.current(false)
     setSelectedId(id)
   }
 

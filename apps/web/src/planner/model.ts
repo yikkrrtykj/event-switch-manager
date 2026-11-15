@@ -11,10 +11,12 @@ export type Revision = Summary & { plan: Plan; warnings: Issue[]; validation_err
 const base = (id: string) => '/events/' + encodeURIComponent(id)
 const history = (id: string) => base(id) + '/plan-revisions'
 const revision = (id: string, rev: string) => history(id) + '/' + encodeURIComponent(rev)
-export const seed = (id: string) => request<Plan>(base(id) + '/plan/seed')
-export const list = (id: string) => request<Summary[]>(history(id))
-export const read = (id: string, rev: string) => request<Revision>(revision(id, rev))
-export const save = (plan: Plan) => request<Revision>(history(plan.event_id), json(plan))
+export const seed = (id: string, signal?: AbortSignal) => request<Plan>(base(id) + '/plan/seed', { signal })
+export const list = (id: string, signal?: AbortSignal) => request<Summary[]>(history(id), { signal })
+export const read = (id: string, rev: string, signal?: AbortSignal) =>
+  request<Revision>(revision(id, rev), { signal })
+export const save = (plan: Plan, signal?: AbortSignal) =>
+  request<Revision>(history(plan.event_id), { ...json(plan), signal })
 export const exportUrl = (id: string, rev: string) => '/api/v1' + revision(id, rev) + '/export'
 export function issuesFrom(error: unknown): Issue[] {
   if (!(error instanceof ApiError) || !Array.isArray(error.detail)) return []
@@ -25,8 +27,8 @@ export function issuesFrom(error: unknown): Issue[] {
     severity: issue.severity ?? 'ERROR',
   }))
 }
-export async function validate(plan: Plan) {
-  try { return await request<Issue[]>(base(plan.event_id) + '/plan/validate', json(plan)) }
+export async function validate(plan: Plan, signal?: AbortSignal) {
+  try { return await request<Issue[]>(base(plan.event_id) + '/plan/validate', { ...json(plan), signal }) }
   catch (error) {
     const issues = issuesFrom(error)
     if (issues.length) return issues

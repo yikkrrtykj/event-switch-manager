@@ -17,18 +17,21 @@ export function Validity({ status }: { status?: Status }) {
 const tabs = ['addressing', 'transit', 'dhcp', 'egress', 'vpn']
 
 export function Workspace({ event, section, navigate, onDirty }: {
-  event: EventRecord; section: string; navigate: (route: string) => void; onDirty: (dirty: boolean) => void
+  event: EventRecord; section: string; navigate: (route: string) => void; onDirty: (dirty: boolean, form?: boolean) => void
 }) {
   const [plan, setPlan] = useState<Plan>()
   const [baseline, setBaseline] = useState('')
   const [summary, setSummary] = useState<Summary[]>([])
   const [revision, setRevision] = useState<Revision>()
   const [historical, setHistorical] = useState(false)
+  const [requiresValidation, setRequiresValidation] = useState(false)
+  const [tableScope, setTableScope] = useState(0)
   const [status, setStatus] = useState<Status>()
   const [issues, setIssues] = useState<Issue[]>([])
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
+  const [formDirty, setFormDirty] = useState(false)
   const [reload, setReload] = useState(0)
   const [picked, setPicked] = useState<Location>()
   const [filter, setFilter] = useState('')
@@ -36,32 +39,40 @@ export function Workspace({ event, section, navigate, onDirty }: {
   const [dialog, setDialog] = useState<'history' | 'import' | 'json' | null>(null)
   const [comparison, setComparison] = useState<Revision>()
   const heading = useRef<HTMLHeadingElement>(null)
+  const pending = useRef<AbortController>(null)
   const currentFingerprint = fingerprint(plan)
   const dirty = Boolean(plan && !historical && baseline !== currentFingerprint)
 
-  useEffect(() => { onDirty(dirty || busy) }, [busy, dirty, onDirty])
-  useEffect(() => () => onDirty(false), [onDirty])
+  useEffect(() => { onDirty(dirty || busy || formDirty, formDirty) }, [busy, dirty, formDirty, onDirty])
+  useEffect(() => () => {
+    pending.current?.abort()
+    pending.current = null
+    onDirty(false)
+  }, [onDirty])
   useEffect(() => {
-    let active = true
+    const controller = new AbortController()
+    const { signal } = controller
     void (async () => {
       try {
-        const entries = await list(event.id)
+        const entries = await list(event.id, signal)
+        if (signal.aborted) return
         const latest = entries.at(-1)
-        const detail = latest ? await read(event.id, latest.id) : undefined
-        const data = detail?.plan ?? await seed(event.id)
-        if (!active) return
+        const detail = latest ? await read(event.id, latest.id, signal) : undefined
+        const data = detail?.plan ?? await seed(event.id, signal)
+        if (signal.aborted) return
         setSummary(entries)
         setRevision(detail)
         setPlan(data)
         setBaseline(fingerprint(data))
         setStatus(detail?.validation_status)
         setIssues(detail ? issuesOf(detail) : [])
+        setHistorical(detail?.validation_status === 'INVALID')
         setDiagnostics(detail?.validation_status === 'INVALID')
       } catch {
-        if (active) setError('Unable to load the event plan. Retry to reconnect to the local API.')
+        if (!signal.aborted) setError('Unable to load the event plan. Retry to reconnect to the local API.')
       }
     })()
-    return () => { active = false }
+    return () => controller.abort()
   }, [event.id, reload])
 
   function update(next: Plan) {
@@ -81,19 +92,45 @@ export function Workspace({ event, section, navigate, onDirty }: {
     return outcome
   }
 
-  async function finish(persist: boolean) {
-    if (!plan || historical || busy) return
+  function startOperation() {
+    const controller = new AbortController()
+    pending.current = controller
     setBusy(true)
+    return controller
+  }
+
+  function endOperation(controller: AbortController) {
+    if (pending.current !== controller) return
+    pending.current = null
+    setBusy(false)
+  }
+
+  function closeHistory() {
+    const controller = pending.current
+    if (controller) {
+      controller.abort()
+      endOperation(controller)
+    }
+    setDialog(null)
+  }
+
+  async function finish(persist: boolean) {
+    if (!plan || historical || pending.current ||
+      (persist && (status === 'INVALID' || requiresValidation && status === undefined))) return
+    const controller = startOperation()
+    const { signal } = controller
     setNotice('')
     setError('')
     try {
-      const checked = await validate(plan)
+      const checked = await validate(plan, signal)
+      if (signal.aborted) return
       const outcome = report(checked)
       if (!persist || outcome === 'INVALID') {
         if (!checked.length) setNotice('Plan validation passed.')
         return
       }
-      const stored = await save(plan)
+      const stored = await save(plan, signal)
+      if (signal.aborted) return
       setSummary((current) => [...current.filter((item) => item.id !== stored.id), stored].sort((a, b) => a.number - b.number))
       loadRevision(stored, stored.validation_status === 'INVALID')
       if (stored.validation_status === 'INVALID') {
@@ -102,11 +139,12 @@ export function Workspace({ event, section, navigate, onDirty }: {
         setNotice('Revision ' + stored.number + ' saved.')
       }
     } catch (failure) {
+      if (signal.aborted) return
       const findings = issuesFrom(failure)
       if (findings.length) report(findings)
       else setError(persist ? 'Unable to save the revision. Retry to check the local API.'
         : 'Unable to validate the plan. Retry to check the local API.')
-    } finally { setBusy(false) }
+    } finally { endOperation(controller) }
   }
 
   function loadRevision(entry: Revision, readOnly: boolean) {
@@ -118,26 +156,39 @@ export function Workspace({ event, section, navigate, onDirty }: {
     setIssues(findings)
     setPicked(undefined)
     setHistorical(readOnly)
+    setRequiresValidation(false)
+    setTableScope((current) => current + 1)
     setDiagnostics(findings.length > 0)
   }
 
   async function open(entry: Summary, compare: boolean) {
-    if (busy || (!compare && dirty && !window.confirm(en.discard))) return
-    setBusy(true)
+    if (pending.current || (!compare && dirty && !window.confirm(en.discard))) return
+    const controller = startOperation()
+    const { signal } = controller
     setError('')
     try {
-      const detail = await read(event.id, entry.id)
+      const detail = await read(event.id, entry.id, signal)
+      if (signal.aborted) return
       if (compare) setComparison(detail)
       else {
         loadRevision(detail, true)
         setNotice('')
       }
     } catch {
-      setError('Unable to open the revision. Retry from revision history.')
+      if (!signal.aborted) setError('Unable to open the revision. Retry from revision history.')
     } finally {
-      setDialog(null)
-      setBusy(false)
+      if (!signal.aborted) setDialog(null)
+      endOperation(controller)
     }
+  }
+
+  function copyRevision() {
+    if (!plan) return
+    update(plan)
+    setHistorical(false)
+    setRequiresValidation(true)
+    setTableScope((current) => current + 1)
+    setNotice('Draft copied from revision ' + revision?.number + '. Validate the draft before saving.')
   }
 
   function locate(issue: Issue) {
@@ -189,8 +240,8 @@ export function Workspace({ event, section, navigate, onDirty }: {
         <Button onClick={() => setDialog('import')} disabled={locked}>Import JSON</Button>
         <Button onClick={() => setDialog('json')}>View JSON</Button>
         <Button onClick={() => void finish(false)} disabled={locked}>Validate plan</Button>
-        {historical ? <Button primary onClick={() => { setHistorical(false); setNotice('Draft copied from revision ' + revision?.number + '.') }}>
-          Copy to draft</Button> : <Button primary onClick={() => void finish(true)} disabled={busy || status === 'INVALID'}>
+        {historical ? <Button primary onClick={copyRevision}>
+          Copy to draft</Button> : <Button primary onClick={() => void finish(true)} disabled={busy || status === 'INVALID' || requiresValidation && status === undefined}>
           {busy ? 'Working…' : 'Save revision'}</Button>}
       </div>
     </div>
@@ -240,10 +291,11 @@ export function Workspace({ event, section, navigate, onDirty }: {
     </div>}
     <div className="collections">
       {catalog.filter((group) => pane?.keys.includes(group.key)).map((group) =>
-        <PlanTable key={group.key} group={group} plan={plan} issues={issues} location={picked} locked={locked} update={update} />)}
+        <PlanTable key={group.key + ':' + tableScope} group={group} plan={plan} issues={issues} location={picked} locked={locked} update={update}
+          onFormDirty={setFormDirty} />)}
     </div>
 
-    {dialog === 'history' && <Dialog title="Revision history" onClose={() => setDialog(null)}>
+    {dialog === 'history' && <Dialog title="Revision history" onClose={closeHistory}>
       {!summary.length ? <p className="empty">No revisions saved for this event.</p>
         : <Table label="Saved revisions"><thead><tr><th scope="col">Revision</th><th scope="col">Created</th>
           <th scope="col">SHA-256</th><th scope="col">Actions</th></tr></thead><tbody>
@@ -258,9 +310,10 @@ export function Workspace({ event, section, navigate, onDirty }: {
           </tr>)}</tbody></Table>}
     </Dialog>}
     {comparison && <Compare plan={plan} revision={comparison} close={() => setComparison(undefined)} />}
-    {dialog === 'import' && <Import eventId={event.id} close={() => setDialog(null)} apply={(next) => {
+    {dialog === 'import' && <Import eventId={event.id} close={() => setDialog(null)} onFormDirty={setFormDirty} apply={(next) => {
       if (dirty && !window.confirm('Replace the unsaved draft with this JSON plan?')) return
       update(next)
+      setTableScope((current) => current + 1)
       setNotice('JSON loaded into the draft.')
       setDialog(null)
     }} />}
@@ -298,21 +351,40 @@ function download(plan: Plan) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-function Import({ eventId, close, apply }: { eventId: string; close: () => void; apply: (plan: Plan) => void }) {
+function Import({ eventId, close, apply, onFormDirty }: {
+  eventId: string; close: () => void; apply: (plan: Plan) => void; onFormDirty: (dirty: boolean) => void
+}) {
   const [data, setData] = useState('')
   const [error, setError] = useState('')
-  return <Dialog title="Import JSON" onClose={close}><form className="dialog-form" onSubmit={(event) => {
+  const fileRead = useRef(0)
+  useEffect(() => { onFormDirty(Boolean(data)) }, [data, onFormDirty])
+  useEffect(() => () => onFormDirty(false), [onFormDirty])
+
+  function cancel() {
+    if (!data || window.confirm('Discard this JSON import?')) close()
+  }
+
+  return <Dialog title="Import JSON" onClose={cancel}><form className="dialog-form" onSubmit={(event) => {
     event.preventDefault()
     try { apply(parsePlan(data, eventId)) }
     catch (failure) { setError(failure instanceof Error ? failure.message : 'Invalid plan JSON.') }
   }}>
     <label className="field">JSON file<Input type="file" accept=".json,application/json" onChange={(event) => {
       const file = event.target.files?.[0]
-      if (file) void file.text().then(setData, () => setError('Unable to read the selected file.'))
+      const attempt = ++fileRead.current
+      if (file) void file.text().then((text) => {
+        if (fileRead.current === attempt) { setData(text); setError('') }
+      }, () => {
+        if (fileRead.current === attempt) setError('Unable to read the selected file.')
+      })
     }} /></label>
-    <label className="field">Plan JSON<textarea value={data} rows={8} required onChange={(event) => setData(event.target.value)} /></label>
+    <label className="field">Plan JSON<textarea value={data} rows={8} required onChange={(event) => {
+      ++fileRead.current
+      setData(event.target.value)
+      setError('')
+    }} /></label>
     {error && <p className="error-text" role="alert">{error}</p>}
-    <div className="actions"><Button onClick={close}>Cancel</Button><Button primary type="submit">Load into draft</Button></div>
+    <div className="actions"><Button onClick={cancel}>Cancel</Button><Button primary type="submit">Load into draft</Button></div>
   </form></Dialog>
 }
 
