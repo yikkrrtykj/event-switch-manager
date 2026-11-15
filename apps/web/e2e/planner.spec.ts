@@ -822,7 +822,12 @@ test('confirms incompatible VLAN, IP and STP cleanup before applying each mode c
   const changes = modal.getByRole('table', { name: 'Port changes' })
 
   await edit.click()
+  await setting('PortFast operation').selectOption('set')
   await setting('Mode').selectOption('trunk')
+  await expect(setting('PortFast')).toHaveValue('')
+  await preview.click()
+  await expect(setting('PortFast')).toBeVisible()
+  await setting('PortFast operation').selectOption('keep')
   await setting('Native VLAN').selectOption('10')
   for (const [index, vlan] of ['10', '20'].entries()) {
     await modal.getByRole('button', { name: 'Add entry', exact: true }).click()
@@ -876,11 +881,12 @@ test('keeps Port-Channel hardware settings scoped and blocks unsafe channel and 
   }
   await channel.getByLabel('LACP mode', { exact: true }).selectOption('passive')
   await channel.getByLabel('Description', { exact: true }).fill('Aggregate for players')
+  await channel.getByLabel('PortFast', { exact: true }).selectOption('edge-trunk')
   await previewPorts(page)
   const saved = await checkedSave(page, request, id, 2)
   expect((saved.plan.port_channels as RecordValue[])[0]).toMatchObject({
     lacp: 'passive', member_ids: (initial.plan.port_channels as RecordValue[])[0]!.member_ids,
-    settings: { description: 'Aggregate for players', speed: null, duplex: null, poe_mode: null },
+    settings: { description: 'Aggregate for players', portfast: 'edge-trunk', speed: null, duplex: null, poe_mode: null },
   })
 
   for (const [name, field, value] of [
@@ -919,5 +925,13 @@ test('keeps Port-Channel hardware settings scoped and blocks unsafe channel and 
     await expect(control).toHaveAttribute('aria-invalid', 'true')
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   }
+  const portfastWarning = page.getByRole('table', { name: 'Validation issues' }).getByRole('row')
+    .filter({ hasText: 'port_setting_unverified' }).filter({ hasText: 'settings.portfast' })
+  await portfastWarning.getByRole('button', { name: /^Locate/ }).click()
+  const portfast = channel.getByLabel('PortFast', { exact: true })
+  await expect(portfast).toBeFocused()
+  await expect(portfast).not.toHaveAttribute('aria-invalid', 'true')
+  await expect(channel.getByText('Verify spanning-tree support and edge role on the actual interface')).toBeVisible()
+  await channel.getByRole('button', { name: 'Cancel', exact: true }).click()
   expect(await (await request.get(revisions(id))).json()).toHaveLength(2)
 })

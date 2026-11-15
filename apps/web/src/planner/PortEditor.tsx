@@ -96,12 +96,15 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
           if (!available && !canResetHidden(field)) return null
           const operation = operations[field.key]
           const { mixed, value: common } = currentValues.get(field.key)!
-          const current = operation?.kind === 'set' ? operation.value : operation ? undefined : common
-          const control: Field = { ...field, when: undefined,
+          const rawValue = operation?.kind === 'set' ? operation.value : operation ? undefined : common
+          const choices = field.key === 'settings.portfast' ? field.choices?.filter((choice) =>
+            choice === 'disabled' || modes.every((mode) => (mode === 'access' ? 'edge' : 'edge-trunk') === choice))
+            : field.choices
+          const permits = (value: unknown) => !choices || choices.some((choice) => choice === value)
+          const incompatible = rawValue != null && !permits(rawValue)
+          const current = operation?.kind === 'set' && incompatible ? undefined : rawValue
+          const control: Field = { ...field, when: undefined, choices,
             optional: operation?.kind !== 'set' || field.preserveEmpty,
-            choices: field.key === 'settings.portfast' ? field.choices?.filter((choice) =>
-              choice === 'disabled' || modes.every((mode) => (mode === 'access' ? 'edge' : 'edge-trunk') === choice))
-              : field.choices,
           }
           const key = path + '.' + field.key
           const after = operation?.kind ?? 'keep'
@@ -116,7 +119,8 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
                   if (action === 'keep') delete next[field.key]
                   if (action === 'reset') next[field.key] = { kind: 'reset' }
                   if (action === 'set') next[field.key] = {
-                    kind: 'set', value: common ?? (field.preserveEmpty ? '' : field.type === 'refs' ? [] : null),
+                    kind: 'set',
+                    value: common != null && permits(common) ? common : (field.preserveEmpty ? '' : field.type === 'refs' ? [] : null),
                   }
                   return next
                 })
@@ -128,6 +132,8 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
               {mixed && <Badge>Mixed</Badge>}
               {!mixed && current == null && after === 'keep' && <small className="muted">Platform default</small>}
             </div>
+            {operation?.kind === 'set' && incompatible &&
+              <small className="error-text">Choose a value allowed in the selected mode or keep the current setting.</small>}
             {available && after !== 'reset' ?
               <Fields fields={[control]} plan={plan} record={set({}, field.key, current ?? null)} path={path}
                 issues={issues} update={(next) => {
