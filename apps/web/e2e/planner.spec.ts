@@ -115,7 +115,11 @@ function stackPlan(eventId: string): Plan {
 
 test('groups real interface names by Stack member and saves a warning-only bulk edit', async ({ page, request }) => {
   const id = await createEvent(request, 'Synthetic Stack')
-  const fixture = await planRecord(request, stackPlan(id))
+  const plan = stackPlan(id)
+  const port = portsOf(plan)[0]!
+  port.settings = { ...port.settings as RecordValue, description: 'Synthetic patch panel A',
+    admin_state: 'down', speed: 'auto', duplex: 'full', poe_mode: 'never', portfast: 'disabled', bpdu_guard: 'disabled' }
+  const fixture = await planRecord(request, plan)
   expect(fixture.validation_status).toBe('VALID_WITH_WARNINGS')
   await openWorkspace(page, id, 'ports')
   await expect(page.getByRole('row', { name: /Synthetic-Core · Stack member 2/ })).toBeVisible()
@@ -139,7 +143,10 @@ test('groups real interface names by Stack member and saves a warning-only bulk 
   const current = (await stored.json() as Summary[]).at(-1)!
   const latest = await (await request.get(revisions(id) + '/' + current.id)).json() as Revision
   expect(latest.plan.physical_interfaces).toEqual(expect.arrayContaining([
-    expect.objectContaining({ name: 'Gi1/0/7', settings: expect.objectContaining({ mode: 'trunk', allowed_vlans: [20] }) }),
+    expect.objectContaining({ name: 'Gi1/0/7', settings: expect.objectContaining({
+      mode: 'trunk', allowed_vlans: [20], description: 'Synthetic patch panel A', admin_state: 'down',
+      speed: 'auto', duplex: 'full', poe_mode: 'never', portfast: 'disabled', bpdu_guard: 'disabled',
+    }) }),
     expect.objectContaining({ name: 'Gi2/0/7', settings: expect.objectContaining({ mode: 'trunk', allowed_vlans: [20] }) }),
   ]))
   await page.getByRole('button', { name: 'Revision history' }).click()
