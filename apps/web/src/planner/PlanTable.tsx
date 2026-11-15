@@ -6,6 +6,8 @@ import { Editor } from './Editor'
 import { object, records } from './model'
 import type { Issue, Plan, RecordValue } from './model'
 
+const portKey = (record: RecordValue, index: number) => String(record.id ?? 'row-' + index)
+
 export type Location = { key: string; index?: number; path: string }
 export function PlanTable({ group, plan, issues, location, locked, update }: {
   group: Group; plan: Plan; issues: Issue[]; location?: Location; locked: boolean; update: (next: Plan) => void
@@ -15,7 +17,7 @@ export function PlanTable({ group, plan, issues, location, locked, update }: {
   const [search, setSearch] = useState('')
   const [device, setDevice] = useState('')
   const [stack, setStack] = useState('')
-  const [selected, setSelected] = useState<number[]>([])
+  const [selected, setSelected] = useState<string[]>([])
   const [edit, setEdit] = useState<{ index: number; focus?: string; id?: string }>()
   const [batch, setBatch] = useState(false)
   const ref = useRef<HTMLElement>(null)
@@ -53,7 +55,8 @@ export function PlanTable({ group, plan, issues, location, locked, update }: {
   }
   const stackIds = [...new Set(all.filter((item) => !device || item.assignment_id === device).map((item) =>
     String(item.stack_member ?? 'standalone')))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-  const allSelected = visible.every(({ index }) => selected.includes(index))
+  const picked = all.filter((item, index) => selected.includes(portKey(item, index))).length
+  const allSelected = visible.every(({ item, index }) => selected.includes(portKey(item, index)))
   function replace(values: RecordValue[]) {
     update({ ...plan, [group.key]: group.single ? values[0] ?? null : values })
   }
@@ -80,14 +83,14 @@ export function PlanTable({ group, plan, issues, location, locked, update }: {
           <option value="">All Stack members</option>
           {stackIds.map((id) => <option key={id} value={id}>{id === 'standalone' ? 'Standalone' : 'Stack member ' + id}</option>)}
         </Select>
-        {!locked && <Button disabled={!selected.length} onClick={() => setBatch(true)}>Batch edit ({selected.length})</Button>}
+        {!locked && <Button disabled={!picked} onClick={() => setBatch(true)}>Batch edit ({picked})</Button>}
       </>}
     </div>}
     {!visible.length ? <p className="empty">{all.length ? 'No records match the filters.' : 'No records yet.'}</p>
       : <Table label={group.title}><thead><tr>
         {isPort && !locked && <th scope="col"><input type="checkbox" aria-label="Select all visible ports" checked={allSelected}
           onChange={() => {
-            const ids = visible.map((row) => row.index)
+            const ids = visible.map(({ item, index }) => portKey(item, index))
             setSelected(allSelected ? selected.filter((id) => !ids.includes(id)) : [...new Set([...selected, ...ids])])
           }} /></th>}
         {columns.map((field) => <th scope="col" key={field.key}>{field.label}</th>)}
@@ -97,6 +100,7 @@ export function PlanTable({ group, plan, issues, location, locked, update }: {
         const newStack = isPort && (previous?.assignment_id !== item.assignment_id || previous?.stack_member !== item.stack_member)
         const first = columns[0]
         const name = first ? display(plan, first, get(item, first.key)) : 'record'
+        const key = portKey(item, index)
         const path = rowPath(index)
         const findings = issues.filter((issue) => issue.path === path || issue.path.startsWith(path + '.'))
         const invalid = findings.some((issue) => issue.severity === 'ERROR')
@@ -104,9 +108,9 @@ export function PlanTable({ group, plan, issues, location, locked, update }: {
           {newStack && <tr className="group-row"><td colSpan={columns.length + (locked ? 1 : 3)}>
             {display(plan, { key: 'device', label: '', reference: 'assignments' }, item.assignment_id)}
             {' · '}{item.stack_member ? 'Stack member ' + String(item.stack_member) : 'Standalone'}</td></tr>}
-          <tr data-record={index} tabIndex={-1} data-selected={selected.includes(index) || undefined}>
-            {isPort && !locked && <td><input type="checkbox" aria-label={'Select port ' + name} checked={selected.includes(index)}
-              onChange={(event) => setSelected(event.target.checked ? [...selected, index] : selected.filter((id) => id !== index))} /></td>}
+          <tr data-record={index} tabIndex={-1} data-selected={selected.includes(key) || undefined}>
+            {isPort && !locked && <td><input type="checkbox" aria-label={'Select port ' + name} checked={selected.includes(key)}
+              onChange={(event) => setSelected(event.target.checked ? [...selected, key] : selected.filter((id) => id !== key))} /></td>}
             {columns.map((field) => <td key={field.key} className={/address|network|destination|serial/.test(field.key) ? 'fixed' : ''}>
               {display(plan, field, get(item, field.key))}
             </td>)}
@@ -128,14 +132,14 @@ export function PlanTable({ group, plan, issues, location, locked, update }: {
         setEdit(undefined)
         replace(next)
       }} />}
-    {batch && !locked && <Editor title={'Batch edit ' + selected.length + ' ports'} source={defaults(portFields)}
+    {batch && !locked && <Editor title={'Batch edit ' + picked + ' ports'} source={defaults(portFields)}
       fields={portFields.filter((field) => field.key !== 'settings.address')} plan={plan} issues={[]} path="bulk"
-      action={'Apply to ' + selected.length + ' ports'} close={() => setBatch(false)}
+      action={'Apply to ' + picked + ' ports'} close={() => setBatch(false)}
       hint="Existing routed addresses are retained when their ports stay routed."
       commit={(item) => {
         const settings = object(item.settings)
         replace(all.map((port, index) => {
-          if (!selected.includes(index)) return port
+          if (!selected.includes(portKey(port, index))) return port
           const previous = object(port.settings)
           return { ...port, settings: settings.mode === 'routed' && previous.mode === 'routed'
             ? { ...settings, address: previous.address ?? null } : settings }

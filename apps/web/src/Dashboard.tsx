@@ -3,7 +3,7 @@ import type { Dispatch, FormEvent, SetStateAction } from 'react'
 
 import { createEvent, getDevices, getHealth } from './api'
 import type { DeviceRecord, EventRecord, Health } from './api'
-import { Badge, Button, Loading } from './components/ui'
+import { Badge, Button, Input, Loading, Select, Table } from './components/ui'
 import { en } from './messages'
 import { list, read, records } from './planner/model'
 import type { Revision } from './planner/model'
@@ -120,9 +120,9 @@ export function Dashboard({ events, setEvents, eventError, selectedId, setSelect
             {events && events.length > 0 && (
               <div className="event-picker">
                 <label htmlFor="current-event">Selected event</label>
-                <select id="current-event" value={selectedId} onChange={(e) => setSelectedId(e.target.value)}>
+                <Select id="current-event" value={selectedId} onChange={(e) => setSelectedId(e.target.value)}>
                   {events.map((event) => <option key={event.id} value={event.id}>{event.name}</option>)}
-                </select>
+                </Select>
               </div>
             )}
             {selected && (
@@ -133,8 +133,7 @@ export function Dashboard({ events, setEvents, eventError, selectedId, setSelect
                 {devices === undefined && <Loading>Loading devices…</Loading>}
                 {devices?.length === 0 && <p>No devices recorded for this event.</p>}
                 {devices && devices.length > 0 && (
-                  <div className="overflow-x-auto">
-                    <table>
+                  <Table label="Device inventory">
                       <thead><tr><th scope="col">Hostname</th><th scope="col">Role</th><th scope="col">Management IP</th></tr></thead>
                       <tbody>
                         {devices.map((device) => (
@@ -145,8 +144,7 @@ export function Dashboard({ events, setEvents, eventError, selectedId, setSelect
                           </tr>
                         ))}
                       </tbody>
-                    </table>
-                  </div>
+                  </Table>
                 )}
               </>
             )}
@@ -156,11 +154,11 @@ export function Dashboard({ events, setEvents, eventError, selectedId, setSelect
             <h2 id="new-event-title">Create event</h2>
             <form onSubmit={submitEvent}>
               <label htmlFor="event-name">Event name</label>
-              <input id="event-name" name="name" required maxLength={120} />
+              <Input id="event-name" name="name" required maxLength={120} />
               <label htmlFor="management-vlan">Management VLAN</label>
-              <input id="management-vlan" name="management_vlan" type="number" required min={1} max={4094} defaultValue={10} />
+              <Input id="management-vlan" name="management_vlan" type="number" required min={1} max={4094} defaultValue={10} />
               {saveError && <p role="alert">{saveError}</p>}
-              <button type="submit" disabled={saving || events === null}>{saving ? 'Creating…' : 'Create event'}</button>
+              <Button type="submit" primary disabled={saving || events === null}>{saving ? 'Creating…' : 'Create event'}</Button>
             </form>
           </section>
         </div>

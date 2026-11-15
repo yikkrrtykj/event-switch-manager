@@ -2,7 +2,7 @@
 
 The local workbench uses Hallmark v2.0.0 App Screens at commit
 04977e15f3dfd6ee4b74c887dac3eb52665d6c92. The application ships local React, TypeScript,
-Tailwind CSS and shared shadcn-style source primitives with semantic slots. Browser review tools
+Tailwind CSS and local shadcn/ui Input and Table sources with semantic slots. Browser review tools
 stay in CI. No fonts or data are fetched to render the production interface.
 
 - Navigation uses one top bar with event context and five destinations. Network Planner
