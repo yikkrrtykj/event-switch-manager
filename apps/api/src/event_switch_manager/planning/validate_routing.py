@@ -108,6 +108,7 @@ def _check_core_return(
 
 def check_routes(v: Validation) -> None:
     p = v.plan
+    transit = p.transit
     vlans = {x.id for x in p.vlans}
     assignments = {x.id for x in p.assignments}
     ports = {x.id: x for x in p.physical_interfaces}
@@ -126,8 +127,7 @@ def check_routes(v: Validation) -> None:
         aggregate = logical.get(channel.interface_id)
         if aggregate and channel.settings.address:
             connected[aggregate.assignment_id].add(channel.settings.address)
-    if p.transit:
-        transit = p.transit
+    if transit:
         connected[transit.hillstone_assignment_id].add(
             IPv4Interface((transit.hillstone_ip, transit.network.prefixlen))
         )
@@ -182,7 +182,6 @@ def check_routes(v: Validation) -> None:
             on_link = set(connected[owner])
             on_link.update(tunnel.inside for tunnel in p.ipsec_tunnels
                            if tunnel.assignment_id == owner)
-            transit = p.transit
             if transit and transit.hillstone_assignment_id == owner:
                 on_link.update(connected[transit.core_assignment_id])
                 check_core_vpn_path(v, transit, prefix.network, path)
