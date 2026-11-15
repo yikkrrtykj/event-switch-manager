@@ -11,6 +11,10 @@ from .plan import EventPlan, PlanRevision, canonical_plan, plan_hash
 from .validation import PlanIssue
 
 
+def current_plan_issues(session: Session, plan: EventPlan) -> tuple[PlanIssue, ...]:
+    return (*validate_plan(plan), *check_identities(session, plan))
+
+
 def check_identities(session: Session, plan: EventPlan) -> tuple[PlanIssue, ...]:
     issues = []
     for i, assignment in enumerate(plan.assignments):
@@ -77,8 +81,11 @@ def save_revision(session: Session, plan: EventPlan) -> EventPlanRevision:
     return revision
 
 
-def revision_view(revision: EventPlanRevision) -> PlanRevision:
+def revision_view(session: Session, revision: EventPlanRevision) -> PlanRevision:
     plan = EventPlan.model_validate_json(revision.canonical_json)
+    issues = current_plan_issues(session, plan)
+    errors = tuple(issue for issue in issues if issue.severity == "ERROR")
+    warnings = tuple(issue for issue in issues if issue.severity == "WARNING")
     return PlanRevision(
         id=revision.id,
         number=revision.number,
@@ -86,7 +93,9 @@ def revision_view(revision: EventPlanRevision) -> PlanRevision:
         content_hash=revision.content_hash,
         schema_version=revision.schema_version,
         plan=plan,
-        warnings=tuple(issue for issue in validate_plan(plan) if issue.severity == "WARNING"),
+        warnings=warnings,
+        validation_errors=errors,
+        validation_status="INVALID" if errors else "VALID_WITH_WARNINGS" if warnings else "VALID",
     )
 
 

@@ -2,7 +2,7 @@ from ipaddress import IPv4Address, IPv4Network
 from typing import Literal
 from uuid import UUID
 
-from .routing import AlwaysActive, IpsecTunnel, StaticRoute, TrackActive
+from .routing import AlwaysActive, CiscoHillstoneTransit, IpsecTunnel, StaticRoute, TrackActive
 from .validation import Validation
 
 TunnelState = Literal["up", "down"]
@@ -48,10 +48,11 @@ def check_vpn_paths(
         ("down", "discard", "vpn_down_route"),
     )
     for state, expected, code in checks:
+        track_state = (tunnel.track_id, state) if track_bound else None
         wrong_paths: set[str] = set()
         possible_paths: set[str] = set()
         for address in _route_boundaries(prefix, routes):
-            outcomes = _next_hops(address, routes, tunnel, state, track_bound, core_ip, fallback)
+            outcomes = _next_hops(address, routes, track_state, core_ip, fallback)
             if expected not in outcomes:
                 wrong_paths.update(outcomes)
             elif outcomes != {expected}:
@@ -95,6 +96,35 @@ def check_vpn_paths(
               "and VPN PBR/NAT behavior during Console Deployment Preflight")
 
 
+def check_core_vpn_path(
+    v: Validation, transit: CiscoHillstoneTransit, prefix: IPv4Network, path: str,
+) -> None:
+    routes = [route for route in v.plan.static_routes
+              if route.assignment_id == transit.core_assignment_id
+              and route.destination.overlaps(prefix)]
+    if not routes:
+        return
+    routes.sort(key=lambda route: (-route.destination.prefixlen, route.preference))
+    # The preferred Core default is checked separately by check_transit.
+    hillstone = str(transit.hillstone_ip)
+    wrong_paths: set[str] = set()
+    possible_paths: set[str] = set()
+    for address in _route_boundaries(prefix, routes):
+        outcomes = _next_hops(address, routes, None, None, hillstone)
+        if hillstone not in outcomes:
+            wrong_paths.update(outcomes)
+        else:
+            possible_paths.update(outcomes - {hillstone})
+    if wrong_paths:
+        v.error(path, "vpn_core_path",
+                f"Cisco Core cannot reach Hillstone for part of {prefix}. "
+                f"Selected paths: {', '.join(sorted(wrong_paths))}.")
+    if possible_paths:
+        v.warning(path, "vpn_core_path_unverified",
+                  f"Conditional routes on Cisco Core can divert {prefix} away from Hillstone "
+                  f"via {', '.join(sorted(possible_paths))}.")
+
+
 def _route_boundaries(prefix: IPv4Network, routes: list[StaticRoute]) -> list[IPv4Address]:
     # One representative per interval with the same covering route candidates.
     start = int(prefix.network_address)
@@ -109,15 +139,15 @@ def _route_boundaries(prefix: IPv4Network, routes: list[StaticRoute]) -> list[IP
 
 
 def _next_hops(
-    address: IPv4Address, routes: list[StaticRoute], tunnel: IpsecTunnel,
-    state: TunnelState, track_bound: bool, core_ip: IPv4Address | None, fallback: str,
+    address: IPv4Address, routes: list[StaticRoute],
+    track_state: tuple[UUID, TunnelState] | None, core_ip: IPv4Address | None, fallback: str,
 ) -> set[str]:
     outcomes: set[str] = set()
     tracks_if_skipped: dict[UUID, TunnelState] = {}
     for route in routes:
         if address not in route.destination:
             continue
-        active = _active(route, tunnel, state, track_bound)
+        active = _active(route, track_state)
         condition = route.activation
         if active is None and isinstance(condition, TrackActive):
             assumed_state = tracks_if_skipped.get(condition.track_id)
@@ -141,15 +171,15 @@ def _next_hops(
 
 
 def _active(
-    route: StaticRoute, tunnel: IpsecTunnel, state: TunnelState, track_bound: bool,
+    route: StaticRoute, track_state: tuple[UUID, TunnelState] | None,
 ) -> bool | None:
     condition = route.activation
     if isinstance(condition, AlwaysActive):
         return True
     if condition is None:
         return True if route.next_hop.kind == "ip" else None
-    if track_bound and condition.track_id == tunnel.track_id:
-        return condition.state == state
+    if track_state is not None and condition.track_id == track_state[0]:
+        return condition.state == track_state[1]
     return None
 
 

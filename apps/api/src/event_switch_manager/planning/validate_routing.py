@@ -7,7 +7,7 @@ from event_switch_manager.domain import DeviceRole
 from .plan import EventPlan
 from .routing import IpNextHop, NatExemption, PolicyBasedRoute, StaticRoute, TrackActive
 from .types import usable
-from .validate_vpn import check_vpn_paths
+from .validate_vpn import check_core_vpn_path, check_vpn_paths
 from .validation import Validation, pairs
 
 
@@ -179,10 +179,16 @@ def check_routes(v: Validation) -> None:
         if remote_tunnel:
             owner = remote_tunnel.assignment_id
             check_vpn_paths(v, remote_tunnel, prefix.network, path)
-            for address in connected[owner]:
-                v.require(not prefix.network.overlaps(address.network), path,
-                          "vpn_connected_overlap",
-                          f"{prefix.network} overlaps connected network {address.network}")
+            on_link = set(connected[owner])
+            on_link.update(tunnel.inside for tunnel in p.ipsec_tunnels
+                           if tunnel.assignment_id == owner)
+            transit = p.transit
+            if transit and transit.hillstone_assignment_id == owner:
+                on_link.update(connected[transit.core_assignment_id])
+                check_core_vpn_path(v, transit, prefix.network, path)
+            for network in sorted({address.network for address in on_link}):
+                v.require(not prefix.network.overlaps(network), path, "vpn_connected_overlap",
+                          f"{prefix.network} overlaps connected network {network}")
     for i, j in pairs(len(p.vpn_remote_prefixes)):
         a, b = p.vpn_remote_prefixes[i], p.vpn_remote_prefixes[j]
         owner_a, owner_b = tunnels.get(a.tunnel_id), tunnels.get(b.tunnel_id)
@@ -264,6 +270,7 @@ def _check_policies(v: Validation, vlans: set[int]) -> None:
         )
         v.require(has_exemption, f"policy_routes.{i}", "nat_exemption",
                   "VPN policy needs a matching NAT exemption")
+
 
 def _check_source_egress(v: Validation, vlans: set[int]) -> None:
     p = v.plan

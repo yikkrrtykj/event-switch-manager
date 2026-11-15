@@ -37,9 +37,9 @@ All routes are under `/api/v1/events/{event_id}`. The server keeps the existing 
 | --- | --- |
 | GET `/plan/seed` | Create a plan in memory from Foundation inventory. Existing assignment UUIDs are preserved and hardware bindings start empty. |
 | POST `/plan/validate` | Return validation issues with paths, stable codes and severity. Structural errors use the API's 422 response. |
-| POST `/plan-revisions` | Validate and append a schema version 1 plan. Submitting the same content returns its existing revision. |
+| POST `/plan-revisions` | Validate and append a schema version 1 plan. Submitting the same content returns its existing revision with current validation. |
 | GET `/plan-revisions` | List revision metadata in sequence order. |
-| GET `/plan-revisions/{revision_id}` | Read the revision, plan and planning warnings. |
+| GET `/plan-revisions/{revision_id}` | Read the revision, plan and current validation. |
 | GET `/plan-revisions/{revision_id}/export` | Export canonical JSON with the SHA-256 content hash as its ETag. |
 
 The document's event UUID must match the URL. Array order is canonicalized for set-like collections. SBR ISP priority retains its order. Revision rows are append-only. SQLite serializes revision imports and the chassis registry enforces verified vendor/serial identity across events.
@@ -52,15 +52,23 @@ revision `0002_event_plans` already stores plans as JSON, so there is no Alembic
 Existing revision exports retain their original bytes and ETags. An exact re-import can return
 that historical revision. New or edited content must satisfy the current validation rules.
 
-- Plan validation returns `ERROR` and `WARNING` issues with field paths. Only errors block
-  new imports. Imported and read revisions include warnings against the stored plan.
+- Revision detail and import responses recalculate validation against the stored plan and current
+  asset and assignment registry. They return `validation_errors`, the existing `warnings` field
+  and `validation_status` (`INVALID`, `VALID_WITH_WARNINGS` or `VALID`). HTTP 200 on an exact
+  re-import means the historical revision was found. A historically saved plan can be invalid
+  under current rules. Errors block any new revision with HTTP 422. The revision list provides
+  metadata and the export endpoint returns the original plan bytes.
+- Planning validity describes the current model checks. Deployment must rerun current validation
+  and independently pass hardware preflight before using any revision.
 - Chassis records can carry an expected vendor and model with no verified serial. Such records
   describe planned positions and are not registered as verified assets. Planned interfaces and
   Stack members can reference those positions. The same UUIDs can be enriched with observations.
 - Tunnel Track can explicitly bind to the tunnel, and routes can be always active or conditional
   on Track up/down. The planner evaluates both states independently of any recorded tunnel state.
   Effective routes use longest prefix first, then lower preference, including more-specific
-  routes and fallback to the summary or default. A lower-preference discard without explicit
+  routes and fallback to the summary or default. For Hillstone tunnels on the planned transit,
+  the planner also checks that Cisco Core can reach Hillstone for the remote prefix. A
+  lower-preference discard without explicit
   activation and tunnel withdrawal is unverified.
 - `192.168.141.0/24` may overlap a Hillstone return summary of `192.168.0.0/16` to Cisco
   Core. With the VPN route active on Track up and an eligible winning discard on Track down,

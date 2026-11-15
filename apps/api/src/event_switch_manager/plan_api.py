@@ -6,10 +6,9 @@ from sqlalchemy import select, text
 
 from .api import DatabaseSession, find_event
 from .models import Device, EventPlanRevision
-from .planning.checks import validate_plan
 from .planning.inventory import EventDeviceAssignment
 from .planning.persistence import (
-    check_identities,
+    current_plan_issues,
     find_existing_revision,
     get_revision,
     revision_view,
@@ -26,7 +25,7 @@ def plan_issues(session: DatabaseSession, event_id: UUID, plan: EventPlan) -> tu
     if event_id != plan.event_id:
         return (PlanIssue(path="event_id", code="event_mismatch",
                           message="Plan event UUID must match the URL"),)
-    return (*validate_plan(plan), *check_identities(session, plan))
+    return current_plan_issues(session, plan)
 
 
 @router.get("/plan/seed")
@@ -72,7 +71,7 @@ def import_plan(event_id: UUID, plan: EventPlan, session: DatabaseSession) -> Pl
         if any(issue.severity == "ERROR" for issue in issues):
             raise HTTPException(status_code=422, detail=[issue.model_dump() for issue in issues])
         revision = save_revision(session, plan)
-    result = revision_view(revision)
+    result = revision_view(session, revision)
     session.commit()
     return result
 
@@ -106,7 +105,7 @@ def require_revision(
 
 @router.get("/plan-revisions/{revision_id}")
 def read_revision(event_id: UUID, revision_id: UUID, session: DatabaseSession) -> PlanRevision:
-    return revision_view(require_revision(event_id, revision_id, session))
+    return revision_view(session, require_revision(event_id, revision_id, session))
 
 
 @router.get("/plan-revisions/{revision_id}/export", response_class=Response)

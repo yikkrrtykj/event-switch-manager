@@ -83,6 +83,8 @@ class PlanRevisionSummary(Record):
 class PlanRevision(PlanRevisionSummary):
     plan: EventPlan
     warnings: tuple[PlanIssue, ...] = ()
+    validation_errors: tuple[PlanIssue, ...]
+    validation_status: Literal["VALID", "VALID_WITH_WARNINGS", "INVALID"]
 
 
 def _json(value: JsonValue) -> str:

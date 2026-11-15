@@ -235,6 +235,8 @@ def test_import_export_is_atomic_immutable_and_event_scoped(tmp_path: Path) -> N
             responses = list(pool.map(lambda _: client.post(revs, json=plan), range(2)))
         assert [response.status_code for response in responses] == [200, 200]
         revision = responses[0].json()
+        assert revision["validation_status"] == "VALID_WITH_WARNINGS"
+        assert revision["validation_errors"] == []
         assert {
             (issue["code"], issue["severity"]) for issue in revision["warnings"]
         } == {(issue["code"], issue["severity"]) for issue in issues}
@@ -255,7 +257,10 @@ def test_import_export_is_atomic_immutable_and_event_scoped(tmp_path: Path) -> N
         assert rejected.status_code == 422
         assert rejected.json()["detail"][0]["code"] == "assignment_event"
         reused["assignments"][0]["id"] = uid(41)
-        assert client.post(second_url + "/plan-revisions", json=reused).status_code == 200
+        clean = client.post(second_url + "/plan-revisions", json=reused)
+        assert clean.status_code == 200
+        assert clean.json()["validation_status"] == "VALID"
+        assert clean.json()["warnings"] == clean.json()["validation_errors"] == []
         assert client.get(f"{API}/health").json()["device_writes_enabled"] is False
     with TestClient(create_app(settings), base_url=ORIGIN) as client:
         assert client.get(rev_url).json() == revision
@@ -424,6 +429,43 @@ def test_conditional_return_route_cannot_hide_a_more_specific_discard() -> None:
     ])
     issues = validate_plan(EventPlan.model_validate(raw))
     assert any(issue.code == "return_route" and issue.path == "static_routes.4" for issue in issues)
+
+
+@pytest.mark.parametrize("next_hop", [
+    {"kind": "discard"},
+    {"kind": "ip", "address": "192.168.10.2"},
+])
+def test_core_static_route_cannot_bypass_hillstone_for_remote_prefix(
+    next_hop: dict[str, str],
+) -> None:
+    raw = overlap_plan()
+    raw["static_routes"].append({
+        "id": uid(40), "assignment_id": uid(4), "destination": "192.168.141.128/25",
+        "next_hop": next_hop, "activation": {"kind": "always"},
+    })
+    assert "vpn_core_path" in problem_codes(raw)
+    raw["static_routes"].append({
+        "id": uid(41), "assignment_id": uid(4), "destination": "192.168.141.128/25",
+        "next_hop": {"kind": "ip", "address": "10.0.0.2"}, "preference": 2,
+    })
+    assert "vpn_core_path" in problem_codes(raw)
+    raw["static_routes"][-2]["preference"] = 3
+    assert not problem_codes(raw)
+
+
+@pytest.mark.parametrize("owner", ["core", "tunnel"])
+def test_vpn_remote_prefix_cannot_cover_connected_interfaces(owner: str) -> None:
+    raw = overlap_plan()
+    if owner == "core":
+        raw["logical_interfaces"].append({
+            "id": uid(40), "assignment_id": uid(4), "name": "Vlan20", "kind": "svi",
+            "vlan": 20, "address": "192.168.141.1/25",
+        })
+    else:
+        raw["ipsec_tunnels"][0]["inside"] = "192.168.141.1/30"
+        raw["ipsec_tunnels"][0]["remote_gateway"] = "192.168.141.2"
+        raw["tracks"][2]["target"] = "192.168.141.2"
+    assert "vpn_connected_overlap" in problem_codes(raw)
 
 
 def test_real_local_subnet_overlap_remains_an_error() -> None:
@@ -628,13 +670,78 @@ def test_legacy_revision_hash_and_reimport_are_stable_under_stricter_checks(tmp_
                     "hash": old_hash, "content": old_content})
         finally:
             engine.dispose()
-        url = f"{API}/events/{uid(99)}/plan-revisions"
-        exported = client.get(f"{url}/{uid(98)}/export")
-        assert exported.text == old_content
-        assert exported.headers["etag"] == f'"{old_hash}"'
-        same = client.post(url, json=exported.json())
+        event_url = f"{API}/events/{uid(99)}"
+        url = f"{event_url}/plan-revisions"
+        revision_url = f"{url}/{uid(98)}"
+        export = client.get(f"{revision_url}/export")
+        assert export.text == old_content
+        assert export.headers["etag"] == f'"{old_hash}"'
+
+        detail = client.get(revision_url)
+        assert detail.status_code == 200
+        revision = detail.json()
+        assert revision["id"] == uid(98)
+        assert revision["number"] == 1
+        assert revision["content_hash"] == old_hash
+        assert revision["validation_status"] == "INVALID"
+        assert revision["validation_errors"] == [{
+            "path": "source_routes.0.isp_priority.1",
+            "code": "missing_sbr_snat",
+            "message": "Backup #1 ISP Secondary needs SNAT for VLAN 20 or a documented "
+                       "no-NAT exception",
+            "severity": "ERROR",
+        }]
+        assert {issue["code"] for issue in revision["warnings"]} >= {
+            "vpn_failover_not_verified", "port_capability_unverified",
+        }
+        current = client.post(f"{event_url}/plan/validate", json=export.json()).json()
+        assert revision["validation_errors"] == [i for i in current if i["severity"] == "ERROR"]
+        assert revision["warnings"] == [i for i in current if i["severity"] == "WARNING"]
+
+        same = client.post(url, json=export.json())
         assert same.status_code == 200
-        assert same.json()["id"] == uid(98)
+        assert same.json() == revision
         raw["vlans"][2]["name"] = "Updated Players"
-        assert client.post(url, json=raw).status_code == 422
+        rejected = client.post(url, json=raw)
+        assert rejected.status_code == 422
+        assert revision["validation_errors"][0] in rejected.json()["detail"]
         assert len(client.get(url).json()) == 1
+        unchanged = client.get(f"{revision_url}/export")
+        assert unchanged.content == export.content
+        assert unchanged.headers["etag"] == export.headers["etag"]
+
+
+
+def test_revision_validation_uses_current_asset_registry(tmp_path: Path) -> None:
+    settings = Settings(database_path=tmp_path / "current-registry.sqlite3")
+    with TestClient(create_app(settings), base_url=ORIGIN, headers={"Origin": ORIGIN}) as client:
+        first = client.post(f"{API}/events", json={"name": "Planned hardware"}).json()["id"]
+        second = client.post(f"{API}/events", json={"name": "Observed hardware"}).json()["id"]
+        url = f"{API}/events/{first}/plan-revisions"
+        planned = {
+            "schema_version": 1,
+            "event_id": first,
+            "physical_devices": [{"id": uid(1), "vendor": "cisco"}],
+        }
+        saved = client.post(url, json=planned)
+        assert saved.status_code == 200
+        assert saved.json()["validation_status"] == "VALID_WITH_WARNINGS"
+        revision_url = f"{url}/{saved.json()['id']}"
+        registered = client.post(f"{API}/events/{second}/plan-revisions", json={
+            "schema_version": 1,
+            "event_id": second,
+            "physical_devices": [{
+                "id": uid(1), "vendor": "hillstone", "verified_serial": "SYN-FW-A",
+            }],
+        })
+        assert registered.status_code == 200
+        check = client.get(revision_url)
+        assert check.status_code == 200
+        current = check.json()
+        assert current["id"] == saved.json()["id"]
+        assert current["content_hash"] == saved.json()["content_hash"]
+        assert current["validation_status"] == "INVALID"
+        assert [issue["code"] for issue in current["validation_errors"]] == ["physical_identity"]
+        repeated = client.post(url, json=planned)
+        assert repeated.status_code == 200
+        assert repeated.json() == current
