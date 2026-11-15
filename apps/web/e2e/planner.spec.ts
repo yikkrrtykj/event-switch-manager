@@ -690,6 +690,10 @@ test('edits all port settings and persists Keep, Reset, Set and empty descriptio
     expect(await modal.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1)
     await close.evaluate((node) => { node.closest('dialog')?.scrollTo(0, 0) })
     await page.screenshot({ path: info.outputPath('single-port-' + width + '.png') })
+    if (width === 320) {
+      await preview.scrollIntoViewIfNeeded()
+      await page.screenshot({ path: info.outputPath('single-port-320-actions.png') })
+    }
   }
   await page.setViewportSize({ width: 1440, height: 900 })
   await previewPorts(page)
@@ -851,6 +855,8 @@ test('confirms incompatible VLAN, IP and STP cleanup before applying each mode c
   await expect(changes.getByRole('row', { name: /Native VLAN .*Clear on mode change/ })).toBeVisible()
   await expect(changes.getByRole('row', { name: /Allowed VLANs .*Clear on mode change/ })).toBeVisible()
   await expect(changes.getByRole('row', { name: /BPDU Guard enabled Platform default Clear on mode change/ })).toBeVisible()
+  const changeRegion = modal.getByRole('region', { name: 'Port changes', exact: true })
+  expect(await changeRegion.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1)
   await page.screenshot({ path: info.outputPath('confirm-mode-cleanup.png') })
   await confirm.click()
   const routed = await checkedSave(page, request, id, 3)
