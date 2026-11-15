@@ -412,6 +412,20 @@ def test_complementary_wrong_routes_leave_no_discard_path() -> None:
     assert problem_codes(raw) >= {"vpn_down_route", "vpn_return_overlap_risk"}
 
 
+def test_conditional_return_route_cannot_hide_a_more_specific_discard() -> None:
+    raw = overlap_plan()
+    raw["static_routes"].extend([
+        {"id": uid(40), "assignment_id": uid(5), "destination": "192.168.10.128/25",
+         "next_hop": {"kind": "ip", "address": "10.0.0.1"},
+         "activation": {"kind": "track", "track_id": uid(20), "state": "up"}},
+        {"id": uid(41), "assignment_id": uid(5), "destination": "192.168.10.128/25",
+         "next_hop": {"kind": "discard"}, "preference": 200,
+         "activation": {"kind": "track", "track_id": uid(20), "state": "down"}},
+    ])
+    issues = validate_plan(EventPlan.model_validate(raw))
+    assert any(issue.code == "return_route" and issue.path == "static_routes.4" for issue in issues)
+
+
 def test_real_local_subnet_overlap_remains_an_error() -> None:
     raw = overlap_plan()
     raw["subnets"].append({"id": uid(40), "vlan": 20, "network": "192.168.141.128/25"})

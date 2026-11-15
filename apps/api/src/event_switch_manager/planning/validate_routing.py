@@ -6,8 +6,8 @@ from event_switch_manager.domain import DeviceRole
 
 from .plan import EventPlan
 from .routing import IpNextHop, NatExemption, PolicyBasedRoute, StaticRoute, TrackActive
-from .validate_vpn import check_vpn_paths
 from .types import usable
+from .validate_vpn import check_vpn_paths
 from .validation import Validation, pairs
 
 
@@ -94,15 +94,16 @@ def _check_core_return(
     v.require(covering and _via_core(covering, core_ip)
               and not isinstance(covering.activation, TrackActive), path, "return_route",
               f"Hillstone needs a preferred return route via Core for {network}")
-    best_by_prefix: dict[IPv4Network, tuple[int, StaticRoute]] = {}
+    by_prefix: dict[IPv4Network, list[tuple[int, StaticRoute]]] = defaultdict(list)
     for index, route in routes:
         if route.destination != network and route.destination.subnet_of(network):
-            current = best_by_prefix.get(route.destination)
-            if current is None or route.preference < current[1].preference:
-                best_by_prefix[route.destination] = (index, route)
-    for index, winner in best_by_prefix.values():
-        v.require(_via_core(winner, core_ip), f"static_routes.{index}", "return_route",
-                  f"More-specific route {winner.destination} diverts {network} from Core")
+            by_prefix[route.destination].append((index, route))
+    for candidates in by_prefix.values():
+        for index, route in sorted(candidates, key=lambda entry: entry[1].preference):
+            v.require(_via_core(route, core_ip), f"static_routes.{index}", "return_route",
+                      f"More-specific route {route.destination} can divert {network} from Core")
+            if not isinstance(route.activation, TrackActive):
+                break
 
 
 def check_routes(v: Validation) -> None:
