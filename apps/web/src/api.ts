@@ -23,10 +23,21 @@ export interface DeviceRecord {
   management_ip: string | null
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+export class ApiError extends Error {
+  constructor(readonly status: number, readonly detail: unknown) {
+    super('Request failed (HTTP ' + status + ').')
+  }
+}
+
+export const json = (body: unknown): RequestInit => ({
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+})
+
+export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch('/api/v1' + path, options)
   if (!response.ok) {
-    throw new Error('Request failed (HTTP ' + response.status + ').')
+    const body = await response.json().catch(() => null) as { detail?: unknown } | null
+    throw new ApiError(response.status, body?.detail)
   }
   return (await response.json()) as T
 }
