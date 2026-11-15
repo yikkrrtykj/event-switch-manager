@@ -7,7 +7,7 @@ import { fingerprint, object } from './model'
 import type { Issue, Plan, RecordValue, Value } from './model'
 
 type FieldsProps = { fields: Field[]; plan: Plan; record: RecordValue; path: string; issues: Issue[]; update: (record: RecordValue) => void }
-function Fields({ fields, plan, record, path, issues, update }: FieldsProps) {
+export function Fields({ fields, plan, record, path, issues, update }: FieldsProps) {
   return <div className="field-grid">{fields.map((field) => {
     if (field.when && get(record, field.when[0]) !== field.when[1]) return null
     const key = path + '.' + field.key
@@ -77,10 +77,11 @@ function Fields({ fields, plan, record, path, issues, update }: FieldsProps) {
             try { change(input.value.trim() ? JSON.parse(input.value) as Value : null); input.setCustomValidity('') }
             catch { input.setCustomValidity('Enter valid JSON.') }
           }} />
-          : <Input id={key} {...attributes} type={field.type === 'number' ? 'number' : 'text'} required={!field.optional}
+          : <Input id={key} {...attributes} type={field.type === 'number' ? 'number' : 'text'}
+            maxLength={field.maxLength} required={!field.optional}
             value={String(value ?? '')} onChange={(event) => {
               const next = event.target.value
-              change(!next ? null : field.type === 'number' ? Number(next) : next)
+              change(!next && !field.preserveEmpty ? null : field.type === 'number' ? Number(next) : next)
             }} />}
       {findings.length > 0 && <div id={key + '-issues'}>{findings.map((issue, index) =>
         <small key={index} className={issue.severity === 'ERROR' ? 'error-text' : 'muted'}>{issue.message}</small>)}</div>}
@@ -98,14 +99,7 @@ export function Editor({ title, source, fields, plan, issues, path, focus, commi
   const dirty = invalidJson || fingerprint(source) !== fingerprint(record)
   useEffect(() => { onFormDirty(dirty) }, [dirty, onFormDirty])
   useEffect(() => () => onFormDirty(false), [onFormDirty])
-  const ref = useRef<HTMLFormElement>(null)
-  useEffect(() => {
-    if (!focus) return
-    const all = [...(ref.current?.querySelectorAll<HTMLElement>('[data-field]') ?? [])]
-    const matching = all.find((item) => item.dataset.field === focus)
-      ?? all.find((item) => item.dataset.field && focus.startsWith(item.dataset.field + '.'))
-    matching?.focus()
-  }, [focus])
+  const ref = useFieldFocus(focus)
   function cancel() {
     if (!dirty || window.confirm('Discard edits to this form?')) close()
   }
@@ -120,4 +114,16 @@ export function Editor({ title, source, fields, plan, issues, path, focus, commi
       <div className="actions"><Button onClick={cancel}>Cancel</Button><Button type="submit" primary>{action}</Button></div>
     </form>
   </Dialog>
+}
+
+export function useFieldFocus(focus?: string) {
+  const ref = useRef<HTMLFormElement>(null)
+  useEffect(() => {
+    if (!focus) return
+    const all = [...(ref.current?.querySelectorAll<HTMLElement>('[data-field]') ?? [])]
+    const matching = all.find((item) => item.dataset.field === focus)
+      ?? all.find((item) => item.dataset.field && focus.startsWith(item.dataset.field + '.'))
+    matching?.focus()
+  }, [focus])
+  return ref
 }

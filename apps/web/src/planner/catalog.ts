@@ -6,9 +6,12 @@ export type Field = {
   label: string
   type?: 'number' | 'choice' | 'ref' | 'refs' | 'json' | 'records'
   optional?: boolean
-  choices?: string[]
+  choices?: (string | number)[]
+  preserveEmpty?: boolean
+  maxLength?: number
   reference?: string
   initial?: Value
+  modelDefault?: Value
   when?: [string, string]
   children?: Field[]
   accepts?: (candidate: RecordValue, record: RecordValue, plan: Plan) => boolean
@@ -44,13 +47,29 @@ const tunnel = accepts(ref('tunnel_id', 'Tunnel', 'ipsec_tunnels'), owner('assig
 const isp = accepts(ref('isp_id', 'ISP', 'isps'), owner('assignment_id'))
 const pref = number('preference', 'Preference', 1)
 const priority = number('priority', 'Priority', 10)
-export const portFields = [
+const defaultLacp = 'active'
+const lacpMode = { ...choice('lacp', 'LACP mode', [defaultLacp, 'passive', 'static']), modelDefault: defaultLacp }
+const portModeFields = [
   choice('settings.mode', 'Mode', ['access', 'trunk', 'routed']),
   when(ref('settings.access_vlan', 'Access VLAN', 'vlans'), 'settings.mode', 'access'),
   when(ref('settings.native_vlan', 'Native VLAN', 'vlans', true), 'settings.mode', 'trunk'),
-  when(refs('settings.allowed_vlans', 'Allowed VLANs', 'vlans'), 'settings.mode', 'trunk'),
+  when({ ...refs('settings.allowed_vlans', 'Allowed VLANs', 'vlans'), modelDefault: [] }, 'settings.mode', 'trunk'),
   when(field('settings.address', 'IPv4 address / prefix', true), 'settings.mode', 'routed'),
 ]
+const layer2Fields = [
+  { ...choice('settings.portfast', 'PortFast', ['edge', 'edge-trunk', 'disabled']), initial: undefined },
+  { ...choice('settings.bpdu_guard', 'BPDU Guard', ['enabled', 'disabled']), initial: undefined },
+]
+const portDescription: Field = { ...field('settings.description', 'Description', true), preserveEmpty: true, maxLength: 240 }
+const adminState = { ...choice('settings.admin_state', 'Administrative state', ['up', 'down']), initial: undefined }
+const physicalMedia: Field[] = [
+  { key: 'settings.speed', label: 'Speed (Mbps)', type: 'choice',
+    choices: ['auto', 10, 100, 1000, 2500, 5000, 10000, 25000, 40000, 50000, 100000, 200000, 400000, 800000] },
+  { ...choice('settings.duplex', 'Duplex', ['auto', 'full', 'half']), initial: undefined },
+  { ...choice('settings.poe_mode', 'PoE mode', ['auto', 'static', 'never']), initial: undefined },
+]
+const portFields = [portDescription, adminState, ...portModeFields, ...physicalMedia, ...layer2Fields]
+const channelFields = [portDescription, adminState, ...portModeFields, ...layer2Fields]
 const group = (key: string, title: string, singular: string, fields: Field[], columns: string[], id = false): Group =>
   ({ key, title, singular, fields, columns, id })
 
@@ -129,7 +148,7 @@ export const catalog = [
         const aggregate = records(plan, 'logical_interfaces').find((item) => item.id === record.interface_id)
         return !aggregate || candidate.assignment_id === aggregate.assignment_id
       }),
-    choice('lacp', 'LACP mode', ['active', 'passive', 'static']), ...portFields], ['number', 'interface_id', 'lacp', 'member_ids']),
+    lacpMode, ...channelFields], ['number', 'interface_id', 'lacp', 'member_ids', 'settings.mode']),
 ]
 
 export const sections: Record<string, { label: string; keys: string[] }> = {
@@ -168,7 +187,11 @@ export function options(plan: Plan, key: string, include: (record: RecordValue) 
     return [{ id, label: prefix + String(label) + suffix }]
   })
 }
+export function withModelDefault(field: Field, value: Value | undefined) {
+  return value === undefined ? field.modelDefault : value
+}
 export function display(plan: Plan, item: Field, value: Value | undefined): string {
+  value = withModelDefault(item, value)
   if (item.key === 'capability_status' && value !== 'verified' || item.key === 'verified_serial' && !value) return 'UNVERIFIED'
   if (value == null || value === '') return '—'
   if (item.reference) {
@@ -178,25 +201,10 @@ export function display(plan: Plan, item: Field, value: Value | undefined): stri
   if (Array.isArray(value)) return value.length && typeof value[0] === 'object' ? String(value.length) : value.join(', ') || '—'
   return String(value)
 }
-export function patchPortSettings(previous: RecordValue, patch: RecordValue): RecordValue {
-  const settings = { ...previous, ...patch }
-  if (settings.mode === previous.mode) return settings
-  if (settings.mode !== 'access') delete settings.access_vlan
-  if (settings.mode !== 'trunk') {
-    delete settings.native_vlan
-    delete settings.allowed_vlans
-  }
-  if (settings.mode !== 'routed') delete settings.address
-  return settings
-}
-
 export function clean(input: RecordValue, previous?: RecordValue): RecordValue {
   const record = { ...input }
   if (record.family === '') record.family = null
   if (record.kind !== previous?.kind && record.kind && record.kind !== 'svi') record.vlan = null
-  if ('settings' in record && get(record, 'settings.mode') !== get(previous ?? {}, 'settings.mode')) {
-    record.settings = patchPortSettings(object(previous?.settings), object(record.settings))
-  }
   if ('activation' in record) {
     const activation = { ...object(record.activation) }
     if (activation.kind === '' || activation.kind === null) record.activation = null

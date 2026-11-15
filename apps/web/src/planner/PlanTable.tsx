@@ -1,15 +1,16 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { Badge, Button, Input, Select, Table } from '../components/ui'
-import { clean, defaults, display, get, options, patchPortSettings, portFields } from './catalog'
+import { clean, defaults, display, get, options } from './catalog'
 import type { Field, Group } from './catalog'
 import { Editor } from './Editor'
+import { PortEditor } from './PortEditor'
+import { describePortValue, isPortSetting, memberLabel } from './portSettings'
 import { object, records } from './model'
 import type { Issue, Plan, RecordValue } from './model'
 
 type Row = { item: RecordValue; index: number }
 
 const assignment = { key: 'assignment_id', label: 'Device', reference: 'assignments' }
-const memberLabel = (item: RecordValue) => item.stack_member ? 'Stack member ' + String(item.stack_member) : 'Standalone'
 
 export type Location = { key: string; index?: number; path: string }
 export function PlanTable({ group, plan, issues, location, locked, update, onFormDirty }: {
@@ -17,6 +18,7 @@ export function PlanTable({ group, plan, issues, location, locked, update, onFor
   onFormDirty: (dirty: boolean) => void
 }) {
   const isPort = group.key === 'physical_interfaces'
+  const isChannel = group.key === 'port_channels'
   const value = plan[group.key]
   const isRecord = (item: unknown) => item !== null && typeof item === 'object' && !Array.isArray(item)
   const malformed = group.single ? value != null && !isRecord(value)
@@ -57,7 +59,8 @@ export function PlanTable({ group, plan, issues, location, locked, update, onFor
     ?? { key, label: key === 'capability_status' ? 'Capability' : key })
   const visible = all.map((item, index) => ({ item, index })).filter(({ item }) =>
     (!device || item.assignment_id === device) && (!stack || String(item.stack_member ?? 'standalone') === stack)
-    && columns.map((field) => display(plan, field, get(item, field.key))).join(' ').toLowerCase().includes(search.trim().toLowerCase()))
+    && [...columns.map((field) => display(plan, field, get(item, field.key))), get(item, 'settings.description')]
+      .join(' ').toLowerCase().includes(search.trim().toLowerCase()))
   if (isPort) {
     visible.sort((a, b) => String(a.item.assignment_id).localeCompare(String(b.item.assignment_id))
       || Number(a.item.stack_member ?? 0) - Number(b.item.stack_member ?? 0)
@@ -74,22 +77,28 @@ export function PlanTable({ group, plan, issues, location, locked, update, onFor
     setBatchError('')
   }
 
-  function applyBatch(patch: RecordValue) {
+  function applyBatch(items: RecordValue[]) {
     if (!batch || locked || batch.length !== picked.length ||
       batch.some(({ item, index }) => !picked.some((row) => row.item === item && row.index === index))) {
       resetSelection()
       setBatchError('The target ports changed. Select them again.')
       return
     }
-    const settings = object(patch.settings)
-    const targets = new Set(batch.map(({ index }) => index))
-    replace(all.map((port, index) => targets.has(index)
-      ? { ...port, settings: patchPortSettings(object(port.settings), settings) } : port))
+    const replacements = new Map(batch.map(({ index }, position) => [index, items[position]]))
+    replace(all.map((port, index) => replacements.get(index) ?? port))
     resetSelection()
   }
 
   function replace(values: RecordValue[]) {
     update({ ...plan, [group.key]: group.single ? values[0] ?? null : values })
+  }
+  function applyEdit(index: number, item: RecordValue) {
+    const next = [...all]
+    const previous = all[index]
+    next[index] = item
+    setSelected((current) => current.filter((port) => port !== previous))
+    setEdit(undefined)
+    replace(next)
   }
   function remove(index: number) {
     if (!window.confirm('Remove this ' + group.singular + ' from the draft?')) return
@@ -97,6 +106,7 @@ export function PlanTable({ group, plan, issues, location, locked, update, onFor
     setBatch(undefined)
     replace(all.filter((_, n) => n !== index))
   }
+  const source = edit && (all[edit.index] ?? { ...defaults(group.fields), ...(edit.id ? { id: edit.id } : {}) })
   return <section className="panel collection" ref={ref} tabIndex={-1} aria-label={group.title}>
     <div className="section-head"><h2>{group.title} <span className="count">{all.length}</span></h2>
       {!locked && !malformed && (!group.single || !all.length) && <Button
@@ -121,10 +131,11 @@ export function PlanTable({ group, plan, issues, location, locked, update, onFor
       </>}
     </div>}
     {!malformed && (!visible.length ? <p className="empty">{all.length ? 'No records match the filters.' : 'No records yet.'}</p>
-      : <Table label={group.title}><thead><tr>
+      : <Table label={group.title} className={isPort ? 'port-list' : undefined}><thead><tr>
         {isPort && !locked && <th scope="col"><input type="checkbox" aria-label="Select all visible ports" checked={allSelected}
           onChange={() => setSelected(allSelected ? [] : visible.map(({ item }) => item))} /></th>}
-        {columns.map((field) => <th scope="col" key={field.key}>{field.label}</th>)}
+        {columns.map((field) => <th scope="col" key={field.key} data-port-name={isPort && field.key === 'name' || undefined}>{field.label}</th>)}
+        {(isPort || isChannel) && <th scope="col">Configuration</th>}
         <th scope="col">Validation</th>{!locked && <th scope="col">Actions</th>}
       </tr></thead><tbody>{visible.map(({ item, index }, position) => {
         const previous = visible[position - 1]?.item
@@ -135,7 +146,7 @@ export function PlanTable({ group, plan, issues, location, locked, update, onFor
         const findings = issues.filter((issue) => issue.path === path || issue.path.startsWith(path + '.'))
         const invalid = findings.some((issue) => issue.severity === 'ERROR')
         return <Fragment key={String(item.id ?? '') + ':' + index}>
-          {newStack && <tr className="group-row"><td colSpan={columns.length + (locked ? 1 : 3)}>
+          {newStack && <tr className="group-row"><td colSpan={columns.length + (locked ? 2 : 4)}>
             {display(plan, assignment, item.assignment_id)}{' · '}{memberLabel(item)}</td></tr>}
           <tr data-record={index} tabIndex={-1} data-selected={selected.includes(item) || undefined}>
             {isPort && !locked && <td><input type="checkbox" aria-label={'Select port ' + name} checked={selected.includes(item)}
@@ -143,9 +154,21 @@ export function PlanTable({ group, plan, issues, location, locked, update, onFor
                 const checked = event.target.checked
                 setSelected((current) => checked ? [...current, item] : current.filter((port) => port !== item))
               }} /></td>}
-            {columns.map((field) => <td key={field.key} className={/address|network|destination|serial/.test(field.key) ? 'data-mono' : ''}>
+            {columns.map((field) => <td key={field.key} data-port-name={isPort && field.key === 'name' || undefined}
+              className={/address|network|destination|serial/.test(field.key) ? 'data-mono' : ''}>
               {display(plan, field, get(item, field.key))}
             </td>)}
+            {(isPort || isChannel) && <td><details className="port-config">
+              <summary>{get(item, 'settings.admin_state') == null ? 'Default state' : String(get(item, 'settings.admin_state'))}
+                {get(item, 'settings.description') && <> · <span>{String(get(item, 'settings.description'))}</span></>}</summary>
+              <dl>{group.fields.filter((field) => isPortSetting(field) && !group.columns.includes(field.key)).map((field) =>
+                <Fragment key={field.key}><dt>{field.label}</dt>
+                  <dd>{describePortValue(plan, field, get(item, field.key))}</dd></Fragment>)}
+                {isPort && <><dt>Port-Channel</dt><dd>{records(plan, 'port_channels').filter((channel) =>
+                  Array.isArray(channel.member_ids) && item.id !== undefined && channel.member_ids.includes(item.id)).map((channel) => channel.number).join(', ') || 'None'}</dd></>}
+                <dt>Hardware settings</dt><dd>NOT VERIFIED</dd>
+              </dl>
+            </details></td>}
             <td>{findings.length ? <Badge tone={invalid ? 'danger' : 'warning'}>
               {invalid ? 'ERROR' : 'WARNING'} · {findings.length}</Badge> : '—'}</td>
             {!locked && <td><div className="row-actions">
@@ -155,30 +178,16 @@ export function PlanTable({ group, plan, issues, location, locked, update, onFor
           </tr>
         </Fragment>
       })}</tbody></Table>)}
-    {edit && !locked && <Editor key={edit.index} title={(all[edit.index] ? 'Edit ' : 'Add ') + group.singular}
-      source={all[edit.index] ?? { ...defaults(group.fields), ...(edit.id ? { id: edit.id } : {}) }}
-      plan={plan} fields={group.fields} path={rowPath(edit.index)} focus={edit.focus} issues={issues} onFormDirty={onFormDirty}
-      close={() => setEdit(undefined)} commit={(item) => {
-        const next = [...all]
-        const previous = all[edit.index]
-        next[edit.index] = clean(item, previous)
-        setSelected((current) => current.filter((port) => port !== previous))
-        setEdit(undefined)
-        replace(next)
-      }} />}
-    {batch && !locked && <Editor title={'Batch edit ' + batch.length + ' ports'} source={{ settings: {} }}
-      fields={portFields.filter((field) => field.key !== 'settings.address').map((field) =>
-        field.key === 'settings.access_vlan' ? { ...field, optional: true } : field)}
-      plan={plan} issues={[]} path="bulk" onFormDirty={onFormDirty}
-      action={'Apply to ' + batch.length + ' ports'} close={() => setBatch(undefined)}
-      hint="Compatible settings are kept unless edited. Changing mode clears incompatible VLAN or address settings."
-      commit={applyBatch}>
-      <Table label="Target ports"><thead><tr>
-        <th scope="col">Device</th><th scope="col">Stack member</th><th scope="col">Interface</th><th scope="col">Current mode</th>
-      </tr></thead><tbody>{batch.map(({ item, index }) => <tr key={index}>
-        <td>{display(plan, assignment, item.assignment_id)}</td><td>{memberLabel(item)}</td>
-        <td className="data-mono">{String(item.name)}</td><td>{String(get(item, 'settings.mode') ?? '—')}</td>
-      </tr>)}</tbody></Table>
-    </Editor>}
+    {edit && source && !locked && (isPort || isChannel ? <PortEditor key={edit.index}
+      title={(all[edit.index] ? 'Edit ' : 'Add ') + group.singular} targets={[{ index: edit.index, item: source }]}
+      creating={!all[edit.index]} aggregate={isChannel} fields={group.fields} plan={plan} path={rowPath(edit.index)}
+      issues={issues} focus={edit.focus} onFormDirty={onFormDirty} close={() => setEdit(undefined)}
+      commit={([item]) => { if (item) applyEdit(edit.index, item) }} /> :
+      <Editor key={edit.index} title={(all[edit.index] ? 'Edit ' : 'Add ') + group.singular} source={source}
+        plan={plan} fields={group.fields} path={rowPath(edit.index)} focus={edit.focus} issues={issues} onFormDirty={onFormDirty}
+        close={() => setEdit(undefined)} commit={(item) => applyEdit(edit.index, clean(item, all[edit.index]))} />)}
+    {batch && !locked && <PortEditor title={'Batch edit ' + batch.length + ' ports'} targets={batch}
+      fields={group.fields.filter(isPortSetting)} plan={plan} issues={[]} path="bulk" batch
+      onFormDirty={onFormDirty} close={() => setBatch(undefined)} commit={applyBatch} />}
   </section>
 }

@@ -18,10 +18,12 @@ stay in CI. No fonts or data are fetched to render the production interface.
 
 ## Current port editing scope
 
-The editor uses the v1 model for access, trunk, routed, VLANs and Port-Channel/LACP. Unknown
-hardware capability remains visible. The API persists additional port intent as described in
-[WEB-02A port settings](docs/web-02a-port-settings.md). The extended editor and actual device
-writes remain outside this scope.
+The Port Editor uses the v1 model for physical interfaces and aggregates. Each field can keep
+its existing value, reset to the platform default where the schema permits it, or set explicit
+intent. Batch edits show Mixed values and preview each selected interface. Mode transitions show
+the VLAN, IPv4 and spanning-tree fields they will clear before the operator applies them to the
+draft. The existing validation and revision API remains authoritative. Hardware support stays
+NOT VERIFIED pending interface-specific evidence. See [WEB-02A port settings](docs/web-02a-port-settings.md).
 
 ## Network Planner Web backlog
 

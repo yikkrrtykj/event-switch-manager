@@ -58,10 +58,20 @@ async function fixture() {
     return response.json()
   }
   const event = await post('', { name: 'Synthetic tournament — Hallmark review', management_vlan: 10 })
+  const chassis = '00000000-0000-0000-0000-000000000102'
+  const assignment = '00000000-0000-0000-0000-000000000103'
   await post('/' + event.id + '/plan-revisions', {
     event_id: event.id, schema_version: 1, management_vlan: 10,
     vlans: [{ id: 10, name: 'Management', purpose: 'management' }, { id: 20, name: 'Players' }],
     subnets: [{ id: '00000000-0000-0000-0000-000000000101', vlan: 20, network: '192.168.20.0/24' }],
+    physical_devices: [{ id: chassis, vendor: 'cisco' }],
+    assignments: [{ id: assignment, hostname: 'Synthetic-Access', role: 'access', physical_device_id: chassis }],
+    physical_interfaces: [
+      { id: '00000000-0000-0000-0000-000000000104', assignment_id: assignment, physical_device_id: chassis,
+        name: 'Gi0/1', settings: { mode: 'access', access_vlan: 20, admin_state: 'up', description: 'Players' } },
+      { id: '00000000-0000-0000-0000-000000000105', assignment_id: assignment, physical_device_id: chassis,
+        name: 'Gi0/2', settings: { mode: 'access', access_vlan: 20, admin_state: 'down', description: 'Spare' } },
+    ],
   })
 }
 
