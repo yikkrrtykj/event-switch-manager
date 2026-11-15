@@ -19,7 +19,7 @@ async function planRecord(request: APIRequestContext, data: Plan) {
   return await response.json() as Revision
 }
 async function openWorkspace(page: Page, id: string, route = 'planner/addressing') {
-  await page.goto('/#' + route)
+  await page.goto('/?e2e-event=' + encodeURIComponent(id) + '#' + route)
   const context = page.getByLabel('Event', { exact: true })
   await expect(context).toBeVisible()
   await context.selectOption(id)

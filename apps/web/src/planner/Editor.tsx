@@ -24,7 +24,11 @@ function Fields({ fields, plan, record, path, issues, update }: FieldsProps) {
     </>
     const lookup = (id: string) => available.find((item) => String(item.id) === id)?.id ?? null
     const findings = issues.filter((issue) => issue.path === key)
-    const attributes = { 'data-field': key, 'aria-invalid': findings.some((issue) => issue.severity === 'ERROR') || undefined }
+    const attributes = {
+      'data-field': key,
+      'aria-invalid': findings.some((issue) => issue.severity === 'ERROR') || undefined,
+      'aria-describedby': findings.length ? key + '-issues' : undefined,
+    }
     if (field.type === 'refs' || field.type === 'records') {
       const nested = field.children ?? []
       return <fieldset className="compound" {...attributes} tabIndex={-1} key={key}>
@@ -47,26 +51,29 @@ function Fields({ fields, plan, record, path, issues, update }: FieldsProps) {
           <Button aria-label={'Remove ' + field.label + ' ' + (index + 1)}
             onClick={() => change(entries.filter((_, i) => i !== index))}>Remove</Button>
         </div>)}
+        {findings.length > 0 && <div id={key + '-issues'}>{findings.map((issue, index) =>
+          <small key={index} className={issue.severity === 'ERROR' ? 'error-text' : 'muted'}>{issue.message}</small>)}</div>}
         <Button onClick={() => change([...entries, field.type === 'records' ? defaults(nested) : null])}>Add entry</Button>
       </fieldset>
     }
-    return <label className={'field' + (field.type === 'json' ? ' span-all' : '')} key={key}>
-      <span>{field.label}</span>
-      {field.type === 'choice' || field.type === 'ref' ? <Select {...attributes} value={String(value ?? '')}
+    return <div className={'field' + (field.type === 'json' ? ' span-all' : '')} key={key}>
+      <label htmlFor={key}>{field.label}</label>
+      {field.type === 'choice' || field.type === 'ref' ? <Select id={key} {...attributes} value={String(value ?? '')}
         required={!field.optional} onChange={(event) => change(lookup(event.target.value))}>{selection(value)}</Select>
-        : field.type === 'json' ? <textarea {...attributes} rows={4} defaultValue={value == null ? '' : JSON.stringify(value, null, 2)}
+        : field.type === 'json' ? <textarea id={key} {...attributes} rows={4} defaultValue={value == null ? '' : JSON.stringify(value, null, 2)}
           onChange={(event) => {
             const input = event.target
             try { change(input.value.trim() ? JSON.parse(input.value) as Value : null); input.setCustomValidity('') }
             catch { input.setCustomValidity('Enter valid JSON.') }
           }} />
-          : <Input {...attributes} type={field.type === 'number' ? 'number' : 'text'} required={!field.optional}
+          : <Input id={key} {...attributes} type={field.type === 'number' ? 'number' : 'text'} required={!field.optional}
             value={String(value ?? '')} onChange={(event) => {
               const next = event.target.value
               change(!next ? null : field.type === 'number' ? Number(next) : next)
             }} />}
-      {findings.map((issue, index) => <small key={index} className={issue.severity === 'ERROR' ? 'error-text' : 'muted'}>{issue.message}</small>)}
-    </label>
+      {findings.length > 0 && <div id={key + '-issues'}>{findings.map((issue, index) =>
+        <small key={index} className={issue.severity === 'ERROR' ? 'error-text' : 'muted'}>{issue.message}</small>)}</div>}
+    </div>
   })}</div>
 }
 

@@ -186,7 +186,7 @@ dialog .section-head { margin-bottom: .75rem; }
 .dialog-form { display: grid; gap: .85rem; }
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; align-items: start; }
 .field { display: grid; gap: .24rem; font-size: var(--size-small); min-width: 0; }
-.field > span { font-weight: 650; }
+.field > :is(span, label) { font-weight: 650; }
 .field input, .field select, .field textarea { width: 100%; }
 .span-all, .compound { grid-column: 1 / -1; }
 .compound { border: 1px solid var(--border); padding: .55rem; border-radius: var(--radius); min-width: 0; }
