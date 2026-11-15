@@ -8,7 +8,13 @@ from .api import DatabaseSession, find_event
 from .models import Device, EventPlanRevision
 from .planning.checks import validate_plan
 from .planning.inventory import EventDeviceAssignment
-from .planning.persistence import check_identities, get_revision, revision_view, save_revision
+from .planning.persistence import (
+    check_identities,
+    find_existing_revision,
+    get_revision,
+    revision_view,
+    save_revision,
+)
 from .planning.plan import EventPlan, PlanRevision, PlanRevisionSummary
 from .planning.validation import PlanIssue
 from .schemas import DeviceView
@@ -59,10 +65,14 @@ def import_plan(event_id: UUID, plan: EventPlan, session: DatabaseSession) -> Pl
     # Serialize identity checks and revision allocation with other imports.
     session.execute(text("BEGIN IMMEDIATE"))
     find_event(session, event_id)
-    issues = plan_issues(session, event_id, plan)
-    if issues:
-        raise HTTPException(status_code=422, detail=[issue.model_dump() for issue in issues])
-    result = revision_view(save_revision(session, plan))
+    # Exact re-imports preserve historical revisions, even when current checks are stricter.
+    revision = find_existing_revision(session, plan) if event_id == plan.event_id else None
+    if revision is None:
+        issues = plan_issues(session, event_id, plan)
+        if any(issue.severity == "ERROR" for issue in issues):
+            raise HTTPException(status_code=422, detail=[issue.model_dump() for issue in issues])
+        revision = save_revision(session, plan)
+    result = revision_view(revision)
     session.commit()
     return result
 

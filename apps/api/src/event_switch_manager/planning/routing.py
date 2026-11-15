@@ -24,6 +24,12 @@ class Track(Record):
     target: IPv4Address
     interval_seconds: PositiveInt = 5
     failure_threshold: PositiveInt = 3
+    tunnel_id: UUID | None = None
+
+
+class RoutedPublicBlock(Record):
+    network: IPv4Network
+    reason: Name
 
 
 class Isp(Record):
@@ -34,6 +40,7 @@ class Isp(Record):
     address: IPv4Interface
     gateway: IPv4Address
     track_id: UUID | None = None
+    routed_public_blocks: tuple[RoutedPublicBlock, ...] = ()
 
 
 class IpsecTunnel(Record):
@@ -45,6 +52,7 @@ class IpsecTunnel(Record):
     inside: IPv4Interface
     remote_gateway: IPv4Address
     track_id: UUID
+    state: Literal["unknown", "up", "down"] = "unknown"
 
 
 class VpnRemotePrefix(Record):
@@ -66,12 +74,23 @@ class DropNextHop(Record):
     kind: Literal["discard"] = "discard"
 
 
+class AlwaysActive(Record):
+    kind: Literal["always"] = "always"
+
+
+class TrackActive(Record):
+    kind: Literal["track"] = "track"
+    track_id: UUID
+    state: Literal["up", "down"]
+
+
 class StaticRoute(Record):
     id: UUID
     assignment_id: UUID
     destination: IPv4Network
     next_hop: IpNextHop | TunnelNextHop | DropNextHop = Field(discriminator="kind")
     preference: PositiveInt = 1
+    activation: AlwaysActive | TrackActive | None = Field(default=None, discriminator="kind")
 
 
 class DefaultRoute(Record):
@@ -81,11 +100,17 @@ class DefaultRoute(Record):
     preference: PositiveInt = 1
 
 
+class NoNatEgress(Record):
+    isp_id: UUID
+    reason: Name
+
+
 class SourceBasedRoute(Record):
     id: UUID
     assignment_id: UUID
     source_vlan: VlanId
     isp_priority: tuple[UUID, ...]
+    no_nat: tuple[NoNatEgress, ...] = ()
 
 
 class PolicyBasedRoute(Record):
@@ -95,7 +120,7 @@ class PolicyBasedRoute(Record):
     source_vlan: VlanId
     destination: IPv4Network
     tunnel_id: UUID
-    on_tunnel_down: Literal["discard"] = "discard"
+    on_tunnel_down: Literal["discard", "route-table", "unknown", "use-sbr"] = "discard"
 
 
 class SourceNat(Record):

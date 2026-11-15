@@ -14,13 +14,13 @@ from .types import Name, PortName, PositiveInt, Record, VlanId
 class PhysicalDevice(Record):
     id: UUID
     vendor: Literal["cisco", "hillstone", "other"]
-    verified_serial: SerialNumber
+    verified_serial: SerialNumber | None = None
     model: Name | None = None
 
     @field_validator("verified_serial")
     @classmethod
-    def normalize_serial(cls, value: str) -> str:
-        return value.upper()
+    def normalize_serial(cls, value: str | None) -> str | None:
+        return value.upper() if value is not None else None
 
 
 class CapabilityObservation(Record):
@@ -71,6 +71,7 @@ class PhysicalInterface(Record):
     name: PortName
     stack_member: PositiveInt | None = None
     settings: PortSettings
+    capability_status: Literal["unknown", "unverified", "verified"] = "unknown"
 
 
 class LogicalInterface(Record):

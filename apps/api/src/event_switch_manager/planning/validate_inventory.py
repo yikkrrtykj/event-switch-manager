@@ -30,7 +30,15 @@ def check_port(v: Validation, settings: PortSettings, path: str, vlans: Mapping[
 def check_inventory(v: Validation) -> None:
     p = v.plan
     devices = v.index("physical_devices", p.physical_devices, lambda x: x.id)
-    v.index("physical_devices", p.physical_devices, lambda x: (x.vendor, x.verified_serial.upper()))
+    serials: set[tuple[str, str]] = set()
+    for i, asset in enumerate(p.physical_devices):
+        path = f"physical_devices.{i}.verified_serial"
+        if asset.verified_serial is None:
+            v.warning(path, "hardware_identity_unknown", "Chassis identity awaits preflight")
+        else:
+            identity = (asset.vendor, asset.verified_serial)
+            v.require(identity not in serials, path, "duplicate", "Duplicate vendor and serial")
+            serials.add(identity)
     assignments = v.index("assignments", p.assignments, lambda x: x.id)
     v.index("assignments", p.assignments, lambda x: x.hostname.casefold())
     v.index("assignments", (a for a in p.assignments if a.management_ip), lambda x: x.management_ip)
@@ -91,6 +99,9 @@ def check_inventory(v: Validation) -> None:
                       f"{path}.physical_device_id", "port_chassis",
                       "Port must belong to its chassis")
         check_port(v, port.settings, f"{path}.settings", vlans)
+        if port.capability_status != "verified":
+            v.warning(f"{path}.capability_status", "port_capability_unverified",
+                      "Check the expected port and its capabilities during preflight")
     for i, interface in enumerate(p.logical_interfaces):
         path = f"logical_interfaces.{i}"
         v.require(interface.assignment_id in assignments, path, "reference", "Unknown assignment")

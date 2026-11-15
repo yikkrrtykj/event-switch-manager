@@ -5,7 +5,8 @@ from uuid import UUID
 from event_switch_manager.domain import DeviceRole
 
 from .plan import EventPlan
-from .routing import IpNextHop, NatExemption, PolicyBasedRoute, StaticRoute, TunnelNextHop
+from .routing import IpNextHop, NatExemption, PolicyBasedRoute, StaticRoute, TrackActive
+from .validate_vpn import check_vpn_paths
 from .types import usable
 from .validation import Validation, pairs
 
@@ -21,15 +22,15 @@ def check_transit(v: Validation) -> None:
     svis = {a.id: a for a in p.logical_interfaces}
     core = assignments.get(transit.core_assignment_id)
     firewall = assignments.get(transit.hillstone_assignment_id)
-    core_asset = assets.get(core.physical_device_id) if core and core.physical_device_id else None
-    fw_asset = (
-        assets.get(firewall.physical_device_id) if firewall and firewall.physical_device_id
-        else None
-    )
+    core_port = ports.get(transit.core_port_id)
+    fw_port = ports.get(transit.hillstone_port_id)
+    core_asset = assets.get(core_port.physical_device_id) if core_port else None
+    fw_asset = assets.get(fw_port.physical_device_id) if fw_port else None
     v.require(core and core.role == DeviceRole.CORE and core_asset and core_asset.vendor == "cisco",
               "transit.core_assignment_id", "transit_core", "Transit needs a Cisco Core assignment")
-    v.require(fw_asset and fw_asset.vendor == "hillstone", "transit.hillstone_assignment_id",
-              "transit_firewall", "Transit needs a Hillstone chassis assignment")
+    v.require(firewall and fw_asset and fw_asset.vendor == "hillstone",
+              "transit.hillstone_assignment_id", "transit_firewall",
+              "Transit needs a planned Hillstone chassis assignment")
     v.require(transit.vlan != p.management_vlan, "transit.vlan", "transit_management",
               "Transit and management VLANs must differ")
     v.require(transit.core_ip != transit.hillstone_ip
@@ -65,8 +66,6 @@ def check_transit(v: Validation) -> None:
                   f"gateways.{i}.svi_id", "core_gateway", "Cisco Core owns VLAN gateways")
     firewall_routes = [(i, route) for i, route in enumerate(p.static_routes)
                        if route.assignment_id == transit.hillstone_assignment_id]
-    return_routes = [(i, route) for i, route in firewall_routes
-                     if _via_core(route, transit.core_ip)]
     for i, subnet in enumerate(p.subnets):
         v.require(subnet.vlan == transit.vlan if subnet.network == transit.network
                   else subnet.vlan != transit.vlan and not subnet.network.overlaps(transit.network),
@@ -74,12 +73,6 @@ def check_transit(v: Validation) -> None:
         if subnet.vlan != transit.vlan:
             _check_core_return(v, subnet.network, transit.core_ip, firewall_routes,
                                f"subnets.{i}.network")
-    for i, prefix in enumerate(p.vpn_remote_prefixes):
-        for j, route in return_routes:
-            v.require(not prefix.network.overlaps(route.destination), f"vpn_remote_prefixes.{i}",
-                      "vpn_return_overlap",
-                      f"{prefix.network} overlaps static_routes.{j} ({route.destination}) on "
-                      f"Hillstone {route.assignment_id}. Tunnel loss can send VPN traffic to Core.")
 
 
 def _via_core(route: StaticRoute, address: IPv4Address) -> bool:
@@ -98,7 +91,8 @@ def _check_core_return(
         key=lambda route: (-route.destination.prefixlen, route.preference),
         default=None,
     )
-    v.require(covering and _via_core(covering, core_ip), path, "return_route",
+    v.require(covering and _via_core(covering, core_ip)
+              and not isinstance(covering.activation, TrackActive), path, "return_route",
               f"Hillstone needs a preferred return route via Core for {network}")
     best_by_prefix: dict[IPv4Network, tuple[int, StaticRoute]] = {}
     for index, route in routes:
@@ -148,17 +142,30 @@ def check_routes(v: Validation) -> None:
                   and usable(isp.gateway, isp.address.network) and isp.gateway != isp.address.ip,
                   f"{path}.gateway", "next_hop", "ISP gateway must be an on-link peer")
         if isp.track_id:
-            v.require(isp.track_id in tracks, f"{path}.track_id", "reference", "Unknown ISP Track")
+            tracker = tracks.get(isp.track_id)
+            v.require(tracker and tracker.tunnel_id is None, f"{path}.track_id", "isp_track",
+                      "ISP Track must exist and be independent of Tunnel health")
+        v.index(f"{path}.routed_public_blocks", isp.routed_public_blocks, lambda x: x.network)
+        for j, block in enumerate(isp.routed_public_blocks):
+            v.require(block.network.prefixlen > 0, f"{path}.routed_public_blocks.{j}",
+                      "routed_public_block", "A routed public block cannot be the default route")
     for i, tunnel in enumerate(p.ipsec_tunnels):
         path = f"ipsec_tunnels.{i}"
         uplink = isps.get(tunnel.isp_id)
         v.require(uplink and uplink.assignment_id == tunnel.assignment_id
-                  and tunnel.track_id in tracks,
+                  and tunnel.track_id in tracks
+                  and tracks[tunnel.track_id].tunnel_id in (None, tunnel.id),
                   path, "tunnel_reference", "Tunnel requires an ISP on its owner and a Track")
         v.require(usable(tunnel.inside.ip, tunnel.inside.network)
                   and usable(tunnel.remote_gateway, tunnel.inside.network)
                   and tunnel.remote_gateway != tunnel.inside.ip,
                   f"{path}.remote_gateway", "next_hop", "Tunnel gateway must be an on-link peer")
+    for i, tracker in enumerate(p.tracks):
+        if tracker.tunnel_id is not None:
+            bound_tunnel = tunnels.get(tracker.tunnel_id)
+            v.require(bound_tunnel and bound_tunnel.track_id == tracker.id,
+                      f"tracks.{i}.tunnel_id", "tunnel_track_binding",
+                      "Tunnel-bound Track must be referenced by that Tunnel")
     v.index("vpn_remote_prefixes", p.vpn_remote_prefixes, lambda x: (x.tunnel_id, x.network))
     for i, prefix in enumerate(p.vpn_remote_prefixes):
         path = f"vpn_remote_prefixes.{i}"
@@ -170,7 +177,7 @@ def check_routes(v: Validation) -> None:
                       f"{prefix.network} overlaps subnets.{j} ({subnet.network})")
         if remote_tunnel:
             owner = remote_tunnel.assignment_id
-            _check_vpn_paths(v, owner, remote_tunnel.id, prefix.network, path)
+            check_vpn_paths(v, remote_tunnel, prefix.network, path)
             for address in connected[owner]:
                 v.require(not prefix.network.overlaps(address.network), path,
                           "vpn_connected_overlap",
@@ -189,12 +196,26 @@ def check_routes(v: Validation) -> None:
         path = f"static_routes.{i}"
         v.require(route.assignment_id in assignments and route.destination.prefixlen > 0,
                   path, "static_route", "Use an existing assignment and a non-default prefix")
-        if isinstance(route.next_hop, TunnelNextHop):
+        if route.next_hop.kind == "tunnel":
             route_tunnel = tunnels.get(route.next_hop.tunnel_id)
             v.require(route_tunnel and route_tunnel.assignment_id == route.assignment_id,
                       f"{path}.next_hop", "tunnel_reference", "Tunnel belongs to another owner")
+            if isinstance(route.activation, TrackActive) and route_tunnel:
+                v.require(route.activation.track_id == route_tunnel.track_id
+                          and route.activation.state == "up",
+                          f"{path}.activation.track_id", "tunnel_route_track",
+                          "Tunnel route must follow its own health Track in the up state")
         elif isinstance(route.next_hop, IpNextHop):
             _check_ip(v, connected[route.assignment_id], route.next_hop.address, f"{path}.next_hop")
+        if isinstance(route.activation, TrackActive):
+            tracker = tracks.get(route.activation.track_id)
+            v.require(tracker and (
+                any(isp.track_id == tracker.id and isp.assignment_id == route.assignment_id
+                    for isp in p.isps)
+                or any(tunnel.track_id == tracker.id and tunnel.assignment_id == route.assignment_id
+                       for tunnel in p.ipsec_tunnels)
+            ), f"{path}.activation.track_id", "route_track_reference",
+                "Static route needs a Track associated with its owner")
     v.index("default_routes", p.default_routes, lambda x: x.id)
     v.index("default_routes", p.default_routes, lambda x: (x.assignment_id, x.preference))
     for i, default in enumerate(p.default_routes):
@@ -215,28 +236,10 @@ def _check_ip(
 
 def _check_policies(v: Validation, vlans: set[int]) -> None:
     p = v.plan
-    isps = {x.id: x for x in p.isps}
     tunnels = {x.id: x for x in p.ipsec_tunnels}
-    v.index("source_routes", p.source_routes, lambda x: x.id)
-    v.index("source_routes", p.source_routes, lambda x: (x.assignment_id, x.source_vlan))
-    for i, source in enumerate(p.source_routes):
-        path = f"source_routes.{i}"
-        v.require(source.source_vlan in vlans, f"{path}.source_vlan",
-                  "vlan_reference", "Unknown VLAN")
-        v.require(source.isp_priority and len(source.isp_priority) == len(set(source.isp_priority)),
-                  f"{path}.isp_priority", "isp_priority", "Specify distinct ISPs in failover order")
-        for j, isp_id in enumerate(source.isp_priority):
-            isp = isps.get(isp_id)
-            v.require(isp and isp.assignment_id == source.assignment_id and isp.track_id,
-                      f"{path}.isp_priority.{j}", "isp_track", "SBR needs a local ISP with Track")
+    _check_source_egress(v, vlans)
     v.index("policy_routes", p.policy_routes, lambda x: x.id)
     v.index("policy_routes", p.policy_routes, lambda x: (x.assignment_id, x.priority))
-    v.index("snat", p.snat, lambda x: x.id)
-    v.index("snat", p.snat, lambda x: (x.assignment_id, x.source_vlan, x.isp_id))
-    for i, nat in enumerate(p.snat):
-        isp = isps.get(nat.isp_id)
-        v.require(nat.source_vlan in vlans and isp and isp.assignment_id == nat.assignment_id,
-                  f"snat.{i}", "snat_reference", "SNAT requires an existing VLAN and local ISP")
     v.index("nat_exemptions", p.nat_exemptions, lambda x: x.id)
     v.index("nat_exemptions", p.nat_exemptions,
             lambda x: (x.assignment_id, x.source_vlan, x.destination, x.tunnel_id))
@@ -261,28 +264,61 @@ def _check_policies(v: Validation, vlans: set[int]) -> None:
         v.require(has_exemption, f"policy_routes.{i}", "nat_exemption",
                   "VPN policy needs a matching NAT exemption")
 
-
-
-def _check_vpn_paths(
-    v: Validation, owner: UUID, tunnel_id: UUID, prefix: IPv4Network, path: str
-) -> None:
-    # A more-specific route wins before route preference is considered.
-    by_destination: dict[IPv4Network, list[StaticRoute]] = defaultdict(list)
-    for route in v.plan.static_routes:
-        if route.assignment_id == owner and route.destination.subnet_of(prefix):
-            by_destination[route.destination].append(route)
-    v.require(prefix in by_destination, path, "vpn_tunnel_route",
-              "VPN prefix requires an exact destination route via its tunnel")
-    for destination, candidates in by_destination.items():
-        ordered = sorted(candidates, key=lambda route: route.preference)
-        first = ordered[0].next_hop
-        remaining = [route for route in ordered if not (
-            isinstance(route.next_hop, TunnelNextHop) and route.next_hop.tunnel_id == tunnel_id
-        )]
-        v.require(isinstance(first, TunnelNextHop) and first.tunnel_id == tunnel_id,
-                  path, "vpn_tunnel_route", f"{destination} must prefer its tunnel on {owner}")
-        v.require(remaining and remaining[0].next_hop.kind == "discard",
-                  path, "vpn_down_route", f"{destination} must discard on {owner} if down")
+def _check_source_egress(v: Validation, vlans: set[int]) -> None:
+    p = v.plan
+    isps = {x.id: x for x in p.isps}
+    tracks = {x.id: x for x in p.tracks}
+    v.index("snat", p.snat, lambda x: x.id)
+    by_egress = v.index("snat", p.snat, lambda x: (x.assignment_id, x.source_vlan, x.isp_id))
+    for i, nat in enumerate(p.snat):
+        path = f"snat.{i}"
+        isp = isps.get(nat.isp_id)
+        v.require(nat.source_vlan in vlans and isp and isp.assignment_id == nat.assignment_id,
+                  path, "snat_reference", "SNAT requires an existing VLAN and local ISP")
+        if isp:
+            belongs_to_isp = usable(nat.translated_ip, isp.address.network) or any(
+                usable(nat.translated_ip, block.network) for block in isp.routed_public_blocks
+            )
+            other_uplink = any(
+                other.id != isp.id and other.assignment_id == nat.assignment_id
+                and nat.translated_ip in (other.address.ip, other.gateway)
+                for other in p.isps
+            )
+            v.require(belongs_to_isp and nat.translated_ip != isp.gateway and not other_uplink,
+                      f"{path}.translated_ip", "snat_egress_address",
+                      f"SNAT address must belong to ISP {isp.name} or its declared routed block")
+    v.index("source_routes", p.source_routes, lambda x: x.id)
+    v.index("source_routes", p.source_routes, lambda x: (x.assignment_id, x.source_vlan))
+    for i, source in enumerate(p.source_routes):
+        path = f"source_routes.{i}"
+        v.require(source.source_vlan in vlans, f"{path}.source_vlan",
+                  "vlan_reference", "Unknown VLAN")
+        v.require(source.isp_priority and len(source.isp_priority) == len(set(source.isp_priority)),
+                  f"{path}.isp_priority", "isp_priority", "Specify distinct ISPs in failover order")
+        no_nat = v.index(f"{path}.no_nat", source.no_nat, lambda x: x.isp_id)
+        for j, exception in enumerate(source.no_nat):
+            v.require(exception.isp_id in source.isp_priority, f"{path}.no_nat.{j}.isp_id",
+                      "sbr_no_nat_reference", "No-NAT exception must identify a listed ISP")
+        used_tracks: set[UUID] = set()
+        for j, isp_id in enumerate(source.isp_priority):
+            hop = f"{path}.isp_priority.{j}"
+            isp = isps.get(isp_id)
+            if not isp or isp.assignment_id != source.assignment_id:
+                v.error(hop, "sbr_isp_reference", "SBR must reference an ISP on the same device")
+                continue
+            tracker = tracks.get(isp.track_id) if isp.track_id is not None else None
+            v.require(tracker and tracker.tunnel_id is None and tracker.id not in used_tracks,
+                      hop, "isp_track", f"SBR ISP {isp.name} needs its own valid egress Track")
+            if tracker:
+                used_tracks.add(tracker.id)
+            has_snat = (source.assignment_id, source.source_vlan, isp_id) in by_egress
+            exempt = isp_id in no_nat
+            position = "Primary" if j == 0 else f"Backup #{j}"
+            v.require(has_snat or exempt, hop, "missing_sbr_snat",
+                      f"{position} ISP {isp.name} needs SNAT for VLAN {source.source_vlan} "
+                      "or a documented no-NAT exception")
+            v.require(not (has_snat and exempt), hop, "sbr_nat_conflict",
+                      f"ISP {isp.name} has both SNAT and a no-NAT exception for this VLAN")
 
 
 def _covered(plan: EventPlan, tunnel_id: UUID, destination: IPv4Network) -> bool:

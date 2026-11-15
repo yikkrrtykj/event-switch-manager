@@ -6,7 +6,7 @@ Start implementation after the Foundation acceptance gate and the authorized mer
 
 | Domain | Records and relationships |
 | --- | --- |
-| Inventory | Physical Device has a stable chassis UUID and a verified vendor/serial identity. Software/License Profile records observed image and capabilities. An Event Device Assignment keeps the existing Device UUID and owns the event role, intended hostname, management IP and location. Hardware binding can be pending. |
+| Inventory | Physical Device has a stable chassis UUID, expected vendor and model, and an optional verified serial. Software/License Profile records observed image and capabilities. An Event Device Assignment keeps the existing Device UUID and owns the event role, intended hostname, management IP and location. Hardware binding can be pending. |
 | Topology | A Stack membership snapshot maps physical chassis to member numbers. Physical Interface belongs to a chassis. Logical Interface covers SVIs and aggregates. Port-Channel maps physical members to a logical interface. Topology Link connects explicit endpoints within the same event revision. |
 | Segmentation and addressing | VLAN, Subnet, Gateway/SVI, DHCP Pool, Reservation and Relay, and VLAN access policy. Port settings carry access VLAN or trunk native and allowed VLANs. Management VLAN defaults to 10 and can be changed per event. |
 | Routing and egress | Separate destination routes, source-based routing (SBR), policy-based routing (PBR), ISP Track, SNAT, route-based IPsec Tunnel and VPN NAT Exemption. A VLAN egress policy stores ISP priority and ties eligibility to Track state. Tunnel routes and explicit fallback are modeled separately from ISP selection. |
@@ -36,12 +36,44 @@ All routes are under `/api/v1/events/{event_id}`. The server keeps the existing 
 | Method and path | Result |
 | --- | --- |
 | GET `/plan/seed` | Create a plan in memory from Foundation inventory. Existing assignment UUIDs are preserved and hardware bindings start empty. |
-| POST `/plan/validate` | Return validation issues with paths and stable codes. Structural errors use the API's 422 response. |
+| POST `/plan/validate` | Return validation issues with paths, stable codes and severity. Structural errors use the API's 422 response. |
 | POST `/plan-revisions` | Validate and append a schema version 1 plan. Submitting the same content returns its existing revision. |
 | GET `/plan-revisions` | List revision metadata in sequence order. |
-| GET `/plan-revisions/{revision_id}` | Read the revision and plan. |
+| GET `/plan-revisions/{revision_id}` | Read the revision, plan and planning warnings. |
 | GET `/plan-revisions/{revision_id}/export` | Export canonical JSON with the SHA-256 content hash as its ETag. |
 
 The document's event UUID must match the URL. Array order is canonicalized for set-like collections. SBR ISP priority retains its order. Revision rows are append-only. SQLite serializes revision imports and the chassis registry enforces verified vendor/serial identity across events.
 
-VPN validation checks longest-prefix preference, the selected route when the tunnel is active and the discard route after it goes down. Overlapping Core return summaries must be corrected before a plan can be imported. PBR and VPN NAT exemption reference the same tunnel and remote destination independently of ordinary VLAN ISP selection. These checks operate on the plan. Vendor capability and configuration syntax are handled in later milestones.
+## Planning and deployment checks
+
+The JSON schema stays at v1. The fields for route activation, tunnel health, egress NAT and
+hardware capability are additive. Their defaults preserve existing canonical hashes. Schema
+revision `0002_event_plans` already stores plans as JSON, so there is no Alembic migration.
+Existing revision exports retain their original bytes and ETags. An exact re-import can return
+that historical revision. New or edited content must satisfy the current validation rules.
+
+- Plan validation returns `ERROR` and `WARNING` issues with field paths. Only errors block
+  new imports. Imported and read revisions include warnings against the stored plan.
+- Chassis records can carry an expected vendor and model with no verified serial. Such records
+  describe planned positions and are not registered as verified assets. Planned interfaces and
+  Stack members can reference those positions. The same UUIDs can be enriched with observations.
+- Tunnel Track can explicitly bind to the tunnel, and routes can be always active or conditional
+  on Track up/down. The planner evaluates both states independently of any recorded tunnel state.
+  Effective routes use longest prefix first, then lower preference, including more-specific
+  routes and fallback to the summary or default. A lower-preference discard without explicit
+  activation and tunnel withdrawal is unverified.
+- `192.168.141.0/24` may overlap a Hillstone return summary of `192.168.0.0/16` to Cisco
+  Core. With the VPN route active on Track up and an eligible winning discard on Track down,
+  the plan can save with an overlap warning. Unproven paths get unverified warnings. Clearly
+  unsafe paths, including Core fallback and PBR falling through to ordinary ISP selection,
+  block import. VPN PBR can discard or use the validated route table on failure and requires
+  a matching NAT exemption.
+- Every SBR uplink has an ordered, independently tracked ISP and matching SNAT, or a reason
+  for omitting SNAT on that specific egress. An off-link translated address requires an ISP
+  routed block with a recorded reason.
+
+Actual StoneOS 5.5R11P2-v6 behavior remains **NOT VERIFIED**. Console Deployment Preflight
+must independently verify hardware and serials, port presence and capabilities, and the
+Stack layout. It must also verify tunnel-bound probing, operational route withdrawal and
+discard installation, PBR/NAT exemption behavior, and the forwarding and source address
+on each ISP failover path before any device write.

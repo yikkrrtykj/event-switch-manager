@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 from collections.abc import Callable, Iterable
 from itertools import combinations
-from typing import TypeVar
+from typing import TYPE_CHECKING, Literal, TypeVar
 
-from .plan import EventPlan
 from .types import Record
+
+if TYPE_CHECKING:
+    from .plan import EventPlan
 
 T = TypeVar("T")
 K = TypeVar("K")
@@ -13,6 +17,7 @@ class PlanIssue(Record):
     path: str
     code: str
     message: str
+    severity: Literal["ERROR", "WARNING"] = "ERROR"
 
 
 class Validation:
@@ -22,6 +27,9 @@ class Validation:
 
     def error(self, path: str, code: str, message: str) -> None:
         self.issues.append(PlanIssue(path=path, code=code, message=message))
+
+    def warning(self, path: str, code: str, message: str) -> None:
+        self.issues.append(PlanIssue(path=path, code=code, message=message, severity="WARNING"))
 
     def index(self, path: str, records: Iterable[T], key: Callable[[T], K]) -> dict[K, T]:
         result: dict[K, T] = {}

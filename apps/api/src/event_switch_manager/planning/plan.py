@@ -38,6 +38,7 @@ from .routing import (
     VpnRemotePrefix,
 )
 from .types import PositiveInt, Record, VlanId
+from .validation import PlanIssue
 
 
 class EventPlan(Record):
@@ -81,6 +82,7 @@ class PlanRevisionSummary(Record):
 
 class PlanRevision(PlanRevisionSummary):
     plan: EventPlan
+    warnings: tuple[PlanIssue, ...] = ()
 
 
 def _json(value: JsonValue) -> str:
@@ -98,7 +100,20 @@ def _canonical(value: JsonValue, field: str = "") -> JsonValue:
 
 
 def canonical_plan(plan: EventPlan) -> str:
-    return _json(_canonical(plan.model_dump(mode="json")))
+    document = plan.model_dump(mode="json")
+    # Omit only newly added defaults, preserving hashes of existing v1 documents.
+    for collection, field, default in (
+        ("physical_interfaces", "capability_status", "unknown"),
+        ("tracks", "tunnel_id", None),
+        ("isps", "routed_public_blocks", []),
+        ("ipsec_tunnels", "state", "unknown"),
+        ("static_routes", "activation", None),
+        ("source_routes", "no_nat", []),
+    ):
+        for record in document[collection]:
+            if record[field] == default:
+                del record[field]
+    return _json(_canonical(document))
 
 
 def plan_hash(content: str) -> str:
