@@ -5,7 +5,7 @@ import type { Field } from './catalog'
 import { Fields, useFieldFocus } from './Editor'
 import { fingerprint } from './model'
 import type { Issue, Plan, RecordValue } from './model'
-import { aggregatePortLabel, commonPortValue, describePortValue, editPort, hasPortValue, isPortSetting, modeKey,
+import { aggregatePortLabel, canResetPortField, commonPortValue, describePortValue, editPort, hasPortValue, isPortSetting, modeKey,
   physicalPortLabel, portFieldApplies, portMode } from './portSettings'
 import type { Operations, PortTarget } from './portSettings'
 
@@ -27,8 +27,8 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
   const controls = fields.filter(isPortSetting)
   const identity = fields.filter((field) => !isPortSetting(field))
   const isAvailable = (field: Field) => modes.every((mode) => portFieldApplies(field, mode))
-  const canResetHidden = (field: Field) => !batch && hasPortValue(get(original, field.key)) &&
-    get(original, modeKey) === modes[0]
+  const canResetHidden = (field: Field) => !batch && canResetPortField(field, true) &&
+    hasPortValue(get(original, field.key)) && get(original, modeKey) === modes[0]
   const canApply = (field: Field) => isAvailable(field) ||
     (canResetHidden(field) && operations[field.key]?.kind === 'reset')
   const proposed = targets.map(({ item, index }) => {
@@ -95,6 +95,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
           const available = isAvailable(field)
           if (!available && !canResetHidden(field)) return null
           const operation = operations[field.key]
+          const canReset = canResetPortField(field, !available)
           const { mixed, value: common } = currentValues.get(field.key)!
           const rawValue = operation?.kind === 'set' ? operation.value : operation ? undefined : common
           const choices = field.key === 'settings.portfast' ? field.choices?.filter((choice) =>
@@ -104,7 +105,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
           const incompatible = rawValue != null && !permits(rawValue)
           const current = operation?.kind === 'set' && incompatible ? undefined : rawValue
           const control: Field = { ...field, when: undefined, choices,
-            optional: operation?.kind !== 'set' || field.preserveEmpty,
+            optional: operation?.kind !== 'set' && field.modelDefault === undefined || field.preserveEmpty,
           }
           const key = path + '.' + field.key
           const after = operation?.kind ?? 'keep'
@@ -117,7 +118,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
                 setOperations((previous) => {
                   const next = { ...previous }
                   if (action === 'keep') delete next[field.key]
-                  if (action === 'reset') next[field.key] = { kind: 'reset' }
+                  if (action === 'reset' && canReset) next[field.key] = { kind: 'reset' }
                   if (action === 'set') next[field.key] = {
                     kind: 'set',
                     value: common != null && permits(common) ? common : (field.preserveEmpty ? '' : field.type === 'refs' ? [] : null),
@@ -126,11 +127,11 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
                 })
               }}>
                 <option value="keep">Keep</option>
-                {field.key !== modeKey && <option value="reset">Reset</option>}
+                {canReset && <option value="reset">{field.type === 'refs' ? 'Clear list' : 'Reset'}</option>}
                 {available && <option value="set">Set</option>}
               </Select>
               {mixed && <Badge>Mixed</Badge>}
-              {!mixed && current == null && after === 'keep' && <small className="muted">Platform default</small>}
+              {canReset && !mixed && current == null && after === 'keep' && <small className="muted">Platform default</small>}
             </div>
             {operation?.kind === 'set' && incompatible &&
               <small className="error-text">Choose a value allowed in the selected mode or keep the current setting.</small>}
@@ -141,7 +142,8 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
                   if (value !== undefined) setOperations((previous) => ({ ...previous, [field.key]: { kind: 'set', value } }))
                 }} /> :
               <div data-field={key} tabIndex={-1} className="muted">
-                {after === 'reset' ? 'Will use platform default' : 'Unavailable in this mode. Reset to clear the stored value.'}
+                {after === 'reset' ? field.type === 'refs' ? 'Will clear the list' : 'Will use platform default'
+                  : 'Unavailable in this mode. Clear the stored value to correct it.'}
                 {fieldIssues.map((issue, index) => <div key={index} className={issue.severity === 'ERROR' ? 'error-text' : 'muted'}>{issue.message}</div>)}
               </div>}
           </fieldset>

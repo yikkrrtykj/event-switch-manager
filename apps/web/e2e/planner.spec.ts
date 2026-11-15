@@ -853,7 +853,7 @@ test('confirms incompatible VLAN, IP and STP cleanup before applying each mode c
   await setting('IPv4 address / prefix').fill('10.10.10.1/24')
   await preview.click()
   await expect(changes.getByRole('row', { name: /Native VLAN .*Clear on mode change/ })).toBeVisible()
-  await expect(changes.getByRole('row', { name: /Allowed VLANs .*Clear on mode change/ })).toBeVisible()
+  await expect(changes.getByRole('row', { name: /Allowed VLANs .* None Clear on mode change/ })).toBeVisible()
   await expect(changes.getByRole('row', { name: /BPDU Guard enabled Platform default Clear on mode change/ })).toBeVisible()
   const changeRegion = modal.getByRole('region', { name: 'Port changes', exact: true })
   expect(await changeRegion.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1)
@@ -940,4 +940,130 @@ test('keeps Port-Channel hardware settings scoped and blocks unsafe channel and 
   await expect(channel.getByText('Verify spanning-tree support and edge role on the actual interface')).toBeVisible()
   await channel.getByRole('button', { name: 'Cancel', exact: true }).click()
   expect(await (await request.get(revisions(id))).json()).toHaveLength(2)
+})
+
+
+test('Plan API materializes an omitted LACP mode as active and rejects null', async ({ request }) => {
+  const id = await createEvent(request, 'Synthetic LACP API defaults')
+  const raw = auditPlan(id)
+  const channel = (raw.port_channels as RecordValue[])[0]!
+  channel.lacp = 'passive'
+  const before = await planRecord(request, raw)
+  expect((before.plan.port_channels as RecordValue[])[0]!.lacp).toBe('passive')
+
+  delete channel.lacp
+  const omitted = await planRecord(request, raw)
+  expect(omitted.id).not.toBe(before.id)
+  expect(omitted.content_hash).not.toBe(before.content_hash)
+  expect((omitted.plan.port_channels as RecordValue[])[0]!.lacp).toBe('active')
+  const url = revisions(id) + '/' + omitted.id
+  const read = await request.get(url)
+  expect(read.status()).toBe(200)
+  expect((await read.json() as Revision).plan.port_channels).toEqual(omitted.plan.port_channels)
+  const exported = await request.get(url + '/export')
+  expect(exported.headers().etag).toBe('"' + omitted.content_hash + '"')
+  expect(((await exported.json() as Plan).port_channels as RecordValue[])[0]!.lacp).toBe('active')
+
+  channel.lacp = 'active'
+  const explicit = await planRecord(request, raw)
+  expect(explicit.id).toBe(omitted.id)
+  expect(explicit.content_hash).toBe(omitted.content_hash)
+  channel.lacp = null
+  const rejected = await request.post(revisions(id), { headers, data: raw })
+  expect(rejected.status()).toBe(422)
+  expect((await rejected.json()).detail).toEqual(expect.arrayContaining([
+    expect.objectContaining({ loc: ['body', 'port_channels', 0, 'lacp'] }),
+  ]))
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(2)
+})
+
+test('previews and saves explicit LACP values while Keep preserves the existing mode', async ({ page, request }, info) => {
+  test.setTimeout(60_000)
+  const id = await createEvent(request, 'Synthetic LACP intent')
+  const raw = auditPlan(id)
+  const source = (raw.port_channels as RecordValue[])[0]!
+  source.lacp = 'passive'
+  const original = await planRecord(request, raw)
+  const originalUrl = revisions(id) + '/' + original.id
+  const originalExport = await request.get(originalUrl + '/export')
+  const originalBytes = await originalExport.body()
+  expect(createHash('sha256').update(originalBytes).digest('hex')).toBe(original.content_hash)
+  expect(originalExport.headers().etag).toBe('"' + original.content_hash + '"')
+
+  await openWorkspace(page, id, 'ports')
+  const edit = page.getByRole('button', { name: 'Edit Port-Channel 1', exact: true })
+  const modal = page.getByRole('dialog', { name: 'Edit Port-Channel', exact: true })
+  const operation = modal.getByLabel('LACP mode operation', { exact: true })
+  const mode = modal.getByLabel('LACP mode', { exact: true })
+  const preview = modal.getByRole('button', { name: 'Preview changes', exact: true })
+  const apply = modal.getByRole('button', { name: 'Apply to draft', exact: true })
+  async function expectLacpPreview(before: string, after: string, action: 'Keep' | 'Set') {
+    const row = modal.getByRole('table', { name: 'Port changes' }).getByRole('row', { name: / LACP mode / })
+    const cells = row.getByRole('cell')
+    await expect(cells.nth(3)).toHaveText(before)
+    await expect(cells.nth(4)).toHaveText(after)
+    await expect(cells.nth(5)).toHaveText(action)
+  }
+
+  await edit.click()
+  await expect(operation.locator('option')).toHaveText(['Keep', 'Set'])
+  for (const field of ['Mode', 'Allowed VLANs']) {
+    await expect(modal.getByLabel(field + ' operation', { exact: true }).locator('option')).toHaveText(['Keep', 'Set'])
+  }
+  await expect(operation).toHaveValue('keep')
+  await expect(mode).toHaveValue('passive')
+  await modal.getByLabel('Description', { exact: true }).fill('Keep the bundle protocol')
+  await preview.click()
+  await modal.getByRole('checkbox', { name: 'Show kept fields' }).check()
+  await expectLacpPreview('passive', 'passive', 'Keep')
+  await apply.click()
+  const kept = await checkedSave(page, request, id, 2)
+  const expected = {
+    ...(original.plan.port_channels as RecordValue[])[0]!,
+    settings: { ...source.settings as RecordValue, description: 'Keep the bundle protocol' },
+  }
+  expect((kept.plan.port_channels as RecordValue[])[0]).toMatchObject(expected)
+
+  let previous = 'passive'
+  for (const [index, value] of ['active', 'static', 'passive'].entries()) {
+    await edit.click()
+    await expect(mode).toHaveValue(previous)
+    await operation.selectOption('set')
+    await mode.selectOption(value)
+    await preview.click()
+    await expectLacpPreview(previous, value, 'Set')
+    if (value === 'active') await page.screenshot({ path: info.outputPath('lacp-passive-to-active.png') })
+    await apply.click()
+    const persisted = await checkedSave(page, request, id, index + 3)
+    expect((persisted.plan.port_channels as RecordValue[])[0]).toEqual({
+      ...(kept.plan.port_channels as RecordValue[])[0]!, lacp: value,
+    })
+    previous = value
+  }
+
+  delete source.lacp
+  await importJson(page, JSON.stringify(raw))
+  const channels = page.getByRole('table', { name: 'Port-Channels', exact: true })
+  await expect(channels.getByRole('cell', { name: 'active', exact: true })).toBeVisible()
+  await edit.click()
+  await expect(operation).toHaveValue('keep')
+  await expect(operation.locator('option')).toHaveText(['Keep', 'Set'])
+  await expect(mode).toHaveValue('active')
+  await modal.getByLabel('Description', { exact: true }).fill('Keep the model default')
+  await preview.click()
+  await modal.getByRole('checkbox', { name: 'Show kept fields' }).check()
+  await expectLacpPreview('active', 'active', 'Keep')
+  await apply.click()
+  const saving = page.waitForRequest((req) => req.method() === 'POST' && req.url().endsWith(revisions(id)))
+  const imported = await checkedSave(page, request, id, 6)
+  const sent = (await saving).postDataJSON() as Plan
+  expect((sent.port_channels as RecordValue[])[0]).not.toHaveProperty('lacp')
+  expect((imported.plan.port_channels as RecordValue[])[0]!.lacp).toBe('active')
+
+  const unchanged = await request.get(originalUrl + '/export')
+  expect(await unchanged.body()).toEqual(originalBytes)
+  expect(unchanged.headers().etag).toBe(originalExport.headers().etag)
+  expect(await (await request.get(originalUrl)).json()).toMatchObject({
+    id: original.id, content_hash: original.content_hash, plan: { port_channels: original.plan.port_channels },
+  })
 })

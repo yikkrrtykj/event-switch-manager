@@ -1,4 +1,4 @@
-import { display, get, set } from './catalog'
+import { display, get, set, withModelDefault } from './catalog'
 import type { Field } from './catalog'
 import { fingerprint, object, records } from './model'
 import type { Plan, RecordValue, Value } from './model'
@@ -26,6 +26,11 @@ export function portFieldApplies(field: Field, mode: Value | undefined) {
   return true
 }
 
+export function canResetPortField(field: Field, hidden: boolean) {
+  return field.key.startsWith('settings.') && field.key !== modeKey &&
+    (field.modelDefault === undefined || hidden && field.type === 'refs')
+}
+
 function normalized(field: Field, value: Value | undefined) {
   if (field.type === 'refs') return Array.isArray(value) ? [...value].sort() : []
   return value ?? null
@@ -36,25 +41,21 @@ export function hasPortValue(value: Value | undefined) {
 }
 
 export function commonPortValue(field: Field, targets: PortTarget[]) {
-  const first = get(targets[0]?.item ?? {}, field.key)
+  const first = withModelDefault(field, get(targets[0]?.item ?? {}, field.key))
   const mixed = targets.some(({ item }) =>
-    fingerprint(normalized(field, get(item, field.key))) !== fingerprint(normalized(field, first)))
+    fingerprint(normalized(field, withModelDefault(field, get(item, field.key)))) !== fingerprint(normalized(field, first)))
   return { value: mixed ? undefined : first, mixed }
 }
 
 export function describePortValue(plan: Plan, field: Field, value: Value | undefined) {
+  value = withModelDefault(field, value)
   if (value === '' && field.preserveEmpty) return 'Empty description'
-  if (value == null) return isPortSetting(field) ? 'Platform default' : '—'
+  if (value == null) return canResetPortField(field, false) ? 'Platform default' : '—'
   if (Array.isArray(value) && value.length === 0) return 'None'
   return display(plan, field, value)
 }
 
 function reset(record: RecordValue, field: Field): RecordValue {
-  if (field.key === 'lacp') {
-    const next = { ...record }
-    delete next.lacp
-    return next
-  }
   const settings = { ...object(record.settings) }
   delete settings[field.key.slice('settings.'.length)]
   return { ...record, settings }
@@ -76,9 +77,9 @@ export function editPort(item: RecordValue, base: RecordValue, fields: Field[], 
     const before = get(item, field.key)
     const operation = permit(field) ? operations[field.key] : undefined
     let label = 'Keep'
-    if (operation?.kind === 'reset') {
+    if (operation?.kind === 'reset' && canResetPortField(field, !portFieldApplies(field, mode))) {
       if (hasPortValue(before)) next = reset(next, field)
-      label = 'Reset'
+      label = field.type === 'refs' ? 'Clear list' : 'Reset'
     } else if (operation?.kind === 'set') {
       next = set(next, field.key, operation.value)
       label = 'Set'

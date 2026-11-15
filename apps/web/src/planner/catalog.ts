@@ -11,6 +11,7 @@ export type Field = {
   maxLength?: number
   reference?: string
   initial?: Value
+  modelDefault?: Value
   when?: [string, string]
   children?: Field[]
   accepts?: (candidate: RecordValue, record: RecordValue, plan: Plan) => boolean
@@ -46,11 +47,13 @@ const tunnel = accepts(ref('tunnel_id', 'Tunnel', 'ipsec_tunnels'), owner('assig
 const isp = accepts(ref('isp_id', 'ISP', 'isps'), owner('assignment_id'))
 const pref = number('preference', 'Preference', 1)
 const priority = number('priority', 'Priority', 10)
+const defaultLacp = 'active'
+const lacpMode = { ...choice('lacp', 'LACP mode', [defaultLacp, 'passive', 'static']), modelDefault: defaultLacp }
 const portModeFields = [
   choice('settings.mode', 'Mode', ['access', 'trunk', 'routed']),
   when(ref('settings.access_vlan', 'Access VLAN', 'vlans'), 'settings.mode', 'access'),
   when(ref('settings.native_vlan', 'Native VLAN', 'vlans', true), 'settings.mode', 'trunk'),
-  when(refs('settings.allowed_vlans', 'Allowed VLANs', 'vlans'), 'settings.mode', 'trunk'),
+  when({ ...refs('settings.allowed_vlans', 'Allowed VLANs', 'vlans'), modelDefault: [] }, 'settings.mode', 'trunk'),
   when(field('settings.address', 'IPv4 address / prefix', true), 'settings.mode', 'routed'),
 ]
 const layer2Fields = [
@@ -145,7 +148,7 @@ export const catalog = [
         const aggregate = records(plan, 'logical_interfaces').find((item) => item.id === record.interface_id)
         return !aggregate || candidate.assignment_id === aggregate.assignment_id
       }),
-    choice('lacp', 'LACP mode', ['active', 'passive', 'static']), ...channelFields], ['number', 'interface_id', 'lacp', 'member_ids', 'settings.mode']),
+    lacpMode, ...channelFields], ['number', 'interface_id', 'lacp', 'member_ids', 'settings.mode']),
 ]
 
 export const sections: Record<string, { label: string; keys: string[] }> = {
@@ -184,7 +187,11 @@ export function options(plan: Plan, key: string, include: (record: RecordValue) 
     return [{ id, label: prefix + String(label) + suffix }]
   })
 }
+export function withModelDefault(field: Field, value: Value | undefined) {
+  return value === undefined ? field.modelDefault : value
+}
 export function display(plan: Plan, item: Field, value: Value | undefined): string {
+  value = withModelDefault(item, value)
   if (item.key === 'capability_status' && value !== 'verified' || item.key === 'verified_serial' && !value) return 'UNVERIFIED'
   if (value == null || value === '') return '—'
   if (item.reference) {
