@@ -115,6 +115,15 @@ def canonical_plan(plan: EventPlan) -> str:
         for record in document[collection]:
             if record[field] == default:
                 del record[field]
+    for collection in ("physical_interfaces", "port_channels"):
+        for record in document[collection]:
+            settings = record["settings"]
+            for field in (
+                "description", "admin_state", "speed", "duplex", "poe_mode", "portfast",
+                "bpdu_guard",
+            ):
+                if settings[field] is None:
+                    del settings[field]
     return _json(_canonical(document))
 
 

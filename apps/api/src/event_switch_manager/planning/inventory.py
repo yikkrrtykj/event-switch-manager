@@ -1,8 +1,9 @@
+import re
 from ipaddress import IPv4Address, IPv4Interface
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import field_validator
+from pydantic import BeforeValidator, StringConstraints, field_validator
 
 from event_switch_manager.domain import DeviceFamily, DeviceRole
 from event_switch_manager.integrations import Capability, Support
@@ -56,12 +57,40 @@ class StackSnapshot(Record):
     members: tuple[StackMember, ...]
 
 
+def _description_text(value: object) -> object:
+    if isinstance(value, str) and re.search(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", value):
+        raise ValueError("Port descriptions must be a single line without control characters")
+    return value
+
+
+def _integer_speed(value: object) -> object:
+    if type(value) is not int:
+        raise ValueError("Fixed Ethernet speed must be an integer in Mbps")
+    return value
+
+
+PortDescription = Annotated[
+    str, StringConstraints(strict=True, max_length=240), BeforeValidator(_description_text)
+]
+FixedPortSpeed = Annotated[
+    Literal[10, 100, 1000, 2500, 5000, 10000, 25000, 40000, 50000, 100000, 200000, 400000, 800000],
+    BeforeValidator(_integer_speed),
+]
+
+
 class PortSettings(Record):
     mode: Literal["access", "trunk", "routed"]
     access_vlan: VlanId | None = None
     native_vlan: VlanId | None = None
     allowed_vlans: tuple[VlanId, ...] = ()
     address: IPv4Interface | None = None
+    description: PortDescription | None = None
+    admin_state: Literal["up", "down"] | None = None
+    speed: FixedPortSpeed | Literal["auto"] | None = None
+    duplex: Literal["auto", "full", "half"] | None = None
+    poe_mode: Literal["auto", "static", "never"] | None = None
+    portfast: Literal["edge", "edge-trunk", "disabled"] | None = None
+    bpdu_guard: Literal["enabled", "disabled"] | None = None
 
 
 class PhysicalInterface(Record):
