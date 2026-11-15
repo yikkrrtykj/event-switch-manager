@@ -14,8 +14,9 @@ const database = process.env.ESM_TEST_DATABASE ??= join(
 
 export default defineConfig({
   testDir: 'e2e',
-  testMatch: useVite ? 'vite.spec.ts' : 'dashboard.spec.ts',
-  use: { baseURL: useVite ? viteOrigin : origin },
+  testMatch: useVite ? 'vite.spec.ts' : ['dashboard.spec.ts', 'planner.spec.ts'],
+  outputDir: useVite ? 'test-results-vite' : 'test-results',
+  use: { baseURL: useVite ? viteOrigin : origin, trace: 'retain-on-failure' },
   webServer: [
     {
       command: 'python -m event_switch_manager --web-dist dist --database "' + database + '"'
