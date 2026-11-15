@@ -127,7 +127,7 @@ test('groups real interface names by Stack member and saves a warning-only bulk 
   await page.getByRole('button', { name: 'Batch edit (2)' }).click()
   await page.getByLabel('Mode', { exact: true }).selectOption('trunk')
   await page.getByRole('button', { name: 'Add entry' }).click()
-  await page.getByLabel('Allowed VLANs 1').selectOption('20')
+  await page.getByRole('combobox', { name: 'Allowed VLANs 1', exact: true }).selectOption('20')
   await page.getByRole('button', { name: 'Apply to 2 ports' }).click()
   await expect(page.getByRole('row', { name: /Gi2\/0\/7.*trunk/ })).toBeVisible()
   await page.getByRole('button', { name: 'Validate plan' }).click()

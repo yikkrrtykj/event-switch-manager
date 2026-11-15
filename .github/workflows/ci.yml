@@ -103,7 +103,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/web-before" "$RUNNER_TEMP/hallmark-tools"
-          git archive "$BASE_SHA" apps/web | tar -x -C "$RUNNER_TEMP/web-before"
+          git -C "$GITHUB_WORKSPACE" archive "$BASE_SHA" apps/web | tar -x -C "$RUNNER_TEMP/web-before"
           (cd "$RUNNER_TEMP/web-before/apps/web" && npm ci --no-audit --no-fund && npm run build)
           npm install --prefix "$RUNNER_TEMP/hallmark-tools" --no-save --package-lock=false puppeteer-core@24
           CHROMIUM=$(node -p "require('playwright').chromium.executablePath()")
