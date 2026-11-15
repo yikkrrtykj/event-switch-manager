@@ -266,7 +266,7 @@ function portsOf(plan: Plan) {
   return plan.physical_interfaces as RecordValue[]
 }
 
-test('resets port selections on filters, event and revision changes and saves only confirmed targets', async ({ page, request }) => {
+test('resets port selections on filters, event and revision changes and saves only confirmed targets', async ({ page, request }, info) => {
   const id = await createEvent(request, 'Synthetic selection scope')
   const other = await createEvent(request, 'Synthetic separate port scope')
   const plan = stackPlan(id)
@@ -338,6 +338,7 @@ test('resets port selections on filters, event and revision changes and saves on
   await expect(targets.getByRole('row', { name: /Synthetic-Core Stack member 1 Gi1\/0\/7/ })).toBeVisible()
   await expect(targets.getByRole('row', { name: /Synthetic-Access Standalone Gi0\/1/ })).toBeVisible()
   await expect(targets.getByText('Gi2/0/7', { exact: true })).toHaveCount(0)
+  await page.screenshot({ path: info.outputPath('confirmed-port-targets.png') })
   await page.getByLabel('Mode', { exact: true }).selectOption('trunk')
   for (const [index, vlan] of ['10', '20', '30'].entries()) {
     await page.getByRole('button', { name: 'Add entry', exact: true }).click()
@@ -502,7 +503,7 @@ function auditPlan(eventId: string): Plan {
     ],
     default_routes: [{ id: id(defaultRoute), assignment_id: id(core), next_hop: { kind: 'ip', address: '10.0.0.2' } }],
     source_routes: [{ id: id(sbr), assignment_id: id(firewall), source_vlan: 20, isp_priority: [id(primary), id(backup)] }],
-    policy_routes: [{ id: id(pbr), assignment_id: id(firewall), source_vlan: 20, destination: '172.16.20.0/24', tunnel_id: id(tunnel) }],
+    policy_routes: [{ id: id(pbr), assignment_id: id(firewall), source_vlan: 20, priority: 10, destination: '172.16.20.0/24', tunnel_id: id(tunnel) }],
     snat: [
       { id: id(snat1), assignment_id: id(firewall), source_vlan: 20, isp_id: id(primary), translated_ip: '192.0.2.2' },
       { id: id(snat2), assignment_id: id(firewall), source_vlan: 20, isp_id: id(backup), translated_ip: '198.51.100.2' },
