@@ -27,6 +27,66 @@ def check_port(v: Validation, settings: PortSettings, path: str, vlans: Mapping[
             v.require(vlan in vlans, path, "vlan_reference", f"Unknown VLAN {vlan}")
 
 
+def check_port_intent(
+    v: Validation, settings: PortSettings, path: str, *, aggregate: bool,
+) -> None:
+    half_speed = (
+        settings.speed if settings.duplex == "half" and isinstance(settings.speed, int) else 0
+    )
+    for field in ("speed", "duplex", "poe_mode"):
+        if getattr(settings, field) is None:
+            continue
+        if aggregate:
+            v.error(f"{path}.{field}", "port_physical_only",
+                    "Apply media or power settings to physical interfaces")
+        elif field == "duplex" and half_speed > 1000:
+            v.error(f"{path}.duplex", "port_speed_duplex",
+                    "Half duplex is incompatible with fixed speeds above 1000 Mbps")
+        elif field == "duplex" and half_speed == 1000:
+            v.warning(f"{path}.duplex", "port_gigabit_half_unverified",
+                      "Verify 1000 Mbps half duplex on the exact interface and media")
+        else:
+            v.warning(f"{path}.{field}", "port_setting_unverified",
+                      "Verify the requested setting on the actual interface and media")
+
+    for field in ("portfast", "bpdu_guard"):
+        if getattr(settings, field) is None:
+            continue
+        if settings.mode == "routed":
+            v.error(f"{path}.{field}", "port_layer2_only",
+                    "An explicit spanning-tree setting requires a Layer 2 port")
+        elif field == "portfast" and (
+            (settings.portfast == "edge" and settings.mode != "access")
+            or (settings.portfast == "edge-trunk" and settings.mode != "trunk")
+        ):
+            v.error(f"{path}.{field}", "portfast_mode",
+                    "Match the PortFast edge setting to access or trunk mode")
+        else:
+            v.warning(f"{path}.{field}", "port_setting_unverified",
+                      "Verify spanning-tree support and edge role on the actual interface")
+
+
+def check_member_intent(
+    v: Validation, settings: PortSettings, members: list[PortSettings], path: str,
+) -> None:
+    for field in ("speed", "duplex"):
+        values = [getattr(member, field) for member in members]
+        fixed = {value for value in values if value is not None and value != "auto"}
+        if len(fixed) > 1:
+            v.error(f"{path}.member_ids", f"port_channel_{field}_conflict",
+                    f"Port-Channel members have conflicting fixed {field} settings")
+        elif fixed and any(value is None or value == "auto" for value in values):
+            v.warning(f"{path}.member_ids", f"port_channel_{field}_unverified",
+                      f"Verify member {field} with both fixed and negotiated or default settings")
+
+    for field in ("portfast", "bpdu_guard"):
+        values = {getattr(record, field) for record in (settings, *members)}
+        values.discard(None)
+        if len(values) > 1:
+            v.error(f"{path}.settings.{field}", "port_channel_stp_conflict",
+                    f"Port-Channel and members must agree on explicit {field} intent")
+
+
 def check_inventory(v: Validation) -> None:
     p = v.plan
     devices = v.index("physical_devices", p.physical_devices, lambda x: x.id)
@@ -99,6 +159,7 @@ def check_inventory(v: Validation) -> None:
                       f"{path}.physical_device_id", "port_chassis",
                       "Port must belong to its chassis")
         check_port(v, port.settings, f"{path}.settings", vlans)
+        check_port_intent(v, port.settings, f"{path}.settings", aggregate=False)
         if port.capability_status != "verified":
             v.warning(f"{path}.capability_status", "port_capability_unverified",
                       "Check the expected port and its capabilities during preflight")
@@ -125,7 +186,9 @@ def check_inventory(v: Validation) -> None:
             v.require(aggregate.address is None, path, "port_channel_address",
                       "Set the aggregate address in its port settings")
         check_port(v, channel.settings, f"{path}.settings", vlans)
+        check_port_intent(v, channel.settings, f"{path}.settings", aggregate=True)
         v.require(channel.member_ids, f"{path}.member_ids", "empty", "Port-Channel needs members")
+        members_settings: list[PortSettings] = []
         for j, port_id in enumerate(channel.member_ids):
             member_port = ports.get(port_id)
             v.require(member_port and aggregate
@@ -141,6 +204,9 @@ def check_inventory(v: Validation) -> None:
             v.require(port_id not in member_owner, f"{path}.member_ids.{j}", "duplicate",
                       "Physical port may join only one aggregate")
             member_owner.add(port_id)
+            if member_port and aggregate and member_port.assignment_id == aggregate.assignment_id:
+                members_settings.append(member_port.settings)
+        check_member_intent(v, channel.settings, members_settings, path)
     for i, interface in enumerate(p.logical_interfaces):
         if interface.kind == "port-channel":
             v.require(interface.id in channels, f"logical_interfaces.{i}", "port_channel_interface",

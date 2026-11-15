@@ -19,21 +19,20 @@ stay in CI. No fonts or data are fetched to render the production interface.
 ## Current port editing scope
 
 The editor uses the v1 model for access, trunk, routed, VLANs and Port-Channel/LACP. Unknown
-hardware capability remains visible. Description, administrative shutdown, speed/duplex, PoE,
-PortFast and BPDU Guard await their capability-aware persisted fields. Actual device writes
-remain disabled.
+hardware capability remains visible. The API persists additional port intent as described in
+[WEB-02A port settings](docs/web-02a-port-settings.md). The extended editor and actual device
+writes remain outside this scope.
 
 ## Network Planner Web backlog
 
 - **WEB-01**. The English workbench and editable topology link table ship here. Complete
-  the English message catalog and Simplified Chinese locale in a separate UI change.
-  A standalone topology view should be considered separately for tracing links across
-  devices and Stack members. The link table already supports editing and precise review.
-- **WEB-02**. Description, administrative shutdown, speed and duplex, PoE, PortFast,
-  and BPDU Guard remain open. First extend PortSettings compatibly and add backend
-  validation and persistence tests. Then expose persisted controls in the Port Editor.
-  Add SKU, software version and license capability rules in the hardware phase,
-  with explicit unverified states until evidence is available.
+  the English message catalog, Simplified Chinese locale, language switch, and localized
+  errors, warnings and confirmations in a separate UI change. Language changes must preserve
+  plan data and revision hashes. Evaluate an optional topology view for tracing links across
+  devices and Stack members. The editable link table already supports precise review.
+- **WEB-02**. WEB-02A adds compatible PortSettings fields, validation and persistence tests.
+  WEB-02B exposes them in the Port Editor. Add SKU, software version and license capability
+  rules in the hardware phase, with explicit unverified states until evidence is available.
 - **WEB-03**. The pinned Hallmark App Screens workflow and cross-platform browser
   acceptance cover the workbench. F18 media-slot size hints on compact badges and
   controls are advisory. Keep those elements compact when browser tests confirm
