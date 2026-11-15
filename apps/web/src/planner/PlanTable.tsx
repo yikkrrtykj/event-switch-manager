@@ -111,7 +111,7 @@ export function PlanTable({ group, plan, issues, location, locked, update }: {
           <tr data-record={index} tabIndex={-1} data-selected={selected.includes(key) || undefined}>
             {isPort && !locked && <td><input type="checkbox" aria-label={'Select port ' + name} checked={selected.includes(key)}
               onChange={(event) => setSelected(event.target.checked ? [...selected, key] : selected.filter((id) => id !== key))} /></td>}
-            {columns.map((field) => <td key={field.key} className={/address|network|destination|serial/.test(field.key) ? 'fixed' : ''}>
+            {columns.map((field) => <td key={field.key} className={/address|network|destination|serial/.test(field.key) ? 'data-mono' : ''}>
               {display(plan, field, get(item, field.key))}
             </td>)}
             <td>{findings.length ? <Badge tone={invalid ? 'danger' : 'warning'}>

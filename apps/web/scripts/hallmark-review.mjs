@@ -68,13 +68,13 @@ async function fixture() {
 capture('static', cwd, 'src', '--scope', 'app')
 await serve(join(before, 'dist'), async () => {
   await fixture()
-  capture('before', before, 'src/Dashboard.tsx', '--scope', 'app', '--before', '--render', '--url', url)
+  capture('before', before, 'src/Dashboard.tsx', 'src/style.css', '--scope', 'app', '--before', '--render', '--url', url)
 })
 cpSync(join(before, '.hallmark'), join(cwd, '.hallmark'), { recursive: true })
 await serve(resolve('dist'), async () => {
   capture('render', cwd, 'src', '--scope', 'app', '--render',
     '--url', url + '#planner/addressing', '--url', url + '#ports', '--url', url + '#devices')
-  capture('kept', cwd, 'src/Dashboard.tsx', '--scope', 'app', '--kept', '--render', '--url', url)
+  capture('kept', cwd, 'src/Dashboard.tsx', 'src/style.css', '--scope', 'app', '--kept', '--render', '--url', url)
 })
 writeFileSync(join(evidence, 'result.json'), JSON.stringify(results, null, 2))
 if (results.some((result) => result.skipped || result.code !== 0)) process.exitCode = 1

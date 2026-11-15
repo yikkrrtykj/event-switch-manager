@@ -176,6 +176,7 @@ test('captures responsive workbench views and keyboard, contrast, motion and dat
   for (const width of [1280, 1440, 1920, 800, 320]) {
     await page.setViewportSize({ width, height: 850 })
     await expect(page.getByRole('table', { name: 'VLANs', exact: true })).toBeVisible()
+    await expect(page.getByRole('cell', { name: '192.168.20.0/24', exact: true })).toHaveCSS('position', 'static')
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width + 1)
     await page.screenshot({ path: info.outputPath('planner-' + width + '.png'), fullPage: true })
   }
@@ -198,6 +199,9 @@ test('captures responsive workbench views and keyboard, contrast, motion and dat
   })
   expect(contrast).toBeGreaterThanOrEqual(4.5)
   await page.getByRole('link', { name: 'Port Editor', exact: true }).click()
+  const ports = page.locator('[data-slot="table-container"][aria-label="Physical ports"]')
+  await expect(ports.getByRole('row', { name: /Gi2\/0\/7/ })).toBeVisible()
+  expect(await ports.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
   await page.screenshot({ path: info.outputPath('ports-1440.png'), fullPage: true })
   await page.goto('/')
   await page.keyboard.press('Tab')

@@ -107,7 +107,7 @@ export const catalog = [
   group('links', 'Topology links', 'link', [refs('endpoints', 'Link endpoints', 'physical_interfaces')], ['endpoints'], true),
   group('physical_interfaces', 'Physical ports', 'port', [device, ref('physical_device_id', 'Physical chassis', 'physical_devices'),
     field('name', 'Interface name'), number('stack_member', 'Stack member', undefined, true), ...portFields],
-    ['name', 'assignment_id', 'stack_member', 'settings.mode', 'settings.access_vlan', 'settings.native_vlan',
+    ['name', 'settings.mode', 'settings.access_vlan', 'settings.native_vlan',
       'settings.allowed_vlans', 'settings.address', 'capability_status'], true),
   group('port_channels', 'Port-Channels', 'Port-Channel', [ref('interface_id', 'Port-Channel interface', 'logical_interfaces'),
     number('number', 'Channel number'), refs('member_ids', 'Member ports', 'physical_interfaces'),

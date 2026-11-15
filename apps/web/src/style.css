@@ -149,7 +149,7 @@ textarea { resize: vertical; font-family: ui-monospace, Consolas, monospace; }
 .revision-meta, .metadata { min-width: 0; max-width: 100%; }
 .metadata { overflow-wrap: anywhere; margin-top: .35rem; }
 .metadata div { margin-bottom: .35rem; }
-.metadata .button-link { margin-left: var(--space); }
+.metadata .button-link { margin-left: var(--space); white-space: nowrap; }
 .feedback { margin-block: .6rem; font-size: var(--size-small); }
 summary { font-weight: 650; cursor: pointer; }
 .diagnostics summary span { font-size: var(--size-small); color: var(--muted-foreground); margin-left: .4rem; }
@@ -167,12 +167,12 @@ table { border-collapse: collapse; font-size: var(--size-small); width: 100%; fo
 th, td { border-bottom: 1px solid var(--border); padding: .36rem .55rem; text-align: left; font-variant-numeric: tabular-nums; }
 th { background: var(--muted); color: var(--muted-foreground); font-weight: 650; }
 td { overflow-wrap: anywhere; }
-.collection td, .collection th { white-space: nowrap; }
+.collection td, .collection th, .collection [data-slot="badge"] { white-space: nowrap; }
 tr[data-selected] td { background: var(--selected); }
 .group-row td { background: var(--muted); font-weight: 600; }
 .row-actions { flex-wrap: nowrap; }
 .row-actions :is(button, a) { white-space: nowrap; }
-.fixed, code, pre { font-family: ui-monospace, Consolas, monospace; }
+.data-mono, code, pre { font-family: ui-monospace, Consolas, monospace; }
 code { font-size: var(--size-small); }
 pre {
   background: var(--muted); padding: .7rem; overflow: auto; border-radius: var(--radius); max-height: 24rem;
