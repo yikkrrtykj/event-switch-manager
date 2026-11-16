@@ -454,6 +454,8 @@ export const zhCN = {
   issuePortChannelAddress: "请在端口设置中指定聚合接口的地址",
   issueEmpty: "Port-Channel 需要成员端口",
   issuePortChannelMember: "成员须与聚合接口使用相同的设备分配和聚合设置",
+  issuePortChannelPeerPassive: "相连的 Port-Channel 两端均为被动 LACP，双方都不会发起协商",
+  issuePortChannelPeerStatic: "相连的 Port-Channel 两端必须同时使用静态聚合，或同时使用 LACP",
   issueDuplicate5: "物理端口最多加入一个聚合组",
   issuePortChannelInterface2: "逻辑 Port-Channel 需要聚合记录",
   issueTopologyEndpoints: "链路应连接不同设备分配下的两个物理端口",

@@ -105,6 +105,29 @@ def check_member_intent(
                     f"Port-Channel and members must agree on explicit {field} intent")
 
 
+def check_linked_channels(v: Validation, channel_by_port: dict[UUID, int]) -> None:
+    """Check negotiation only where planned links identify both aggregates."""
+    channels = v.plan.port_channels
+    checked: set[tuple[int, int]] = set()
+    for link in v.plan.links:
+        left, right = (channel_by_port.get(port) for port in link.endpoints)
+        if left is None or right is None or left == right:
+            continue
+        pair = (min(left, right), max(left, right))
+        if pair in checked:
+            continue
+        checked.add(pair)
+        modes = {channels[left].lacp, channels[right].lacp}
+        if modes == {"passive"}:
+            message = "Both linked Port-Channels use passive LACP, so neither starts negotiation"
+        elif "static" in modes and len(modes) > 1:
+            message = "Linked Port-Channels must both use static aggregation or both use LACP"
+        else:
+            continue
+        for index in pair:
+            v.error(f"port_channels.{index}.lacp", "port_channel_peer_lacp", message)
+
+
 def check_inventory(v: Validation) -> None:
     p = v.plan
     devices = v.index("physical_devices", p.physical_devices, lambda x: x.id)
@@ -192,6 +215,7 @@ def check_inventory(v: Validation) -> None:
             v.require(interface.vlan is None, path, "svi", "Only an SVI declares its VLAN here")
     channels = v.index("port_channels", p.port_channels, lambda x: x.interface_id)
     member_owner: set[UUID] = set()
+    channel_by_port: dict[UUID, int] = {}
     numbers: set[tuple[UUID, int]] = set()
     for i, channel in enumerate(p.port_channels):
         path = f"port_channels.{i}"
@@ -224,8 +248,10 @@ def check_inventory(v: Validation) -> None:
                       "Physical port may join only one aggregate")
             member_owner.add(port_id)
             if member_port and aggregate and member_port.assignment_id == aggregate.assignment_id:
+                channel_by_port.setdefault(port_id, i)
                 member_settings.append((port_indices[port_id], member_port.settings))
         check_member_intent(v, channel.settings, member_settings, path)
+    check_linked_channels(v, channel_by_port)
     for i, interface in enumerate(p.logical_interfaces):
         if interface.kind == "port-channel":
             v.require(interface.id in channels, f"logical_interfaces.{i}", "port_channel_interface",

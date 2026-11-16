@@ -452,6 +452,8 @@ export const enUS = {
   issuePortChannelAddress: "Set the aggregate address in its port settings",
   issueEmpty: "Port-Channel needs members",
   issuePortChannelMember: "Member must share the assignment and aggregate settings",
+  issuePortChannelPeerPassive: "Both linked Port-Channels use passive LACP, so neither starts negotiation",
+  issuePortChannelPeerStatic: "Linked Port-Channels must both use static aggregation or both use LACP",
   issueDuplicate5: "Physical port may join only one aggregate",
   issuePortChannelInterface2: "Logical Port-Channel requires an aggregate record",
   issueTopologyEndpoints: "A link connects two physical ports on different assignments",

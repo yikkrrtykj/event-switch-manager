@@ -35,6 +35,7 @@ const fixed: Partial<Record<string, readonly MessageKey[]>> = {
   port_channel_address: ['issuePortChannelAddress'],
   empty: ['issueEmpty'],
   port_channel_member: ['issuePortChannelMember'],
+  port_channel_peer_lacp: ['issuePortChannelPeerPassive', 'issuePortChannelPeerStatic'],
   topology_endpoints: ['issueTopologyEndpoints'],
   transit_core: ['issueTransitCore'],
   transit_firewall: ['issueTransitFirewall'],
