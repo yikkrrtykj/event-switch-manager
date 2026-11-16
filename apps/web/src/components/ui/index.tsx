@@ -1,3 +1,4 @@
+import { LanguageSelect, useMessages } from '../../locale'
 import { useEffect, useId, useRef } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
 
@@ -9,6 +10,7 @@ export function Badge({ tone = 'neutral', children }: { tone?: string; children:
   return <span data-slot="badge" data-tone={tone}>{children}</span>
 }
 export function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  const { t } = useMessages()
   const ref = useRef<HTMLDialogElement>(null)
   const id = useId()
   useEffect(() => {
@@ -19,8 +21,9 @@ export function Dialog({ title, onClose, children }: { title: string; onClose: (
   return <dialog ref={ref} data-slot="dialog" aria-labelledby={id}
     onCancel={(event) => { event.preventDefault(); onClose() }}>
     <div className="section-head"><h2 id={id}>{title}</h2>
-      <Button onClick={onClose} aria-label={'Close ' + title}>Close</Button></div>
+      <Button onClick={onClose} aria-label={t('closeNamed', { name: title })}>{t('close')}</Button></div>
     {children}
+    <div className="dialog-locale"><LanguageSelect /></div>
   </dialog>
 }
 export function Loading({ children }: { children: ReactNode }) {

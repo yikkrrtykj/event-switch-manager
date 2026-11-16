@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { expect, test } from '@playwright/test'
 import type { APIRequestContext, Page } from '@playwright/test'
 import type { Plan, RecordValue, Revision, Summary } from '../src/planner/model'
@@ -1071,4 +1071,334 @@ test('previews and saves explicit LACP values while Keep preserves the existing 
   expect(await (await request.get(originalUrl)).json()).toMatchObject({
     id: original.id, content_hash: original.content_hash, plan: { port_channels: original.plan.port_channels },
   })
+})
+
+
+async function switchLanguage(page: Page, locale: 'en-US' | 'zh-CN') {
+  const dialog = page.getByRole('dialog')
+  const scope = await dialog.isVisible() ? dialog : page.locator('header')
+  await scope.getByRole('combobox', { name: /^(Language|语言)$/ }).selectOption(locale)
+  await expect(page.locator('html')).toHaveAttribute('lang', locale)
+}
+
+test('keeps a pending port edit, draft and revision identity across locale changes', async ({ page, request }, info) => {
+  test.setTimeout(70_000)
+  const id = await createEvent(request, 'Synthetic bilingual port configuration')
+  const plan = stackPlan(id)
+  Object.assign(settingsOf(plan, 'Gi1/0/7'), { description: 'Patch A', speed: 'auto' })
+  const original = await planRecord(request, plan)
+  const originalUrl = revisions(id) + '/' + original.id
+  const before = await request.get(originalUrl + '/export')
+  const bytes = await before.body()
+  const tag = before.headers().etag
+  expect(createHash('sha256').update(bytes).digest('hex')).toBe(original.content_hash)
+  expect(tag).toBe('"' + original.content_hash + '"')
+
+  await openWorkspace(page, id, 'ports')
+  const writes: unknown[] = []
+  page.on('request', (entry) => {
+    if (entry.method() === 'POST' && new URL(entry.url()).pathname.startsWith(api)) writes.push(entry.postDataJSON())
+  })
+  await switchLanguage(page, 'zh-CN')
+  await expect(page.getByRole('heading', { name: '端口编辑器' })).toBeVisible()
+  await page.getByRole('checkbox', { name: '选择所有可见端口' }).check()
+  await page.getByRole('button', { name: '批量编辑（2）' }).click()
+  const modal = page.getByRole('dialog')
+  await expect(modal.getByRole('table', { name: '目标端口' })).toContainText('Gi2/0/7')
+  await expect(modal.getByText('多个值', { exact: true }).first()).toBeVisible()
+  await expect(modal.getByLabel('速率 (Mbps)操作', { exact: true })).toHaveValue('keep')
+  await modal.getByLabel('描述操作', { exact: true }).selectOption('reset')
+  await modal.getByLabel('模式操作', { exact: true }).selectOption('set')
+  await modal.getByLabel('模式', { exact: true }).selectOption('trunk')
+  await modal.getByRole('button', { name: '添加条目', exact: true }).click()
+  await modal.getByLabel('允许通过的 VLAN 1', { exact: true }).selectOption('20')
+  await switchLanguage(page, 'en-US')
+  await expect(modal.getByLabel('Description operation', { exact: true })).toHaveValue('reset')
+  await expect(modal.getByLabel('Mode', { exact: true })).toHaveValue('trunk')
+  await expect(modal.getByLabel('Allowed VLANs 1', { exact: true })).toHaveValue('20')
+  await modal.getByRole('button', { name: 'Preview changes' }).click()
+  const englishChanges = modal.getByRole('table', { name: 'Port changes' })
+  await expect(englishChanges.getByRole('row', { name: /Patch A.*Platform default.*Reset/ })).toBeVisible()
+  await page.screenshot({ path: info.outputPath('en-US-before-after.png') })
+  await switchLanguage(page, 'zh-CN')
+  const changes = modal.getByRole('table', { name: '端口变更' })
+  await expect(changes.getByRole('columnheader', { name: '变更前', exact: true })).toBeVisible()
+  await expect(changes.getByRole('columnheader', { name: '变更后', exact: true })).toBeVisible()
+  await expect(changes.getByRole('row', { name: /Patch A.*平台默认值.*重置/ })).toBeVisible()
+  await expect(modal.getByText(/切换模式将清除不兼容的设置/)).toBeVisible()
+  expect(writes).toEqual([])
+  await page.screenshot({ path: info.outputPath('zh-CN-before-after.png') })
+
+  await page.setViewportSize({ width: 320, height: 850 })
+  const confirm = modal.getByRole('button', { name: '确认并应用到草稿', exact: true })
+  await confirm.scrollIntoViewIfNeeded()
+  await expect(confirm).toBeInViewport()
+  await page.screenshot({ path: info.outputPath('zh-CN-before-after-320.png') })
+  const changesRegion = modal.getByRole('region', { name: '端口变更', exact: true })
+  await changesRegion.focus()
+  await expect(changesRegion).toBeFocused()
+  await page.keyboard.press('ArrowRight')
+  await expect.poll(() => changesRegion.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0)
+  await changesRegion.evaluate((node) => { node.scrollLeft = node.scrollWidth })
+  await page.screenshot({ path: info.outputPath('zh-CN-before-after-values-320.png') })
+  await confirm.click()
+  await expect(page.getByText('有未保存的更改', { exact: true })).toBeVisible()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.getByRole('button', { name: '查看 JSON', exact: true }).click()
+  const json = modal.locator('pre')
+  const draft = await json.textContent()
+  expect(draft).toContain('"mode": "trunk"')
+  await switchLanguage(page, 'en-US')
+  await expect(json).toHaveText(draft!)
+  await switchLanguage(page, 'zh-CN')
+  await expect(json).toHaveText(draft!)
+  expect(writes).toEqual([])
+  await modal.getByRole('button', { name: '关闭方案 JSON', exact: true }).click()
+
+  const validate = () => page.waitForRequest((entry) => entry.method() === 'POST' && entry.url().endsWith('/plan/validate'))
+  const chinese = validate()
+  await page.getByRole('button', { name: '校验方案', exact: true }).click()
+  const chineseBody = (await chinese).postDataJSON()
+  await expect(page.getByRole('button', { name: '保存修订版本', exact: true })).toBeEnabled()
+  await switchLanguage(page, 'en-US')
+  const english = validate()
+  await page.getByRole('button', { name: 'Validate plan', exact: true }).click()
+  expect((await english).postDataJSON()).toEqual(chineseBody)
+  await expect(page.getByRole('button', { name: 'Save revision', exact: true })).toBeEnabled()
+  await switchLanguage(page, 'zh-CN')
+  await page.getByRole('button', { name: '保存修订版本', exact: true }).click()
+  await expect(page.getByText('已保存修订版本 2。', { exact: true })).toBeVisible()
+  const entries = await (await request.get(revisions(id))).json() as Summary[]
+  expect(entries).toHaveLength(2)
+  const saved = await (await request.get(revisions(id) + '/' + entries[1]!.id)).json() as Revision
+  expect(settingsOf(saved.plan, 'Gi1/0/7')).toMatchObject({ mode: 'trunk', allowed_vlans: [20], speed: 'auto', description: null })
+  expect(settingsOf(saved.plan, 'Gi2/0/7')).toMatchObject({ mode: 'trunk', allowed_vlans: [20] })
+  const savedUrl = revisions(id) + '/' + saved.id
+  const zhExport = await request.get(savedUrl + '/export')
+  const savedBytes = await zhExport.body()
+  expect(createHash('sha256').update(savedBytes).digest('hex')).toBe(saved.content_hash)
+  const zhSaveBody = writes.at(-1)
+  expect(zhSaveBody).toEqual(chineseBody)
+  await switchLanguage(page, 'en-US')
+  await page.getByRole('button', { name: 'Save revision', exact: true }).click()
+  await expect(page.getByText('Revision 2 saved.', { exact: true })).toBeVisible()
+  expect(writes.at(-1)).toEqual(saved.plan)
+  expect(await (await request.get(revisions(id))).json()).toEqual(entries)
+  expect(await (await request.get(savedUrl)).json()).toEqual(saved)
+  const enExport = await request.get(savedUrl + '/export')
+  expect(await enExport.body()).toEqual(savedBytes)
+  expect(enExport.headers().etag).toBe(zhExport.headers().etag)
+  await switchLanguage(page, 'zh-CN')
+  const unchanged = await request.get(originalUrl + '/export')
+  expect(await unchanged.body()).toEqual(bytes)
+  expect(unchanged.headers().etag).toBe(tag)
+  expect(await (await request.get(originalUrl)).json()).toEqual(original)
+
+  await page.reload()
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
+  await page.getByLabel('赛事', { exact: true }).selectOption(id)
+  await expect(page.getByRole('row', { name: /Gi1\/0\/7.*Trunk/ })).toBeVisible()
+  await page.getByRole('button', { name: '修订历史', exact: true }).click()
+  await modal.getByRole('button', { name: '打开修订版本 1', exact: true }).click()
+  await expect(page.getByText('只读修订版本', { exact: true })).toBeVisible()
+  await page.getByText('修订版本 1', { exact: true }).click()
+  await expect(page.getByText(original.id, { exact: true })).toBeVisible()
+  await expect(page.getByText(original.content_hash, { exact: true })).toBeVisible()
+})
+
+test('localizes diagnostics and field focus while preserving the English fallback and technical path', async ({ page, request }, info) => {
+  const id = await createEvent(request, 'Synthetic translated diagnostics')
+  const plan = stackPlan(id)
+  Object.assign(settingsOf(plan, 'Gi1/0/7'), { speed: 10000, duplex: 'half', poe_mode: 'auto' })
+  plan.subnets = [...plan.subnets as RecordValue[], { id: randomUUID(), vlan: 20, network: '192.168.20.128/25' }]
+  await openWorkspace(page, id)
+  await switchLanguage(page, 'zh-CN')
+  await page.getByRole('button', { name: '导入 JSON', exact: true }).click()
+  await page.getByRole('textbox', { name: '方案 JSON', exact: true }).fill('{')
+  await page.getByRole('button', { name: '载入草稿', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveText('方案 JSON 无效。')
+  await page.getByRole('textbox', { name: '方案 JSON', exact: true }).fill(JSON.stringify(plan))
+  await page.getByRole('button', { name: '载入草稿', exact: true }).click()
+  await page.getByRole('button', { name: '校验方案', exact: true }).click()
+  const results = page.getByRole('table', { name: '校验问题', exact: true })
+  const errorRow = results.getByRole('row').filter({ hasText: 'port_speed_duplex' })
+  await expect(errorRow.getByText('错误', { exact: true })).toBeVisible()
+  await expect(errorRow).toContainText('半双工与高于 1000 Mbps 的固定速率不兼容')
+  const fallback = results.getByRole('row').filter({ hasText: 'subnet_overlap' })
+  await expect(fallback).toContainText(/英文原文：.*192\.168\.20\.128\/25.*192\.168\.20\.0\/24/)
+  await page.screenshot({ path: info.outputPath('zh-CN-validation.png'), fullPage: true })
+  await errorRow.getByRole('button', { name: /^定位/ }).click()
+  const dialog = page.getByRole('dialog')
+  const duplex = dialog.getByLabel('双工模式', { exact: true })
+  await expect(duplex).toBeFocused()
+  await expect(duplex).toHaveAttribute('aria-invalid', 'true')
+  await expect(dialog.getByText('半双工与高于 1000 Mbps 的固定速率不兼容', { exact: true })).toBeVisible()
+  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByLabel('严重程度', { exact: true }).selectOption('WARNING')
+  await expect(errorRow).toHaveCount(0)
+  const warning = results.getByRole('row').filter({ hasText: 'port_setting_unverified' }).filter({ hasText: 'poe_mode' })
+  await expect(warning.getByText('警告', { exact: true })).toBeVisible()
+  await warning.getByRole('button', { name: /^定位/ }).click()
+  const poe = dialog.getByLabel('PoE 模式', { exact: true })
+  await expect(poe).toBeFocused()
+  await expect(poe).not.toHaveAttribute('aria-invalid', 'true')
+  await expect(poe).toHaveAccessibleDescription('请在实际接口及介质上验证此设置')
+  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  await page.screenshot({ path: info.outputPath('zh-CN-warning-filter.png'), fullPage: true })
+  expect(await (await request.get(revisions(id))).json()).toEqual([])
+})
+
+test('checks bilingual screens at workstation widths and saves a network through the Chinese UI', async ({ page, request }, info) => {
+  test.setTimeout(120_000)
+  const id = await createEvent(request, 'Synthetic bilingual planning workspace')
+  const original = await planRecord(request, auditPlan(id))
+  await openWorkspace(page, id)
+  const views = [
+    ['Dashboard', '仪表盘', 'dashboard'],
+    ['Events', '赛事', 'events'],
+    ['Network Planner', '网络规划', 'planner'],
+    ['Devices / Topology', '设备 / 拓扑', 'devices'],
+    ['Port Editor', '端口编辑器', 'ports'],
+  ] as const
+  const widths = [320, 800, 1280, 1440, 1920]
+  const nav = page.getByRole('navigation').first()
+  const layout: { locale: string; view: string; width: number; pageWidth: number }[] = []
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  for (const locale of ['en-US', 'zh-CN'] as const) {
+    await switchLanguage(page, locale)
+    for (const [en, zh, view] of views) {
+      const name = locale === 'zh-CN' ? zh : en
+      await nav.getByRole('link', { name, exact: true }).click()
+      await expect(page.getByRole('heading', { level: 1, name, exact: true })).toBeVisible()
+      const tables = {
+        planner: ['VLANs', 'VLAN 列表'], devices: ['Physical chassis', '物理设备'], ports: ['Physical ports', '物理端口'],
+      } as const
+      if (view in tables) {
+        const label = tables[view as keyof typeof tables][locale === 'zh-CN' ? 1 : 0]
+        await expect(page.getByRole('table', { name: label, exact: true })).toBeVisible()
+      }
+      for (const width of widths) {
+        await page.setViewportSize({ width, height: 900 })
+        const pageWidth = await page.evaluate(() => document.documentElement.scrollWidth)
+        expect(pageWidth, locale + ' ' + view + ' at ' + width).toBeLessThanOrEqual(width + 1)
+        layout.push({ locale, view, width, pageWidth })
+        if (width === 1440 || view === 'planner') {
+          await page.mouse.move(width - 1, 899)
+          await page.screenshot({ path: info.outputPath(locale + '-' + view + '-' + width + '.png'), fullPage: true })
+        }
+      }
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const language = page.locator('header').getByRole('combobox', { name: '语言', exact: true })
+  await language.focus()
+  await expect(language).toHaveCSS('outline-style', 'solid')
+  await page.keyboard.press('Home')
+  await page.keyboard.press('Enter')
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en-US')
+  await page.keyboard.press('End')
+  await page.keyboard.press('Enter')
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
+  await nav.getByRole('link', { name: '网络规划', exact: true }).click()
+  const saveButton = page.getByRole('button', { name: '保存修订版本', exact: true })
+  await expect(saveButton).toHaveCSS('transition-duration', '0s')
+  const contrast = await saveButton.evaluate((node) => {
+    const style = getComputedStyle(node)
+    const luminance = (color: string) => {
+      const rgb = color.match(/[\d.]+/g)!.slice(0, 3).map((part) => {
+        const value = Number(part) / 255
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+      })
+      return (rgb[0] ?? 0) * .2126 + (rgb[1] ?? 0) * .7152 + (rgb[2] ?? 0) * .0722
+    }
+    const colors = [luminance(style.color), luminance(style.backgroundColor)]
+    return (Math.max(...colors) + .05) / (Math.min(...colors) + .05)
+  })
+  expect(contrast).toBeGreaterThanOrEqual(4.5)
+
+  const edit = (name: string | RegExp) => page.getByRole('button', { name }).click()
+  const apply = () => edit('应用到草稿')
+  await edit('编辑VLAN 10')
+  await page.getByLabel('名称', { exact: true }).fill('Management confirmed')
+  await apply()
+  await edit('添加子网')
+  await page.getByLabel('VLAN', { exact: true }).selectOption('20')
+  await page.getByLabel('IPv4 CIDR', { exact: true }).fill('192.168.20.0/24')
+  await apply()
+
+  await page.getByRole('link', { name: 'DHCP', exact: true }).click()
+  await edit(/^编辑地址池/)
+  await page.getByLabel('租约时长（秒）', { exact: true }).fill('7200')
+  await apply()
+  await page.getByRole('link', { name: '互联', exact: true }).click()
+  await edit(/^编辑互联/)
+  await expect(page.getByLabel('互联 CIDR', { exact: true })).toHaveValue('10.0.0.0/30')
+  await apply()
+
+  await page.getByRole('link', { name: 'ISP 与 NAT', exact: true }).click()
+  await edit('编辑Track 192.0.2.1')
+  await page.getByLabel('探测间隔（秒）', { exact: true }).fill('8')
+  await apply()
+  await edit('编辑ISP Primary')
+  await page.getByLabel('名称', { exact: true }).fill('Primary planned')
+  await apply()
+  await page.getByRole('row', { name: /Primary planned.*192\.0\.2\.2/ })
+    .getByRole('button', { name: /^编辑SNAT 规则/ }).click()
+  await page.getByLabel('转换后的 IPv4 地址', { exact: true }).fill('203.0.113.10')
+  await apply()
+
+  await page.getByRole('link', { name: 'VPN 与路由', exact: true }).click()
+  await edit('编辑隧道 Audit VPN')
+  await page.getByLabel('隧道状态', { exact: true }).selectOption('up')
+  await apply()
+  await edit(/^编辑PBR 规则/)
+  await page.getByLabel('隧道断开时', { exact: true }).selectOption('route-table')
+  await apply()
+
+  await nav.getByRole('link', { name: '设备 / 拓扑', exact: true }).click()
+  await edit('编辑设备分配 Audit-Core')
+  await page.getByLabel('位置', { exact: true }).fill('A desk')
+  await apply()
+
+  await nav.getByRole('link', { name: '端口编辑器', exact: true }).click()
+  await edit('编辑Port-Channel 1')
+  const channel = page.getByRole('dialog')
+  const lacp = channel.getByLabel('LACP 模式操作', { exact: true })
+  await expect(lacp.locator('option')).toHaveText(['保留', '设置'])
+  await channel.getByLabel('LACP 模式', { exact: true }).selectOption('passive')
+  await edit('预览变更')
+  await expect(channel.getByRole('heading', { name: '变更前 / 变更后', exact: true })).toBeFocused()
+  await expect(channel.getByRole('row', { name: /LACP 模式 主动 被动 设置/ })).toBeVisible()
+  await apply()
+  await saveButton.click()
+  await expect(page.getByText('已保存修订版本 2。', { exact: true })).toBeVisible()
+
+  const latest = (await (await request.get(revisions(id))).json() as Summary[]).at(-1)!
+  const stored = await (await request.get(revisions(id) + '/' + latest.id)).json() as Revision
+  expect(stored.plan.vlans).toEqual(expect.arrayContaining([expect.objectContaining({ id: 10, name: 'Management confirmed' })]))
+  expect(stored.plan.subnets).toEqual(expect.arrayContaining([expect.objectContaining({ vlan: 20, network: '192.168.20.0/24' })]))
+  expect((stored.plan.dhcp_pools as RecordValue[])[0]!.lease_seconds).toBe(7200)
+  expect(stored.plan.transit).toEqual(original.plan.transit)
+  expect(stored.plan.tracks).toEqual(expect.arrayContaining([expect.objectContaining({ target: '192.0.2.1', interval_seconds: 8 })]))
+  const providers = stored.plan.isps as RecordValue[]
+  const primary = providers.find((isp) => isp.name === 'Primary planned')!
+  expect(stored.plan.snat).toEqual(expect.arrayContaining([expect.objectContaining({ isp_id: primary.id, translated_ip: '203.0.113.10' })]))
+  expect((stored.plan.ipsec_tunnels as RecordValue[])[0]!.state).toBe('up')
+  expect((stored.plan.policy_routes as RecordValue[])[0]!.on_tunnel_down).toBe('route-table')
+  expect(stored.plan.assignments).toEqual(expect.arrayContaining([expect.objectContaining({ hostname: 'Audit-Core', location: 'A desk' })]))
+  expect((stored.plan.port_channels as RecordValue[])[0]!.lacp).toBe('passive')
+  expect(stored.validation_status).toBe('VALID_WITH_WARNINGS')
+
+  await edit('修订历史')
+  await page.screenshot({ path: info.outputPath('zh-CN-revision-history.png') })
+  await page.getByRole('button', { name: '关闭修订历史', exact: true }).click()
+  await nav.getByRole('link', { name: '赛事', exact: true }).click()
+  await page.getByLabel('赛事名称', { exact: true }).fill('Synthetic Chinese UI event')
+  await edit('创建赛事')
+  await expect(page.getByLabel('当前赛事').locator('option:checked')).toHaveText('Synthetic Chinese UI event')
+  await page.getByRole('link', { name: '仪表盘', exact: true }).click()
+  await expect(page.getByText('已禁用', { exact: true })).toBeVisible()
+  await writeFile(info.outputPath('bilingual-layout.json'), JSON.stringify({
+    layout, primaryButtonContrast: contrast, reducedMotion: true,
+  }, null, 2))
 })

@@ -1,3 +1,5 @@
+import { translate } from '../messages'
+import type { MessageKey } from '../messages'
 import { ApiError, json, request } from '../api'
 
 export type Value = null | boolean | number | string | Value[] | RecordValue
@@ -23,7 +25,7 @@ export function issuesFrom(error: unknown): Issue[] {
   return error.detail.map((issue: Partial<Issue> & { loc?: (string | number)[]; type?: string; msg?: string }) => ({
     path: issue.path ?? issue.loc?.filter((part) => part !== 'body').join('.') ?? '',
     code: issue.code ?? issue.type ?? 'invalid_plan',
-    message: issue.message ?? issue.msg ?? 'The plan could not be validated.',
+    message: issue.message ?? issue.msg ?? translate('en-US', 'thePlanCouldNotBeValidated'),
     severity: issue.severity ?? 'ERROR',
   }))
 }
@@ -51,11 +53,17 @@ export function fingerprint(value: Value | undefined): string {
     return Object.fromEntries(Object.entries(current).sort(([a], [b]) => a.localeCompare(b)))
   }) ?? ''
 }
+export class PlanImportError extends Error {
+  constructor(readonly key: MessageKey) { super(translate('en-US', key)) }
+}
+
 export function parsePlan(text: string, eventId: string): Plan {
-  const input: unknown = JSON.parse(text)
-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Choose a plan JSON object.')
+  let input: unknown
+  try { input = JSON.parse(text) }
+  catch { throw new PlanImportError('invalidPlanJson') }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new PlanImportError('chooseAPlanJsonObject')
   const plan = input as Partial<Plan>
-  if (plan.schema_version !== 1) throw new Error('This workspace supports plan schema version 1.')
-  if (plan.event_id !== eventId) throw new Error('This plan belongs to another event.')
+  if (plan.schema_version !== 1) throw new PlanImportError('unsupportedPlanSchema')
+  if (plan.event_id !== eventId) throw new PlanImportError('thisPlanBelongsToAnotherEvent')
   return { management_vlan: 10, ...plan } as Plan
 }
