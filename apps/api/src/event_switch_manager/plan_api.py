@@ -1,17 +1,21 @@
 from datetime import UTC
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from pydantic import Field, field_validator
 from sqlalchemy import select, text
 
 from .api import DatabaseSession, find_event
 from .cisco_capabilities import (
     CapabilityDecision,
+    DraftCapabilityPreview,
     Duplex,
     Speed,
     TargetNotFound,
+    preview_fingerprint,
     resolve_capability,
+    resolve_draft_capability,
 )
 from .cisco_catalog import CapabilityId
 from .models import Device, EventPlanRevision
@@ -23,11 +27,35 @@ from .planning.persistence import (
     revision_view,
     save_revision,
 )
-from .planning.plan import EventPlan, PlanRevision, PlanRevisionSummary
+from .planning.plan import (
+    EventPlan,
+    PlanRevision,
+    PlanRevisionSummary,
+    canonical_plan,
+    plan_hash,
+)
+from .planning.types import Record
 from .planning.validation import PlanIssue
 from .schemas import DeviceView
 
 router = APIRouter(prefix="/api/v1/events/{event_id}")
+
+
+class CapabilityPreviewRequest(Record):
+    plan: EventPlan
+    assignment_id: UUID
+    capabilities: Annotated[tuple[CapabilityId, ...], Field(min_length=1, max_length=32)]
+    interface_id: UUID | None = None
+    stack_member: Annotated[int | None, Field(ge=1)] = None
+    speed: Speed | None = None
+    duplex: Duplex | None = None
+
+    @field_validator("capabilities")
+    @classmethod
+    def distinct_capabilities(cls, value: tuple[CapabilityId, ...]) -> tuple[CapabilityId, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("Capability IDs must be distinct")
+        return value
 
 
 def plan_issues(session: DatabaseSession, event_id: UUID, plan: EventPlan) -> tuple[PlanIssue, ...]:
@@ -146,3 +174,49 @@ def read_cisco_capability(
         )
     except TargetNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+@router.post("/plan/capability-preview")
+def preview_plan_capabilities(
+    event_id: UUID, request: CapabilityPreviewRequest, session: DatabaseSession,
+) -> DraftCapabilityPreview:
+    """Read-only capability preview for the current, unsaved planner draft."""
+    find_event(session, event_id)
+    if request.plan.event_id != event_id:
+        raise HTTPException(status_code=422, detail=[PlanIssue(
+            path="event_id", code="event_mismatch",
+            message="Plan event UUID must match the URL",
+        ).model_dump()])
+    issues = current_plan_issues(session, request.plan)
+    identity_issues = tuple(
+        issue for issue in issues if issue.code in {"assignment_event", "physical_identity"}
+    )
+    if identity_issues:
+        raise HTTPException(
+            status_code=422, detail=[issue.model_dump() for issue in identity_issues],
+        )
+    errors = any(issue.severity == "ERROR" for issue in issues)
+    warnings = any(issue.severity == "WARNING" for issue in issues)
+    status: Literal["VALID", "VALID_WITH_WARNINGS", "INVALID"]
+    status = "INVALID" if errors else "VALID_WITH_WARNINGS" if warnings else "VALID"
+    content_hash = plan_hash(canonical_plan(request.plan))
+    try:
+        decisions = tuple(
+            resolve_draft_capability(
+                request.plan, status, request.assignment_id, capability,
+                interface_id=request.interface_id, stack_member=request.stack_member,
+                speed=request.speed, duplex=request.duplex,
+            )
+            for capability in request.capabilities
+        )
+    except TargetNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    return DraftCapabilityPreview(
+        draft_fingerprint=content_hash,
+        input_fingerprint=preview_fingerprint(
+            content_hash, request.assignment_id, request.capabilities,
+            interface_id=request.interface_id, stack_member=request.stack_member,
+            speed=request.speed, duplex=request.duplex,
+        ),
+        decisions=decisions,
+    )

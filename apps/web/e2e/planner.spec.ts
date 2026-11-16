@@ -660,8 +660,8 @@ test('edits all port settings and persists Keep, Reset, Set and empty descriptio
   const close = modal.getByRole('button', { name: 'Close Edit port', exact: true })
   await expect(close).toBeFocused()
   await page.keyboard.press('Tab')
-  await expect(modal.locator('summary')).toBeFocused()
-  await expect(modal.locator('summary')).toHaveCSS('outline-style', 'solid')
+  await expect(modal.locator('summary').first()).toBeFocused()
+  await expect(modal.locator('summary').first()).toHaveCSS('outline-style', 'solid')
   await page.emulateMedia({ reducedMotion: 'reduce' })
   const preview = modal.getByRole('button', { name: 'Preview changes', exact: true })
   await expect(preview).toHaveCSS('transition-duration', '0s')
@@ -675,7 +675,7 @@ test('edits all port settings and persists Keep, Reset, Set and empty descriptio
     return (Math.max(...levels) + .05) / (Math.min(...levels) + .05)
   })
   expect(contrast).toBeGreaterThanOrEqual(4.5)
-  await expect(modal.getByText('NOT VERIFIED', { exact: true })).toBeVisible()
+  await expect(modal.locator('.status-strip').getByText('NOT VERIFIED', { exact: true })).toBeVisible()
   await setting('Description').fill('Players patch panel 7')
   await setting('Administrative state').selectOption('up')
   await setting('Speed (Mbps)').selectOption('1000')
@@ -1097,7 +1097,11 @@ test('keeps a pending port edit, draft and revision identity across locale chang
   await openWorkspace(page, id, 'ports')
   const writes: unknown[] = []
   page.on('request', (entry) => {
-    if (entry.method() === 'POST' && new URL(entry.url()).pathname.startsWith(api)) writes.push(entry.postDataJSON())
+    const path = new URL(entry.url()).pathname
+    // Capability preview is a read-only POST: it never creates or updates a revision.
+    if (entry.method() === 'POST' && path.startsWith(api) && !path.endsWith('/plan/capability-preview')) {
+      writes.push(entry.postDataJSON())
+    }
   })
   await switchLanguage(page, 'zh-CN')
   await expect(page.getByRole('heading', { name: '端口编辑器' })).toBeVisible()

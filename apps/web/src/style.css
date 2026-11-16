@@ -247,3 +247,77 @@ dialog:has(.port-editor) { width: min(68rem, calc(100% - 1rem)); }
 @media (max-width: 38rem) {
   .port-list [data-port-name] { position: sticky; inset-inline-start: 0; z-index: 1; background: var(--card); }
 }
+
+/* WEB-02B capability evidence */
+.capability-panel, .capability-review {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: .65rem .75rem; background: var(--muted); min-width: 0;
+}
+.capability-panel { max-height: min(28rem, 55dvh); overflow: auto; overscroll-behavior: contain; }
+.capability-panel-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: .6rem; flex-wrap: wrap;
+}
+.capability-panel-head h3 { margin: 0; }
+.capability-panel-head p { margin: .2rem 0 0; }
+.capability-summary {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .55rem;
+  margin-block: .55rem;
+}
+.capability-target { border-top: 1px solid var(--border); padding-top: .55rem; margin-top: .55rem; }
+.capability-target-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: .5rem; flex-wrap: wrap;
+}
+.capability-target-head h4 { margin: 0; font-size: var(--size-body); overflow-wrap: anywhere; }
+.capability-target-meta { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.capability-target-meta code { color: var(--muted-foreground); }
+.capability-stale-note, .capability-error {
+  background: var(--warning-surface); color: var(--warning);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: .35rem .5rem; margin-block: .4rem; font-size: var(--size-small);
+}
+.capability-error p { margin: 0 0 .25rem; }
+.capability-groups {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: .5rem; margin-top: .5rem;
+}
+.capability-group {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: .4rem .5rem; background: var(--card); min-width: 0;
+}
+.capability-group h5 { margin: 0 0 .35rem; font-size: var(--size-small); color: var(--muted-foreground); }
+.capability-list { margin: 0; display: grid; gap: .45rem; }
+.capability-item { display: grid; gap: .1rem; min-width: 0; }
+.capability-item dt { font-weight: 650; font-size: var(--size-small); }
+.capability-item dd { margin: 0; min-width: 0; }
+.capability-verdict { margin: 0; }
+.capability-reason { margin: .15rem 0; font-size: var(--size-small); overflow-wrap: anywhere; }
+.capability-evidence { margin-top: .2rem; font-size: var(--size-small); }
+.capability-evidence summary { font-weight: 600; }
+.capability-evidence ul { margin: .25rem 0 0; padding-inline-start: 1rem; }
+.capability-evidence li { margin-bottom: .3rem; overflow-wrap: anywhere; }
+.capability-chip {
+  display: inline-block; margin-inline-start: .3rem; padding: .05rem .3rem;
+  border-radius: var(--radius); background: var(--selected);
+  color: var(--muted-foreground); font-size: var(--size-small);
+}
+.capability-scope {
+  display: flex; flex-wrap: wrap; gap: .3rem .8rem; margin: .45rem 0 0;
+  font-size: var(--size-small); color: var(--muted-foreground);
+}
+.capability-blockers {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .5rem;
+  margin-top: .45rem; font-size: var(--size-small);
+}
+.capability-blocked-note { margin: .5rem 0 0; color: var(--muted-foreground); font-size: var(--size-small); }
+.capability-review { margin-top: .75rem; }
+.capability-review .table-region { max-height: 22rem; overflow: auto; }
+.capability-review table { min-width: 42rem; }
+.capability-review table td, .capability-review table th { white-space: normal; overflow-wrap: anywhere; }
+.capability-review tr[data-capability-verdict="unsupported"] td { background: var(--danger-surface); }
+.capability-review tr[data-capability-verdict="unknown"] td { background: var(--warning-surface); }
+@media (max-width: 38rem) {
+  .capability-panel, .capability-review { padding: .55rem; }
+  .capability-groups { grid-template-columns: minmax(0, 1fr); }
+}
