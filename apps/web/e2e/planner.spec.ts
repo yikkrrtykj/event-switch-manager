@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { expect, test } from '@playwright/test'
 import type { APIRequestContext, Page } from '@playwright/test'
 import type { Plan, RecordValue, Revision, Summary } from '../src/planner/model'
@@ -1398,7 +1398,7 @@ test('checks bilingual screens at workstation widths and saves a network through
   await expect(page.getByLabel('当前赛事').locator('option:checked')).toHaveText('Synthetic Chinese UI event')
   await page.getByRole('link', { name: '仪表盘', exact: true }).click()
   await expect(page.getByText('已禁用', { exact: true })).toBeVisible()
-  await info.attach('bilingual-layout', {
-    contentType: 'application/json', body: JSON.stringify({ layout, primaryButtonContrast: contrast, reducedMotion: true }, null, 2),
-  })
+  await writeFile(info.outputPath('bilingual-layout.json'), JSON.stringify({
+    layout, primaryButtonContrast: contrast, reducedMotion: true,
+  }, null, 2))
 })

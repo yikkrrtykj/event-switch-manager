@@ -197,7 +197,9 @@ function PlanSummary({ event }: { event: EventRecord }) {
             <div><dt>{t('planningStatus')}</dt><dd><Validity status={entry.validation_status} /></dd></div>
             <div><dt>{t('validation')}</dt><dd>{validationCounts(t, entry.validation_errors.length, entry.warnings.length)}</dd></div>
             <div><dt>{t('plannedAssignments')}</dt><dd>{records(entry.plan, 'assignments').length}</dd></div>
-            <div><dt>{t('unverified')}</dt><dd>{t('unverifiedCounts', { chassis: pending, ports: portsPending })}</dd></div>
+            <div><dt>{t('unverified')}</dt><dd>{t('unverifiedCounts', {
+              chassis: t('chassisCount', { count: pending }), ports: t('portCount', { count: portsPending }),
+            })}</dd></div>
           </dl>}
   </section>
 }
