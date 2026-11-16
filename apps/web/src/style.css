@@ -55,7 +55,7 @@
 body { margin: 0; min-width: 0; }
 .masthead { color: var(--nav-foreground); background: var(--nav); }
 .shell { width: min(100% - 2.5rem, 92rem); margin-inline: auto; min-width: 0; }
-.masthead-inner { min-height: 4rem; display: flex; align-items: center; gap: 1rem 1.4rem; }
+.masthead-inner { min-height: 4rem; display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1.3rem; }
 .brand { display: inline-flex; align-items: center; gap: .55rem; font-weight: 700; color: inherit; white-space: nowrap; }
 .brand-mark { border: 2px solid currentColor; width: .75rem; height: .75rem; border-radius: 2px; }
 .local-label { margin-left: auto; font-size: var(--size-small); }
@@ -68,6 +68,9 @@ body { margin: 0; min-width: 0; }
 }
 .primary-nav a:hover, .primary-nav a[aria-current] { background: var(--nav-selected); }
 .primary-nav a[aria-current] { font-weight: 700; }
+.locale-choice { display: inline-flex; align-items: center; gap: var(--space); font-size: var(--size-small); }
+.locale-choice select { color: var(--foreground); }
+.dialog-locale { display: flex; justify-content: flex-end; margin-top: .75rem; }
 .masthead :focus-visible { outline-color: var(--nav-ring); }
 .event-context {
   margin-left: auto; display: flex; align-items: center; gap: var(--space);
@@ -203,7 +206,7 @@ dialog .section-head { margin-bottom: .75rem; }
 .skeleton:last-child { width: 68%; }
 @media (max-width: 64rem) {
   .masthead-inner { flex-wrap: wrap; padding-block: .55rem; gap: .35rem 1rem; }
-  .event-context { flex-basis: 100%; margin-left: 0; }
+  .event-context { flex-basis: min(100%, 16rem); margin-left: 0; }
 }
 @media (max-width: 38rem) {
   :root { --control: 2.95rem; }

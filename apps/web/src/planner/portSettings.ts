@@ -1,3 +1,4 @@
+import type { Translator } from '../messages'
 import { display, get, set, withModelDefault } from './catalog'
 import type { Field } from './catalog'
 import { fingerprint, object, records } from './model'
@@ -7,7 +8,7 @@ export const modeKey = 'settings.mode'
 export type Operation = { kind: 'reset' } | { kind: 'set'; value: Value }
 export type Operations = Record<string, Operation>
 export type PortTarget = { index: number; item: RecordValue }
-export type PortChange = { field: Field; before: Value | undefined; after: Value | undefined; operation: string }
+export type PortChange = { field: Field; before: Value | undefined; after: Value | undefined; operation: 'keep' | 'reset' | 'set' | 'clearList' | 'clearOnModeChange' }
 
 export function isPortSetting(field: Field) {
   return field.key.startsWith('settings.') || field.key === 'lacp'
@@ -47,12 +48,12 @@ export function commonPortValue(field: Field, targets: PortTarget[]) {
   return { value: mixed ? undefined : first, mixed }
 }
 
-export function describePortValue(plan: Plan, field: Field, value: Value | undefined) {
+export function describePortValue(t: Translator, plan: Plan, field: Field, value: Value | undefined) {
   value = withModelDefault(field, value)
-  if (value === '' && field.preserveEmpty) return 'Empty description'
-  if (value == null) return canResetPortField(field, false) ? 'Platform default' : '—'
-  if (Array.isArray(value) && value.length === 0) return 'None'
-  return display(plan, field, value)
+  if (value === '' && field.preserveEmpty) return t('emptyDescription')
+  if (value == null) return canResetPortField(field, false) ? t('platformDefault') : '—'
+  if (Array.isArray(value) && value.length === 0) return t('none')
+  return display(t, plan, field, value)
 }
 
 function reset(record: RecordValue, field: Field): RecordValue {
@@ -76,34 +77,34 @@ export function editPort(item: RecordValue, base: RecordValue, fields: Field[], 
   for (const field of fields) {
     const before = get(item, field.key)
     const operation = permit(field) ? operations[field.key] : undefined
-    let label = 'Keep'
+    let label: PortChange['operation'] = 'keep'
     if (operation?.kind === 'reset' && canResetPortField(field, !portFieldApplies(field, mode))) {
       if (hasPortValue(before)) next = reset(next, field)
-      label = field.type === 'refs' ? 'Clear list' : 'Reset'
+      label = field.type === 'refs' ? 'clearList' : 'reset'
     } else if (operation?.kind === 'set') {
       next = set(next, field.key, operation.value)
-      label = 'Set'
+      label = 'set'
     } else if (isPortSetting(field) && modeChanges && hasPortValue(before) &&
       needsModeClear(field, mode, before)) {
       next = reset(next, field)
-      label = 'Clear on mode change'
+      label = 'clearOnModeChange'
     }
     const after = get(next, field.key)
-    if (!isPortSetting(field) && fingerprint(before) !== fingerprint(after)) label = 'Set'
+    if (!isPortSetting(field) && fingerprint(before) !== fingerprint(after)) label = 'set'
     changes.push({ field, before, after, operation: label })
   }
   return { next, changes }
 }
 
-const assignmentField: Field = { key: 'assignment_id', label: 'Device', reference: 'assignments' }
-export const memberLabel = (item: RecordValue) => item.stack_member ? 'Stack member ' + String(item.stack_member) : 'Standalone'
+const assignmentField: Field = { key: 'assignment_id', label: 'device', reference: 'assignments' }
+export const memberLabel = (t: Translator, item: RecordValue) => item.stack_member ? t('stackMemberNumber', { number: String(item.stack_member) }) : t('standalone')
 
-export function physicalPortLabel(plan: Plan, item: RecordValue) {
-  return { device: display(plan, assignmentField, item.assignment_id), member: memberLabel(item), name: String(item.name ?? 'New port') }
+export function physicalPortLabel(t: Translator, plan: Plan, item: RecordValue) {
+  return { device: display(t, plan, assignmentField, item.assignment_id), member: memberLabel(t, item), name: String(item.name ?? t('newPort')) }
 }
 
-export function aggregatePortLabel(plan: Plan, item: RecordValue) {
+export function aggregatePortLabel(t: Translator, plan: Plan, item: RecordValue) {
   const logical = records(plan, 'logical_interfaces').find((entry) => entry.id === item.interface_id)
-  return { device: display(plan, assignmentField, logical?.assignment_id), member: 'Aggregate',
-    name: String(logical?.name ?? (item.number ? 'Port-Channel ' + String(item.number) : 'New Port-Channel')) }
+  return { device: display(t, plan, assignmentField, logical?.assignment_id), member: t('aggregate'),
+    name: String(logical?.name ?? (item.number ? t('portChannelNumber', { number: String(item.number) }) : t('newPortChannel'))) }
 }

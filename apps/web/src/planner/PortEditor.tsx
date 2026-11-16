@@ -1,3 +1,6 @@
+import { enumLabel } from '../messages'
+import { describeIssue } from './diagnostics'
+import { useMessages } from '../locale'
 import { useEffect, useRef, useState } from 'react'
 import { Badge, Button, Dialog, Select, Table } from '../components/ui'
 import { get, set } from './catalog'
@@ -14,6 +17,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
   aggregate?: boolean; batch?: boolean; creating?: boolean
   commit: (items: RecordValue[]) => void; close: () => void; onFormDirty: (dirty: boolean) => void
 }) {
+  const { t, locale } = useMessages()
   const original = targets[0]?.item ?? {}
   const [record, setRecord] = useState(original)
   const [operations, setOperations] = useState<Operations>({})
@@ -33,11 +37,11 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
     (canResetHidden(field) && operations[field.key]?.kind === 'reset')
   const proposed = targets.map(({ item, index }) => {
     const edit = editPort(item, batch ? item : record, fields, operations, canApply)
-    const target = label(plan, batch ? item : edit.next)
+    const target = label(t, plan, batch ? item : edit.next)
     return { index, ...target, ...edit, changed: fingerprint(edit.next) !== fingerprint(item) }
   })
   const changed = creating || proposed.some((item) => item.changed)
-  const hasCleanup = proposed.some(({ changes }) => changes.some((change) => change.operation === 'Clear on mode change'))
+  const hasCleanup = proposed.some(({ changes }) => changes.some((change) => change.operation === 'clearOnModeChange'))
   const currentValues = new Map(controls.map((field) => [field.key, commonPortValue(field, targets)]))
 
   useEffect(() => { onFormDirty(dirty) }, [dirty, onFormDirty])
@@ -45,7 +49,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
   useEffect(() => { if (review) reviewHeading.current?.focus() }, [review])
 
   function cancel() {
-    if (!dirty || window.confirm('Discard edits to this form?')) close()
+    if (!dirty || window.confirm(t('discardEditsToThisForm'))) close()
   }
 
   return <Dialog title={title} onClose={cancel}>
@@ -55,42 +59,42 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
       else { setShowKept(false); setReview(true) }
     }}>
       {review ? <>
-        <div className="section-head"><h3 tabIndex={-1} ref={reviewHeading}>Before / After</h3>
+        <div className="section-head"><h3 tabIndex={-1} ref={reviewHeading}>{t('beforeAfter')}</h3>
           <label className="port-keep"><input type="checkbox" checked={showKept}
-            onChange={(event) => setShowKept(event.target.checked)} /> Show kept fields</label></div>
+            onChange={(event) => setShowKept(event.target.checked)} /> {t('showKeptFields')}</label></div>
         {hasCleanup && <p className="feedback port-mode-warning" role="status">
-          Mode change will clear incompatible settings. Review each value before confirming.
+          {t('modeCleanupWarning')}
         </p>}
-        {!changed && <p className="muted">No values will change.</p>}
-        <Table label="Port changes"><thead><tr>
-          <th scope="col">Device</th><th scope="col">Stack member</th><th scope="col">Interface</th>
-          <th scope="col">Field</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">Operation</th>
+        {!changed && <p className="muted">{t('noValuesWillChange')}</p>}
+        <Table label={t('portChanges')}><thead><tr>
+          <th scope="col">{t('device')}</th><th scope="col">{t('stackMember')}</th><th scope="col">{t('interface')}</th>
+          <th scope="col">{t('field')}</th><th scope="col">{t('before')}</th><th scope="col">{t('after')}</th><th scope="col">{t('operation')}</th>
         </tr></thead><tbody>{proposed.map(({ index, device, member, name, changes }) => {
-          const shown = changes.filter((change) => showKept || change.operation !== 'Keep')
+          const shown = changes.filter((change) => showKept || change.operation !== 'keep')
           return shown.length ? shown.map(({ field, before, after, operation }) => (
             <tr key={index + ':' + field.key}>
-              <td>{device}</td><td>{member}</td><td className="data-mono">{name}</td><th scope="row">{field.label}</th>
-              <td>{describePortValue(plan, field, before)}</td><td>{describePortValue(plan, field, after)}</td>
-              <td>{operation}{currentValues.get(field.key)?.mixed && <small className="muted"> · Mixed before edit</small>}</td>
+              <td>{device}</td><td>{member}</td><td className="data-mono">{name}</td><th scope="row">{t(field.label)}</th>
+              <td>{describePortValue(t, plan, field, before)}</td><td>{describePortValue(t, plan, field, after)}</td>
+              <td>{t(operation)}{currentValues.get(field.key)?.mixed && <small className="muted">{' · '}{t('mixedBeforeEdit')}</small>}</td>
             </tr>)) : <tr key={index}><td>{device}</td><td>{member}</td>
-              <td className="data-mono">{name}</td><td colSpan={4}>No changes</td></tr>
+              <td className="data-mono">{name}</td><td colSpan={4}>{t('noChanges')}</td></tr>
         })}</tbody></Table>
       </> : <>
-        {batch ? <Table label="Target ports"><thead><tr>
-          <th scope="col">Device</th><th scope="col">Stack member</th><th scope="col">Interface</th><th scope="col">Current mode</th>
+        {batch ? <Table label={t('targetPorts')}><thead><tr>
+          <th scope="col">{t('device')}</th><th scope="col">{t('stackMember')}</th><th scope="col">{t('interface')}</th><th scope="col">{t('currentMode')}</th>
         </tr></thead><tbody>{targets.map(({ item, index }) => {
-          const target = label(plan, item)
+          const target = label(t, plan, item)
           return <tr key={index}><td>{target.device}</td><td>{target.member}</td>
-            <td className="data-mono">{target.name}</td><td>{String(get(item, modeKey) ?? '—')}</td></tr>
+            <td className="data-mono">{target.name}</td><td>{enumLabel(t, String(get(item, modeKey) ?? '—'), modeKey)}</td></tr>
         })}</tbody></Table> : <>
-          {!creating && <p className="muted">{[label(plan, original).device, label(plan, original).member, label(plan, original).name].join(' · ')}</p>}
+          {!creating && <p className="muted">{[label(t, plan, original).device, label(t, plan, original).member, label(t, plan, original).name].join(' · ')}</p>}
           <details open={creating || Boolean(focus && identity.some((field) => focus.startsWith(path + '.' + field.key))) || undefined}>
-            <summary>{aggregate ? 'Aggregate interface and members' : 'Interface identity'}</summary>
+            <summary>{aggregate ? t('aggregateInterfaceAndMembers') : t('interfaceIdentity')}</summary>
             <Fields fields={identity} record={record} plan={plan} path={path} issues={issues} update={setRecord} />
           </details>
         </>}
-        <div className="status-strip"><Badge tone="warning">NOT VERIFIED</Badge>
-          <span className="muted">Hardware support for these settings requires interface-specific evidence.</span></div>
+        <div className="status-strip"><Badge tone="warning">{t('notVerified')}</Badge>
+          <span className="muted">{t('portHardwareEvidence')}</span></div>
         <div className="port-settings-grid">{controls.map((field) => {
           const available = isAvailable(field)
           if (!available && !canResetHidden(field)) return null
@@ -111,9 +115,9 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
           const after = operation?.kind ?? 'keep'
           const fieldIssues = issues.filter((issue) => issue.path === key)
           return <fieldset className="port-setting" key={field.key}>
-            <legend>{field.label}</legend>
+            <legend>{t(field.label)}</legend>
             <div className="port-setting-action">
-              <Select aria-label={field.label + ' operation'} value={after} onChange={(event) => {
+              <Select aria-label={t('fieldOperation', { field: t(field.label) })} value={after} onChange={(event) => {
                 const action = event.target.value
                 setOperations((previous) => {
                   const next = { ...previous }
@@ -126,15 +130,15 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
                   return next
                 })
               }}>
-                <option value="keep">Keep</option>
-                {canReset && <option value="reset">{field.type === 'refs' ? 'Clear list' : 'Reset'}</option>}
-                {available && <option value="set">Set</option>}
+                <option value="keep">{t('keep')}</option>
+                {canReset && <option value="reset">{field.type === 'refs' ? t('clearList') : t('reset')}</option>}
+                {available && <option value="set">{t('set')}</option>}
               </Select>
-              {mixed && <Badge>Mixed</Badge>}
-              {canReset && !mixed && current == null && after === 'keep' && <small className="muted">Platform default</small>}
+              {mixed && <Badge>{t('mixed')}</Badge>}
+              {canReset && !mixed && current == null && after === 'keep' && <small className="muted">{t('platformDefault')}</small>}
             </div>
             {operation?.kind === 'set' && incompatible &&
-              <small className="error-text">Choose a value allowed in the selected mode or keep the current setting.</small>}
+              <small className="error-text">{t('incompatiblePortValue')}</small>}
             {available && after !== 'reset' ?
               <Fields fields={[control]} plan={plan} record={set({}, field.key, current ?? null)} path={path}
                 issues={issues} update={(next) => {
@@ -142,19 +146,19 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
                   if (value !== undefined) setOperations((previous) => ({ ...previous, [field.key]: { kind: 'set', value } }))
                 }} /> :
               <div data-field={key} tabIndex={-1} className="muted">
-                {after === 'reset' ? field.type === 'refs' ? 'Will clear the list' : 'Will use platform default'
-                  : 'Unavailable in this mode. Clear the stored value to correct it.'}
-                {fieldIssues.map((issue, index) => <div key={index} className={issue.severity === 'ERROR' ? 'error-text' : 'muted'}>{issue.message}</div>)}
+                {after === 'reset' ? field.type === 'refs' ? t('willClearTheList') : t('willUsePlatformDefault')
+                  : t('unavailablePortSetting')}
+                {fieldIssues.map((issue, index) => <div key={index} className={issue.severity === 'ERROR' ? 'error-text' : 'muted'}>{describeIssue(issue, locale, t)}</div>)}
               </div>}
           </fieldset>
         })}</div>
       </>}
       <div className="actions">
-        <Button onClick={cancel}>Cancel</Button>
-        {review && <Button onClick={() => setReview(false)}>Back to edit</Button>}
-        {!review && <Button primary type="submit" disabled={!changed && batch}>Preview changes</Button>}
+        <Button onClick={cancel}>{t('cancel')}</Button>
+        {review && <Button onClick={() => setReview(false)}>{t('backToEdit')}</Button>}
+        {!review && <Button primary type="submit" disabled={!changed && batch}>{t('previewChanges')}</Button>}
         {review && <Button primary type="submit" disabled={!changed && batch}>
-          {hasCleanup ? 'Confirm and apply to draft' : batch ? 'Apply to ' + targets.length + ' ports' : 'Apply to draft'}
+          {hasCleanup ? t('confirmAndApplyToDraft') : batch ? t('applyPorts', { count: targets.length }) : t('applyToDraft')}
         </Button>}
       </div>
     </form>

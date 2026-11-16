@@ -3,13 +3,14 @@ import { getEvents } from './api'
 import type { EventRecord } from './api'
 import { Button, Loading, Select } from './components/ui'
 import { Dashboard } from './Dashboard'
-import { en } from './messages'
+import type { MessageKey } from './messages'
+import { LanguageSelect, useMessages } from './locale'
 import { sections } from './planner/catalog'
 import { Workspace } from './planner/Workspace'
 
 const destinations = [
-  ['dashboard', en.dashboard], ['events', en.events], ['planner/addressing', en.planner],
-  ['devices', en.devices], ['ports', en.ports],
+  ['dashboard', 'dashboard'], ['events', 'events'], ['planner/addressing', 'planner'],
+  ['devices', 'devices'], ['ports', 'ports'],
 ] as const
 const workspace = (route: string) => route.startsWith('planner/') || route === 'devices' || route === 'ports'
 function hashRoute() {
@@ -21,10 +22,11 @@ function hashRoute() {
 function href(route: string) { return route === 'dashboard' ? '#' : '#' + route }
 
 export function App() {
+  const { t } = useMessages()
   const [route, setRoute] = useState(hashRoute)
   const [events, setEvents] = useState<EventRecord[] | null>(null)
   const [selectedId, setSelectedId] = useState('')
-  const [error, setError] = useState('')
+  const [error, setError] = useState<MessageKey | ''>('')
   const [attempt, setAttempt] = useState(0)
   const dirty = useRef(false)
   const formDirty = useRef(false)
@@ -43,14 +45,14 @@ export function App() {
       if (!active) return
       setEvents(items)
       setSelectedId((id) => items.some((event) => event.id === id) ? id : items[0]?.id ?? '')
-    }, () => { if (active) setError('Unable to load events. Retry to reconnect to the local API.') })
+    }, () => { if (active) setError('loadEventsError') })
     return () => { active = false }
   }, [attempt])
   useEffect(() => {
     function back() {
       const next = hashRoute()
       if (next !== current.current && dirty.current && workspace(current.current) &&
-        (!workspace(next) || formDirty.current) && !window.confirm(en.discard)) {
+        (!workspace(next) || formDirty.current) && !window.confirm(t('discardPlan'))) {
         window.history.pushState(null, '', href(current.current))
         return
       }
@@ -67,11 +69,11 @@ export function App() {
       window.removeEventListener('hashchange', back)
       window.removeEventListener('beforeunload', leaving)
     }
-  }, [])
+  }, [t])
 
   function navigate(next: string) {
     if (route === next) return
-    if (dirty.current && inWorkspace && (!workspace(next) || formDirty.current) && !window.confirm(en.discard)) return
+    if (dirty.current && inWorkspace && (!workspace(next) || formDirty.current) && !window.confirm(t('discardPlan'))) return
     if (!workspace(next)) mark.current(false)
     current.current = next
     window.history.pushState(null, '', href(next))
@@ -83,7 +85,7 @@ export function App() {
   }
 
   function select(id: string) {
-    if (id === selectedId || (inWorkspace && dirty.current && !window.confirm(en.discard))) return
+    if (id === selectedId || (inWorkspace && dirty.current && !window.confirm(t('discardPlan')))) return
     mark.current(false)
     setSelectedId(id)
   }
@@ -95,30 +97,31 @@ export function App() {
       const main = document.getElementById('main')
       main?.setAttribute('tabindex', '-1')
       main?.focus()
-    }}>Skip to content</a>
+    }}>{t('skipToContent')}</a>
     <header className="masthead">
       <div className="shell masthead-inner">
-        <a className="brand" href="#" onClick={(event) => { event.preventDefault(); navigate('dashboard') }}><span className="brand-mark" aria-hidden="true" />{en.brand}</a>
-        <nav className="primary-nav" aria-label="Workspace">
+        <a className="brand" href="#" onClick={(event) => { event.preventDefault(); navigate('dashboard') }}><span className="brand-mark" aria-hidden="true" />{t('brand')}</a>
+        <nav className="primary-nav" aria-label={t('workspace')}>
           {destinations.map(([key, label]) => <a key={key} href={href(key)}
             aria-current={route === key || key.startsWith('planner/') && route.startsWith('planner/') ? 'page' : undefined}
-            onClick={(event) => { event.preventDefault(); navigate(key) }}>{label}</a>)}
+            onClick={(event) => { event.preventDefault(); navigate(key) }}>{t(label)}</a>)}
         </nav>
         {inWorkspace && events && events.length > 0 ? <div className="event-context">
-          <label htmlFor="workspace-event">Event</label>
+          <label htmlFor="workspace-event">{t('event')}</label>
           <Select id="workspace-event" value={selectedId} onChange={(event) => select(event.target.value)}>
             {events.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
           </Select>
-        </div> : <span className="local-label">Local workspace</span>}
+        </div> : <span className="local-label">{t('localWorkspace')}</span>}
+        <LanguageSelect />
       </div>
     </header>
     {inWorkspace ? selected
       ? <Workspace key={selected.id} event={selected} section={section} onDirty={mark.current} navigate={navigate} />
-      : <main id="main" className="shell screen"><h1>{route === 'ports' ? en.ports : route === 'devices' ? en.devices : en.planner}</h1>
+      : <main id="main" className="shell screen"><h1>{route === 'ports' ? t('ports') : route === 'devices' ? t('devices') : t('planner')}</h1>
         <div className="panel">{error
-          ? <><p role="alert">{error}</p><Button onClick={retryEvents}>Retry events</Button></>
-          : events ? <><p className="empty">{en.select}</p><Button primary onClick={() => navigate('events')}>Go to Events</Button></>
-            : <Loading>Loading events…</Loading>}</div></main>
+          ? <><p role="alert">{t(error)}</p><Button onClick={retryEvents}>{t('retryEvents')}</Button></>
+          : events ? <><p className="empty">{t('selectEventPrompt')}</p><Button primary onClick={() => navigate('events')}>{t('goToEvents')}</Button></>
+            : <Loading>{t('loadingEvents')}</Loading>}</div></main>
       : <Dashboard events={events} setEvents={setEvents} eventError={error} selectedId={selectedId} setSelectedId={select}
         eventsOnly={route === 'events'} retryEvents={retryEvents} navigate={navigate} />}
   </>

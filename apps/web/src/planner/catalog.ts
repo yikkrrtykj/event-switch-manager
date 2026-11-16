@@ -1,9 +1,11 @@
+import { enumLabel } from '../messages'
+import type { MessageKey, Translator } from '../messages'
 import { object, records } from './model'
 import type { Plan, RecordValue, Value } from './model'
 
 export type Field = {
   key: string
-  label: string
+  label: MessageKey
   type?: 'number' | 'choice' | 'ref' | 'refs' | 'json' | 'records'
   optional?: boolean
   choices?: (string | number)[]
@@ -16,134 +18,134 @@ export type Field = {
   children?: Field[]
   accepts?: (candidate: RecordValue, record: RecordValue, plan: Plan) => boolean
 }
-export type Group = { key: string; title: string; singular: string; fields: Field[]; columns: string[]; id: boolean; single?: boolean }
-const field = (key: string, label: string, optional = false): Field => ({ key, label, optional })
-const number = (key: string, label: string, initial?: number, optional = false): Field =>
+export type Group = { key: string; title: MessageKey; singular: MessageKey; fields: Field[]; columns: string[]; id: boolean; single?: boolean }
+const field = (key: string, label: MessageKey, optional = false): Field => ({ key, label, optional })
+const number = (key: string, label: MessageKey, initial?: number, optional = false): Field =>
   ({ key, label, initial, optional, type: 'number' })
-const choice = (key: string, label: string, choices: string[]): Field =>
+const choice = (key: string, label: MessageKey, choices: string[]): Field =>
   ({ key, label, choices, initial: choices[0], optional: choices.includes(''), type: 'choice' })
-const ref = (key: string, label: string, reference: string, optional = false): Field =>
+const ref = (key: string, label: MessageKey, reference: string, optional = false): Field =>
   ({ key, label, reference, optional, type: 'ref' })
-const refs = (key: string, label: string, reference: string): Field => ({ key, label, reference, type: 'refs', initial: [] })
-const children = (key: string, label: string, fields: Field[]): Field =>
+const refs = (key: string, label: MessageKey, reference: string): Field => ({ key, label, reference, type: 'refs', initial: [] })
+const children = (key: string, label: MessageKey, fields: Field[]): Field =>
   ({ key, label, type: 'records', initial: [], children: fields })
-const raw = (key: string, label: string, initial: Value): Field => ({ key, label, initial, optional: true, type: 'json' })
+const raw = (key: string, label: MessageKey, initial: Value): Field => ({ key, label, initial, optional: true, type: 'json' })
 const when = (item: Field, key: string, value: string): Field => ({ ...item, when: [key, value] })
 const kind = (value: string) => (candidate: RecordValue) => candidate.kind === value
 const owner = (key: string) => (candidate: RecordValue, record: RecordValue) =>
   !record[key] || candidate.assignment_id === record[key]
 const accepts = (field: Field, predicate: NonNullable<Field['accepts']>): Field =>
   ({ ...field, accepts: predicate })
-const device = ref('assignment_id', 'Device assignment', 'assignments')
-const subnet = ref('subnet_id', 'Subnet', 'subnets')
-const svi = accepts(ref('svi_id', 'SVI', 'logical_interfaces'), (candidate, record, plan) => {
+const device = ref('assignment_id', 'deviceAssignment', 'assignments')
+const subnet = ref('subnet_id', 'subnet', 'subnets')
+const svi = accepts(ref('svi_id', 'svi', 'logical_interfaces'), (candidate, record, plan) => {
   const subnet = records(plan, 'subnets').find((item) => item.id === record.subnet_id)
   return candidate.kind === 'svi' && (!subnet || candidate.vlan === subnet.vlan)
 })
-const source = ref('source_vlan', 'Source VLAN', 'vlans')
-const target = field('destination', 'Destination CIDR')
-const track = ref('track_id', 'Track', 'tracks')
-const tunnel = accepts(ref('tunnel_id', 'Tunnel', 'ipsec_tunnels'), owner('assignment_id'))
-const isp = accepts(ref('isp_id', 'ISP', 'isps'), owner('assignment_id'))
-const pref = number('preference', 'Preference', 1)
-const priority = number('priority', 'Priority', 10)
+const source = ref('source_vlan', 'sourceVlan', 'vlans')
+const target = field('destination', 'destinationCidr')
+const track = ref('track_id', 'track', 'tracks')
+const tunnel = accepts(ref('tunnel_id', 'tunnel', 'ipsec_tunnels'), owner('assignment_id'))
+const isp = accepts(ref('isp_id', 'isp', 'isps'), owner('assignment_id'))
+const pref = number('preference', 'preference', 1)
+const priority = number('priority', 'priority', 10)
 const defaultLacp = 'active'
-const lacpMode = { ...choice('lacp', 'LACP mode', [defaultLacp, 'passive', 'static']), modelDefault: defaultLacp }
+const lacpMode = { ...choice('lacp', 'lacpMode', [defaultLacp, 'passive', 'static']), modelDefault: defaultLacp }
 const portModeFields = [
-  choice('settings.mode', 'Mode', ['access', 'trunk', 'routed']),
-  when(ref('settings.access_vlan', 'Access VLAN', 'vlans'), 'settings.mode', 'access'),
-  when(ref('settings.native_vlan', 'Native VLAN', 'vlans', true), 'settings.mode', 'trunk'),
-  when({ ...refs('settings.allowed_vlans', 'Allowed VLANs', 'vlans'), modelDefault: [] }, 'settings.mode', 'trunk'),
-  when(field('settings.address', 'IPv4 address / prefix', true), 'settings.mode', 'routed'),
+  choice('settings.mode', 'mode', ['access', 'trunk', 'routed']),
+  when(ref('settings.access_vlan', 'accessVlan', 'vlans'), 'settings.mode', 'access'),
+  when(ref('settings.native_vlan', 'nativeVlan', 'vlans', true), 'settings.mode', 'trunk'),
+  when({ ...refs('settings.allowed_vlans', 'allowedVlans', 'vlans'), modelDefault: [] }, 'settings.mode', 'trunk'),
+  when(field('settings.address', 'ipv4AddressPrefix', true), 'settings.mode', 'routed'),
 ]
 const layer2Fields = [
-  { ...choice('settings.portfast', 'PortFast', ['edge', 'edge-trunk', 'disabled']), initial: undefined },
-  { ...choice('settings.bpdu_guard', 'BPDU Guard', ['enabled', 'disabled']), initial: undefined },
+  { ...choice('settings.portfast', 'portfast', ['edge', 'edge-trunk', 'disabled']), initial: undefined },
+  { ...choice('settings.bpdu_guard', 'bpduGuard', ['enabled', 'disabled']), initial: undefined },
 ]
-const portDescription: Field = { ...field('settings.description', 'Description', true), preserveEmpty: true, maxLength: 240 }
-const adminState = { ...choice('settings.admin_state', 'Administrative state', ['up', 'down']), initial: undefined }
+const portDescription: Field = { ...field('settings.description', 'description', true), preserveEmpty: true, maxLength: 240 }
+const adminState = { ...choice('settings.admin_state', 'administrativeState', ['up', 'down']), initial: undefined }
 const physicalMedia: Field[] = [
-  { key: 'settings.speed', label: 'Speed (Mbps)', type: 'choice',
+  { key: 'settings.speed', label: 'speedMbps', type: 'choice',
     choices: ['auto', 10, 100, 1000, 2500, 5000, 10000, 25000, 40000, 50000, 100000, 200000, 400000, 800000] },
-  { ...choice('settings.duplex', 'Duplex', ['auto', 'full', 'half']), initial: undefined },
-  { ...choice('settings.poe_mode', 'PoE mode', ['auto', 'static', 'never']), initial: undefined },
+  { ...choice('settings.duplex', 'duplex', ['auto', 'full', 'half']), initial: undefined },
+  { ...choice('settings.poe_mode', 'poeMode', ['auto', 'static', 'never']), initial: undefined },
 ]
 const portFields = [portDescription, adminState, ...portModeFields, ...physicalMedia, ...layer2Fields]
 const channelFields = [portDescription, adminState, ...portModeFields, ...layer2Fields]
-const group = (key: string, title: string, singular: string, fields: Field[], columns: string[], id = false): Group =>
+const group = (key: string, title: MessageKey, singular: MessageKey, fields: Field[], columns: string[], id = false): Group =>
   ({ key, title, singular, fields, columns, id })
 
 export const catalog = [
-  group('vlans', 'VLANs', 'VLAN', [number('id', 'VLAN ID'), field('name', 'Name'),
-    choice('purpose', 'Purpose', ['ordinary', 'management', 'guest', 'sensitive', 'transit'])], ['id', 'name', 'purpose']),
-  group('subnets', 'Subnets', 'subnet', [ref('vlan', 'VLAN', 'vlans'), field('network', 'IPv4 CIDR')], ['network', 'vlan'], true),
-  group('gateways', 'Gateways', 'gateway', [subnet, field('address', 'IPv4 address'), svi], ['subnet_id', 'address', 'svi_id']),
-  group('logical_interfaces', 'Logical interfaces', 'logical interface', [device, field('name', 'Interface name'),
-    choice('kind', 'Type', ['svi', 'port-channel', 'loopback']),
-    when(ref('vlan', 'VLAN', 'vlans'), 'kind', 'svi'),
-    field('address', 'IPv4 address / prefix', true)], ['name', 'assignment_id', 'kind', 'address'], true),
-  group('vlan_access_policies', 'VLAN policies', 'VLAN policy', [source, ref('destination_vlan', 'Destination VLAN', 'vlans'),
-    priority, choice('action', 'Action', ['deny', 'allow'])], ['source_vlan', 'destination_vlan', 'priority', 'action'], true),
-  { ...group('transit', 'Core / Hillstone transit', 'transit', [ref('core_assignment_id', 'Cisco Core', 'assignments'),
-    ref('hillstone_assignment_id', 'Hillstone firewall', 'assignments'),
-    accepts(ref('core_port_id', 'Core port', 'physical_interfaces'), owner('core_assignment_id')),
-    accepts(ref('hillstone_port_id', 'Firewall port', 'physical_interfaces'), owner('hillstone_assignment_id')),
-    accepts(ref('core_svi_id', 'Core SVI', 'logical_interfaces'), (candidate, record) =>
+  group('vlans', 'vlans', 'vlan', [number('id', 'vlanId'), field('name', 'name'),
+    choice('purpose', 'purpose', ['ordinary', 'management', 'guest', 'sensitive', 'transit'])], ['id', 'name', 'purpose']),
+  group('subnets', 'subnets', 'recordSubnet', [ref('vlan', 'vlan', 'vlans'), field('network', 'ipv4Cidr')], ['network', 'vlan'], true),
+  group('gateways', 'gateways', 'gateway', [subnet, field('address', 'ipv4Address'), svi], ['subnet_id', 'address', 'svi_id']),
+  group('logical_interfaces', 'logicalInterfaces', 'logicalInterface', [device, field('name', 'interfaceName'),
+    choice('kind', 'type', ['svi', 'port-channel', 'loopback']),
+    when(ref('vlan', 'vlan', 'vlans'), 'kind', 'svi'),
+    field('address', 'ipv4AddressPrefix', true)], ['name', 'assignment_id', 'kind', 'address'], true),
+  group('vlan_access_policies', 'vlanPolicies', 'vlanPolicy', [source, ref('destination_vlan', 'destinationVlan', 'vlans'),
+    priority, choice('action', 'action', ['deny', 'allow'])], ['source_vlan', 'destination_vlan', 'priority', 'action'], true),
+  { ...group('transit', 'coreHillstoneTransit', 'transit', [ref('core_assignment_id', 'ciscoCore', 'assignments'),
+    ref('hillstone_assignment_id', 'hillstoneFirewall', 'assignments'),
+    accepts(ref('core_port_id', 'corePort', 'physical_interfaces'), owner('core_assignment_id')),
+    accepts(ref('hillstone_port_id', 'firewallPort', 'physical_interfaces'), owner('hillstone_assignment_id')),
+    accepts(ref('core_svi_id', 'coreSvi', 'logical_interfaces'), (candidate, record) =>
       candidate.kind === 'svi' && owner('core_assignment_id')(candidate, record)),
-    { ...ref('vlan', 'Transit VLAN', 'vlans'), initial: 9 }, field('network', 'Transit CIDR'), field('core_ip', 'Core IP'),
-    field('hillstone_ip', 'Hillstone IP')], ['vlan', 'network', 'core_ip', 'hillstone_ip']), single: true },
-  group('dhcp_pools', 'DHCP pools', 'pool', [subnet, field('start', 'Start address'), field('end', 'End address'),
-    number('lease_seconds', 'Lease seconds', 43200)], ['subnet_id', 'start', 'end', 'lease_seconds'], true),
-  group('dhcp_reservations', 'DHCP reservations', 'reservation', [subnet, field('address', 'IPv4 address'),
-    field('client_mac', 'Client MAC')], ['subnet_id', 'address', 'client_mac'], true),
-  group('dhcp_relays', 'DHCP relays', 'relay', [subnet, svi, raw('servers', 'Relay server addresses (JSON array)', [])], ['subnet_id', 'svi_id', 'servers']),
-  group('tracks', 'Tracks', 'Track', [field('target', 'Probe target'), number('interval_seconds', 'Interval seconds', 5),
-    number('failure_threshold', 'Failure threshold', 3), { ...tunnel, optional: true }], ['target', 'interval_seconds', 'tunnel_id'], true),
-  group('isps', 'ISP uplinks', 'ISP', [field('name', 'Name'), device, accepts(ref('interface_id', 'WAN interface', 'physical_interfaces'), (candidate, record) =>
+    { ...ref('vlan', 'transitVlan', 'vlans'), initial: 9 }, field('network', 'transitCidr'), field('core_ip', 'coreIp'),
+    field('hillstone_ip', 'hillstoneIp')], ['vlan', 'network', 'core_ip', 'hillstone_ip']), single: true },
+  group('dhcp_pools', 'dhcpPools', 'pool', [subnet, field('start', 'startAddress'), field('end', 'endAddress'),
+    number('lease_seconds', 'leaseSeconds', 43200)], ['subnet_id', 'start', 'end', 'lease_seconds'], true),
+  group('dhcp_reservations', 'dhcpReservations', 'reservation', [subnet, field('address', 'ipv4Address'),
+    field('client_mac', 'clientMac')], ['subnet_id', 'address', 'client_mac'], true),
+  group('dhcp_relays', 'dhcpRelays', 'relay', [subnet, svi, raw('servers', 'relayServerAddressesJsonArray', [])], ['subnet_id', 'svi_id', 'servers']),
+  group('tracks', 'tracks', 'track', [field('target', 'probeTarget'), number('interval_seconds', 'intervalSeconds', 5),
+    number('failure_threshold', 'failureThreshold', 3), { ...tunnel, optional: true }], ['target', 'interval_seconds', 'tunnel_id'], true),
+  group('isps', 'ispUplinks', 'isp', [field('name', 'name'), device, accepts(ref('interface_id', 'wanInterface', 'physical_interfaces'), (candidate, record) =>
     get(candidate, 'settings.mode') === 'routed' && owner('assignment_id')(candidate, record)),
-    field('address', 'IPv4 address / prefix'), field('gateway', 'Gateway'), { ...track, optional: true },
-    children('routed_public_blocks', 'Routed public blocks', [field('network', 'CIDR'), field('reason', 'Reason')])],
+    field('address', 'ipv4AddressPrefix'), field('gateway', 'recordGateway'), { ...track, optional: true },
+    children('routed_public_blocks', 'routedPublicBlocks', [field('network', 'cidr'), field('reason', 'reason')])],
     ['name', 'interface_id', 'address', 'gateway', 'track_id'], true),
-  group('source_routes', 'Source-based routes', 'SBR rule', [device, source, accepts(refs('isp_priority', 'ISP failover order', 'isps'), owner('assignment_id')),
-    children('no_nat', 'No-NAT exceptions', [isp, field('reason', 'Reason')])], ['source_vlan', 'isp_priority', 'no_nat'], true),
-  group('snat', 'Source NAT', 'SNAT rule', [device, source, isp, field('translated_ip', 'Translated IPv4 address')],
+  group('source_routes', 'sourceBasedRoutes', 'sbrRule', [device, source, accepts(refs('isp_priority', 'ispFailoverOrder', 'isps'), owner('assignment_id')),
+    children('no_nat', 'noNatExceptions', [isp, field('reason', 'reason')])], ['source_vlan', 'isp_priority', 'no_nat'], true),
+  group('snat', 'sourceNat', 'snatRule', [device, source, isp, field('translated_ip', 'translatedIpv4Address')],
     ['source_vlan', 'isp_id', 'translated_ip'], true),
-  group('ipsec_tunnels', 'IPsec tunnels', 'tunnel', [field('name', 'Name'), device, isp, field('peer', 'Peer IPv4 address'),
-    field('inside', 'Inside IPv4 / prefix'), field('remote_gateway', 'Remote gateway'), track,
-    choice('state', 'Tunnel state', ['unknown', 'up', 'down'])], ['name', 'isp_id', 'peer', 'inside', 'state'], true),
-  group('vpn_remote_prefixes', 'VPN remote prefixes', 'VPN prefix', [tunnel, field('network', 'Remote CIDR')], ['tunnel_id', 'network']),
-  group('static_routes', 'Static routes', 'static route', [device, target, pref,
-    choice('next_hop.kind', 'Next hop type', ['ip', 'tunnel', 'discard']),
-    when(field('next_hop.address', 'Next hop address'), 'next_hop.kind', 'ip'),
-    when({ ...tunnel, key: 'next_hop.tunnel_id', label: 'Next hop tunnel' }, 'next_hop.kind', 'tunnel'),
-    choice('activation.kind', 'Activation', ['', 'always', 'track']),
-    when({ ...track, key: 'activation.track_id', label: 'Route Track' }, 'activation.kind', 'track'),
-    when(choice('activation.state', 'Required Track state', ['up', 'down']), 'activation.kind', 'track')],
+  group('ipsec_tunnels', 'ipsecTunnels', 'recordTunnel', [field('name', 'name'), device, isp, field('peer', 'peerIpv4Address'),
+    field('inside', 'insideIpv4Prefix'), field('remote_gateway', 'remoteGateway'), track,
+    choice('state', 'tunnelState', ['unknown', 'up', 'down'])], ['name', 'isp_id', 'peer', 'inside', 'state'], true),
+  group('vpn_remote_prefixes', 'vpnRemotePrefixes', 'vpnPrefix', [tunnel, field('network', 'remoteCidr')], ['tunnel_id', 'network']),
+  group('static_routes', 'staticRoutes', 'staticRoute', [device, target, pref,
+    choice('next_hop.kind', 'nextHopType', ['ip', 'tunnel', 'discard']),
+    when(field('next_hop.address', 'nextHopAddress'), 'next_hop.kind', 'ip'),
+    when({ ...tunnel, key: 'next_hop.tunnel_id', label: 'nextHopTunnel' }, 'next_hop.kind', 'tunnel'),
+    choice('activation.kind', 'activation', ['', 'always', 'track']),
+    when({ ...track, key: 'activation.track_id', label: 'routeTrack' }, 'activation.kind', 'track'),
+    when(choice('activation.state', 'requiredTrackState', ['up', 'down']), 'activation.kind', 'track')],
     ['destination', 'assignment_id', 'next_hop.kind', 'preference', 'activation.kind'], true),
-  group('default_routes', 'Default routes', 'default route', [device, choice('next_hop.kind', 'Next hop type', ['ip']),
-    field('next_hop.address', 'Next hop address'), pref], ['assignment_id', 'next_hop.address', 'preference'], true),
-  group('policy_routes', 'Policy-based routes', 'PBR rule', [device, source, target, tunnel, priority,
-    choice('on_tunnel_down', 'When tunnel is down', ['discard', 'route-table', 'unknown', 'use-sbr'])],
+  group('default_routes', 'defaultRoutes', 'defaultRoute', [device, choice('next_hop.kind', 'nextHopType', ['ip']),
+    field('next_hop.address', 'nextHopAddress'), pref], ['assignment_id', 'next_hop.address', 'preference'], true),
+  group('policy_routes', 'policyBasedRoutes', 'pbrRule', [device, source, target, tunnel, priority,
+    choice('on_tunnel_down', 'whenTunnelIsDown', ['discard', 'route-table', 'unknown', 'use-sbr'])],
     ['source_vlan', 'destination', 'tunnel_id', 'on_tunnel_down'], true),
-  group('nat_exemptions', 'NAT exemptions', 'NAT exemption', [device, source, target, tunnel], ['source_vlan', 'destination', 'tunnel_id'], true),
-  group('physical_devices', 'Physical chassis', 'chassis', [choice('vendor', 'Vendor', ['cisco', 'hillstone', 'other']),
-    field('model', 'Model', true), field('verified_serial', 'Verified serial', true)], ['vendor', 'model', 'verified_serial'], true),
-  group('assignments', 'Event assignments', 'assignment', [field('hostname', 'Hostname'),
-    choice('role', 'Role', ['access', 'core', 'external-distribution']),
-    choice('family', 'Catalyst family', ['', 'catalyst-2960x', 'catalyst-3850', 'catalyst-9200', 'catalyst-9300', 'catalyst-c1000']),
-    ref('physical_device_id', 'Physical chassis', 'physical_devices', true), field('management_ip', 'Management IPv4 address', true),
-    field('location', 'Location', true), raw('software', 'Software profile (JSON)', null)],
+  group('nat_exemptions', 'natExemptions', 'natExemption', [device, source, target, tunnel], ['source_vlan', 'destination', 'tunnel_id'], true),
+  group('physical_devices', 'physicalChassis', 'chassis', [choice('vendor', 'vendor', ['cisco', 'hillstone', 'other']),
+    field('model', 'model', true), field('verified_serial', 'verifiedSerial', true)], ['vendor', 'model', 'verified_serial'], true),
+  group('assignments', 'eventAssignments', 'assignment', [field('hostname', 'hostname'),
+    choice('role', 'role', ['access', 'core', 'external-distribution']),
+    choice('family', 'catalystFamily', ['', 'catalyst-2960x', 'catalyst-3850', 'catalyst-9200', 'catalyst-9300', 'catalyst-c1000']),
+    ref('physical_device_id', 'physicalChassis', 'physical_devices', true), field('management_ip', 'managementIpv4Address', true),
+    field('location', 'location', true), raw('software', 'softwareProfileJson', null)],
     ['hostname', 'role', 'physical_device_id', 'management_ip', 'location'], true),
-  group('stacks', 'Stacks', 'Stack', [device, children('members', 'Stack members', [number('number', 'Member number'),
-    ref('physical_device_id', 'Physical chassis', 'physical_devices'), choice('state', 'State', ['unknown', 'ready', 'missing'])])],
+  group('stacks', 'stacks', 'stack', [device, children('members', 'stackMembers', [number('number', 'memberNumber'),
+    ref('physical_device_id', 'physicalChassis', 'physical_devices'), choice('state', 'state', ['unknown', 'ready', 'missing'])])],
     ['assignment_id', 'members']),
-  group('links', 'Topology links', 'link', [refs('endpoints', 'Link endpoints', 'physical_interfaces')], ['endpoints'], true),
-  group('physical_interfaces', 'Physical ports', 'port', [device, ref('physical_device_id', 'Physical chassis', 'physical_devices'),
-    field('name', 'Interface name'), number('stack_member', 'Stack member', undefined, true), ...portFields],
+  group('links', 'topologyLinks', 'link', [refs('endpoints', 'linkEndpoints', 'physical_interfaces')], ['endpoints'], true),
+  group('physical_interfaces', 'physicalPorts', 'port', [device, ref('physical_device_id', 'physicalChassis', 'physical_devices'),
+    field('name', 'interfaceName'), number('stack_member', 'stackMember', undefined, true), ...portFields],
     ['name', 'settings.mode', 'settings.access_vlan', 'settings.native_vlan',
       'settings.allowed_vlans', 'settings.address', 'capability_status'], true),
-  group('port_channels', 'Port-Channels', 'Port-Channel', [accepts(ref('interface_id', 'Port-Channel interface', 'logical_interfaces'), kind('port-channel')),
-    number('number', 'Channel number'), accepts(refs('member_ids', 'Member ports', 'physical_interfaces'),
+  group('port_channels', 'portChannels', 'portChannel', [accepts(ref('interface_id', 'portChannelInterface', 'logical_interfaces'), kind('port-channel')),
+    number('number', 'channelNumber'), accepts(refs('member_ids', 'memberPorts', 'physical_interfaces'),
       (candidate, record, plan) => {
         const aggregate = records(plan, 'logical_interfaces').find((item) => item.id === record.interface_id)
         return !aggregate || candidate.assignment_id === aggregate.assignment_id
@@ -151,14 +153,14 @@ export const catalog = [
     lacpMode, ...channelFields], ['number', 'interface_id', 'lacp', 'member_ids', 'settings.mode']),
 ]
 
-export const sections: Record<string, { label: string; keys: string[] }> = {
-  addressing: { label: 'VLAN & IP', keys: ['vlans', 'subnets', 'gateways', 'logical_interfaces', 'vlan_access_policies'] },
-  transit: { label: 'Transit', keys: ['transit', 'default_routes'] },
-  dhcp: { label: 'DHCP', keys: ['dhcp_pools', 'dhcp_reservations', 'dhcp_relays'] },
-  egress: { label: 'ISP & NAT', keys: ['tracks', 'isps', 'source_routes', 'snat'] },
-  vpn: { label: 'VPN & routing', keys: ['ipsec_tunnels', 'vpn_remote_prefixes', 'static_routes', 'policy_routes', 'nat_exemptions'] },
-  topology: { label: 'Devices / Topology', keys: ['physical_devices', 'assignments', 'stacks', 'links'] },
-  ports: { label: 'Port Editor', keys: ['physical_interfaces', 'port_channels'] },
+export const sections: Record<string, { label: MessageKey; keys: string[] }> = {
+  addressing: { label: 'vlanIp', keys: ['vlans', 'subnets', 'gateways', 'logical_interfaces', 'vlan_access_policies'] },
+  transit: { label: 'recordTransit', keys: ['transit', 'default_routes'] },
+  dhcp: { label: 'dhcp', keys: ['dhcp_pools', 'dhcp_reservations', 'dhcp_relays'] },
+  egress: { label: 'ispNat', keys: ['tracks', 'isps', 'source_routes', 'snat'] },
+  vpn: { label: 'vpnRouting', keys: ['ipsec_tunnels', 'vpn_remote_prefixes', 'static_routes', 'policy_routes', 'nat_exemptions'] },
+  topology: { label: 'devices', keys: ['physical_devices', 'assignments', 'stacks', 'links'] },
+  ports: { label: 'ports', keys: ['physical_interfaces', 'port_channels'] },
 }
 export const sectionRoute = (section: string) => section === 'topology' ? 'devices' :
   section === 'ports' ? 'ports' : 'planner/' + section
@@ -190,15 +192,16 @@ export function options(plan: Plan, key: string, include: (record: RecordValue) 
 export function withModelDefault(field: Field, value: Value | undefined) {
   return value === undefined ? field.modelDefault : value
 }
-export function display(plan: Plan, item: Field, value: Value | undefined): string {
+export function display(t: Translator, plan: Plan, item: Field, value: Value | undefined): string {
   value = withModelDefault(item, value)
-  if (item.key === 'capability_status' && value !== 'verified' || item.key === 'verified_serial' && !value) return 'UNVERIFIED'
+  if (item.key === 'capability_status' && value !== 'verified' || item.key === 'verified_serial' && !value) return t('unverifiedBadge')
   if (value == null || value === '') return '—'
   if (item.reference) {
     const choices = options(plan, item.reference)
     return (Array.isArray(value) ? value : [value]).map((id) => choices.find((choice) => choice.id === id)?.label ?? String(id)).join(' / ') || '—'
   }
   if (Array.isArray(value)) return value.length && typeof value[0] === 'object' ? String(value.length) : value.join(', ') || '—'
+  if ((item.choices || item.key === 'capability_status') && typeof value === 'string') return enumLabel(t, value, item.key)
   return String(value)
 }
 export function clean(input: RecordValue, previous?: RecordValue): RecordValue {
