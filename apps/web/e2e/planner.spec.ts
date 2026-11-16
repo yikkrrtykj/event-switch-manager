@@ -1402,3 +1402,68 @@ test('checks bilingual screens at workstation widths and saves a network through
     layout, primaryButtonContrast: contrast, reducedMotion: true,
   }, null, 2))
 })
+
+
+test('rejects linked channel conflicts and focuses both LACP fields in Chinese', async ({ page, request }) => {
+  const event = await createEvent(request, 'Synthetic linked Cisco channels')
+  const plan = auditPlan(event)
+  const chassis = randomUUID(), assignment = randomUUID(), channel = randomUUID()
+  const peerMembers = [randomUUID(), randomUUID()]
+  const local = (plan.port_channels as RecordValue[])[0]!
+  const trunk = local.settings as RecordValue
+  ;(plan.physical_devices as RecordValue[]).push({ id: chassis, vendor: 'cisco' })
+  ;(plan.assignments as RecordValue[]).push({
+    id: assignment, hostname: 'Audit-Access', role: 'access', physical_device_id: chassis,
+  })
+  ;(plan.logical_interfaces as RecordValue[]).push({
+    id: channel, assignment_id: assignment, name: 'Port-channel11', kind: 'port-channel',
+  })
+  const localMembers = local.member_ids as string[]
+  for (const [index, id] of peerMembers.entries()) {
+    portsOf(plan).push({ id, assignment_id: assignment, physical_device_id: chassis,
+      name: 'Gi1/0/' + (47 + index), settings: trunk })
+    ;(plan.links as RecordValue[]).push({ id: randomUUID(), endpoints: [localMembers[index]!, id] })
+  }
+  ;(plan.port_channels as RecordValue[]).push({
+    interface_id: channel, number: 11, member_ids: peerMembers, lacp: 'passive', settings: trunk,
+  })
+
+  await openWorkspace(page, event, 'ports')
+  expect(await (await request.get(revisions(event))).json()).toEqual([])
+  await importJson(page, JSON.stringify(plan))
+  const saved = await checkedSave(page, request, event, 1)
+  expect(saved.plan.port_channels).toEqual(expect.arrayContaining([
+    expect.objectContaining({ number: 1, lacp: 'active' }),
+    expect.objectContaining({ number: 11, lacp: 'passive' }),
+  ]))
+  expect(saved.plan.links).toHaveLength(3)
+  expect(saved.plan.dhcp_pools).toHaveLength(1)
+  expect(saved.plan.snat).toHaveLength(2)
+  expect(saved.plan.nat_exemptions).toHaveLength(1)
+
+  await page.getByRole('button', { name: 'Edit Port-Channel 1', exact: true }).click()
+  await page.getByRole('dialog').getByLabel('LACP mode', { exact: true }).selectOption('passive')
+  await previewPorts(page)
+  await page.getByRole('button', { name: 'Validate plan', exact: true }).click()
+  const en = page.getByRole('table', { name: 'Validation issues', exact: true })
+    .getByRole('row').filter({ hasText: 'port_channel_peer_lacp' })
+  await expect(en).toHaveCount(2)
+  await expect(page.getByRole('button', { name: 'Save revision', exact: true })).toBeDisabled()
+
+  await switchLanguage(page, 'zh-CN')
+  const localized = page.getByRole('table', { name: '校验问题', exact: true })
+    .getByRole('row').filter({ hasText: 'port_channel_peer_lacp' })
+  await expect(localized).toHaveCount(2)
+  for (const path of ['port_channels.0.lacp', 'port_channels.1.lacp']) {
+    const row = localized.filter({ hasText: path })
+    await expect(row).toContainText('相连的 Port-Channel 两端均为被动 LACP，双方都不会发起协商')
+    await row.getByRole('button', { name: /^定位/ }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByLabel('LACP 模式', { exact: true })).toBeFocused()
+    await expect(dialog.getByLabel('LACP 模式', { exact: true })).toHaveAttribute('aria-invalid', 'true')
+    await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  }
+  const unchanged = await (await request.get(revisions(event) + '/' + saved.id)).json()
+  expect(unchanged).toEqual(saved)
+  expect(await (await request.get(revisions(event))).json()).toHaveLength(1)
+})
