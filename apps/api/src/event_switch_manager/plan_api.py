@@ -1,10 +1,19 @@
 from datetime import UTC
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 from sqlalchemy import select, text
 
 from .api import DatabaseSession, find_event
+from .cisco_capabilities import (
+    CapabilityDecision,
+    Duplex,
+    Speed,
+    TargetNotFound,
+    resolve_capability,
+)
+from .cisco_catalog import CapabilityId
 from .models import Device, EventPlanRevision
 from .planning.inventory import EventDeviceAssignment
 from .planning.persistence import (
@@ -115,3 +124,25 @@ def export_revision(event_id: UUID, revision_id: UUID, session: DatabaseSession)
         revision.canonical_json, media_type="application/json",
         headers={"ETag": f'"{revision.content_hash}"'},
     )
+
+
+@router.get("/plan-revisions/{revision_id}/assignments/{assignment_id}/cisco-capability")
+def read_cisco_capability(
+    event_id: UUID,
+    revision_id: UUID,
+    assignment_id: UUID,
+    session: DatabaseSession,
+    capability: Annotated[CapabilityId, Query()],
+    interface_id: UUID | None = None,
+    stack_member: Annotated[int | None, Query(ge=1)] = None,
+    speed: Annotated[Speed | None, Query()] = None,
+    duplex: Annotated[Duplex | None, Query()] = None,
+) -> CapabilityDecision:
+    revision = revision_view(session, require_revision(event_id, revision_id, session))
+    try:
+        return resolve_capability(
+            revision, assignment_id, capability, interface_id=interface_id,
+            stack_member=stack_member, speed=speed, duplex=duplex,
+        )
+    except TargetNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
