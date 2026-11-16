@@ -12,7 +12,13 @@ import type { Issue, Plan, RecordValue, Value } from './model'
 type FieldsProps = { fields: Field[]; plan: Plan; record: RecordValue; path: string; issues: Issue[]; update: (record: RecordValue) => void }
 export function Fields({ fields, plan, record, path, issues, update }: FieldsProps) {
   const { t, locale } = useMessages()
-  return <div className="field-grid">{fields.map((field) => {
+  const grid = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    for (const input of grid.current?.querySelectorAll('textarea') ?? []) {
+      if (input.validity.customError) input.setCustomValidity(t('enterValidJson'))
+    }
+  }, [t])
+  return <div className="field-grid" ref={grid}>{fields.map((field) => {
     if (field.when && get(record, field.when[0]) !== field.when[1]) return null
     const key = path + '.' + field.key
     const value = get(record, field.key)

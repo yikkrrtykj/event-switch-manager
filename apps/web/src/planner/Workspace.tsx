@@ -272,9 +272,11 @@ export function Workspace({ event, section, navigate, onDirty }: {
       <summary>{t('validationResults')} <span>{validationCounts(t, errors, issues.length - errors)}</span></summary>
       {!issues.length ? <p className="muted">{status ? t('noValidationIssues') : t('validationPrompt')}</p>
         : <>
-          <label className="filter-label">{t('severity')} <Select value={filter} onChange={(event) => setFilter(event.target.value)}>
+          <div className="filter-label">
+            <label htmlFor="issue-severity">{t('severity')}</label>
+            <Select id="issue-severity" value={filter} onChange={(event) => setFilter(event.target.value)}>
             <option value="">{t('all')}</option><option value="ERROR">{t('severityError')}</option><option value="WARNING">{t('severityWarning')}</option>
-          </Select></label>
+          </Select></div>
           <Table label={t('validationIssues')}><thead><tr><th scope="col">{t('severity')}</th><th scope="col">{t('code')}</th>
             <th scope="col">{t('message')}</th><th scope="col">{t('jsonFieldPath')}</th><th scope="col">{t('location')}</th>
           </tr></thead><tbody>{filtered.map((issue, index) =>
