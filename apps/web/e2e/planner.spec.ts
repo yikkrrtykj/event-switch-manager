@@ -1235,7 +1235,7 @@ test('localizes diagnostics and field focus while preserving the English fallbac
   const poe = dialog.getByLabel('PoE 模式', { exact: true })
   await expect(poe).toBeFocused()
   await expect(poe).not.toHaveAttribute('aria-invalid', 'true')
-  await expect(dialog.getByText('请在实际接口及介质上验证此设置')).toBeVisible()
+  await expect(poe).toHaveAccessibleDescription('请在实际接口及介质上验证此设置')
   await dialog.getByRole('button', { name: '取消', exact: true }).click()
   await page.screenshot({ path: info.outputPath('zh-CN-warning-filter.png'), fullPage: true })
   expect(await (await request.get(revisions(id))).json()).toEqual([])
