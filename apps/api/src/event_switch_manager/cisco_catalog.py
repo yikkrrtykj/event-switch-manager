@@ -59,8 +59,6 @@ class Profile:
     family: DeviceFamily
     hardware: Source
     interfaces: str
-    train: str
-    version_pattern: str
     licenses: tuple[str, ...]
     ports: tuple[PortGroup, ...]
     stack_limit: int | None
@@ -70,8 +68,6 @@ class Profile:
 
 ESSENTIALS = "Network Essentials"
 ADVANTAGE = "Network Advantage"
-IOS_E = r"15\.2\(7\)E\d*"
-XE_1712 = r"17\.12\.\d+[a-z]?"
 
 
 def copper(poe: bool) -> PortGroup:
@@ -89,7 +85,7 @@ SFP28 = PortGroup(Medium.SFP28, 0, 1, 24, "twe", (1000, 10000, 25000))
 def x2960(poe: bool, lite: bool = False) -> Profile:
     return Profile(
         DeviceFamily.CATALYST_2960X, Source(D2960, "Switch models and FlexStack-Plus"), I2960,
-        "IOS 15.2(7)Ex", IOS_E, ("LAN Lite",) if lite else ("LAN Base",),
+        ("LAN Lite",) if lite else ("LAN Base",),
         (copper(poe), sfp(2 if lite else 4, 0, 25)), 0 if lite else 8,
         "LAN Base requires FlexStack-Plus module and cabling. LAN Lite lacks FlexStack-Plus.",
     )
@@ -98,7 +94,7 @@ def x2960(poe: bool, lite: bool = False) -> Profile:
 def x3850(poe: bool) -> Profile:
     return Profile(
         DeviceFamily.CATALYST_3850, Source(D3850, "Configurations and StackWise-480"), I3850,
-        "IOS XE 16.12.x", r"16\.12\.\d+[a-z]?", ("LAN Base", "IP Base", "IP Services"),
+        ("LAN Base", "IP Base", "IP Services"),
         (copper(poe),), 9, "StackWise-480 cables and matching feature sets required.",
         modular=True,
     )
@@ -107,7 +103,7 @@ def x3850(poe: bool) -> Profile:
 def x9200(poe: bool, fixed: PortGroup | None = None) -> Profile:
     return Profile(
         DeviceFamily.CATALYST_9200, Source(D9200, "Switch configurations and stacking"), I9200,
-        "IOS XE 17.12.x", XE_1712, (ESSENTIALS, ADVANTAGE),
+        (ESSENTIALS, ADVANTAGE),
         (copper(poe), fixed) if fixed else (copper(poe),), 8,
         "Match license and StackWise kit. C9200L and modular C9200 use different StackWise.",
         modular=fixed is None,
@@ -117,7 +113,7 @@ def x9200(poe: bool, fixed: PortGroup | None = None) -> Profile:
 def x9300(ports: tuple[PortGroup, ...], *, modular: bool = False) -> Profile:
     return Profile(
         DeviceFamily.CATALYST_9300, Source(D9300, "Switch configurations and stacking"), I9300,
-        "IOS XE 17.12.x", XE_1712, (ESSENTIALS, ADVANTAGE), ports, 8,
+        (ESSENTIALS, ADVANTAGE), ports, 8,
         "Match active license and use the StackWise hardware applicable to the model.",
         modular=modular,
     )
@@ -126,7 +122,7 @@ def x9300(ports: tuple[PortGroup, ...], *, modular: bool = False) -> Profile:
 def x1000(poe: bool) -> Profile:
     return Profile(
         DeviceFamily.CATALYST_C1000, Source(D1000, "24-port and 48-port switch models"), I1000,
-        "IOS 15.2(7)Ex", IOS_E, (), (copper(poe), sfp(4, 0, 25)), None,
+        (), (copper(poe), sfp(4, 0, 25)), None,
         "Single IP Management requires a separate Stack layout rule.",
     )
 
@@ -191,6 +187,7 @@ L2_2960 = (
     GUIDE + "catalyst2960x/software/15-2_7_e/command_reference/b_1527_2960x_cr/"
     "layer_2_commands.html"
 )
+IP_9200 = G9200 + "rtng/b_1712_rtng_9200_cg/configuring_ip_unicast_routing.html"
 IP_9300 = G9300 + "rtng/b_1712_rtng_9300_cg/configuring_ip_unicast_routing.html"
 DHCP_9300 = G9300 + "ip/b_1712_ip_9300_cg.pdf"
 SEC_9300 = G9300 + "sec/b_1712_sec_9300_cg.pdf"
@@ -199,6 +196,84 @@ UPGRADE_9300 = (
     GUIDE + "catalyst9300/software/release/17-12/release_notes/ol-17-12-9300/"
     "upgrading_the_switch_software.html"
 )
+
+
+R2960 = (
+    "https://www.cisco.com/c/dam/en/us/td/docs/switches/lan/catalyst2960x/"
+    "software/15-2_7_e/release_notes/Release_notes_2960x_2960xr_1527E.pdf"
+)
+R3850 = GUIDE + "catalyst3850/software/release/16-12/release_notes/ol-16-12-3850.html"
+R9200 = (
+    GUIDE + "catalyst9200/software/release/17-12/release_notes/ol-17-12-9200/"
+    "upgrading_the_switch_software.html"
+)
+R1000 = GUIDE + "catalyst1000/software/releases/15_2_7_e/release_notes/ol_15_2_7_e_c1000.html"
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseInventory:
+    operating_system: str
+    source: Source
+    releases: tuple[str, ...]
+    bootloaders: tuple[str, ...] = ()
+
+
+# Select this inventory only after resolving an exact PID in PROFILES. Each
+# source identifies releases for its own platform, even when labels coincide.
+RELEASES = {
+    DeviceFamily.CATALYST_2960X: ReleaseInventory(
+        "IOS",
+        Source(R2960, "Supported Hardware; Cisco IOS Software Images; New Software Features"),
+        ("15.2(7)E", "15.2(7)E7", "15.2(7)E1a"),
+    ),
+    DeviceFamily.CATALYST_3850: ReleaseInventory(
+        "IOS XE", Source(R3850, "Supported Hardware; What's New in Cisco IOS XE Gibraltar"),
+        ("16.12.12", "16.12.10a"), ("6.08", "5.08", "4.78"),
+    ),
+    DeviceFamily.CATALYST_9200: ReleaseInventory(
+        "IOS XE", Source(R9200, "Software Images"), ("17.12.4", "17.12.5"),
+        ("17.12.1r", "17.12.1r [fc3]", "17.12.1r [fc2]"),
+    ),
+    DeviceFamily.CATALYST_9300: ReleaseInventory(
+        "IOS XE", Source(UPGRADE_9300, "Software Images"), ("17.12.4", "17.12.5"),
+        ("17.12.1r", "17.12.2r", "17.12.1r[fc1]", "17.12.1r[fc2]", "17.12.1r[fc3]"),
+    ),
+    DeviceFamily.CATALYST_C1000: ReleaseInventory(
+        "IOS", Source(R1000, "Supported Hardware; Software Image for Cisco Catalyst 1000 Switch"),
+        ("15.2(7)E1",),
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class GuideScope:
+    interfaces: tuple[str, ...]
+    stacks: Source | None = None
+
+
+# Interface settings and Stack layout share this exact release scope.
+# Stack layout also requires its own software compatibility source.
+GUIDE_SCOPES = {
+    DeviceFamily.CATALYST_2960X: GuideScope(
+        ("15.2(7)E", "15.2(7)E7"),
+        Source(G2960 + "m_stck_cg.html", "Switch Stack Membership"),
+    ),
+    DeviceFamily.CATALYST_3850: GuideScope(
+        ("16.12.12",),
+        Source(G3850 + "stck_mgr_ha/b_1612_stck_mgr_ha_3850_cg.pdf", "Managing Switch Stacks"),
+    ),
+    DeviceFamily.CATALYST_9200: GuideScope(
+        ("17.12.4",),
+        Source(G9200 + "ha/b_1712_stck_mgr_ha_9200_cg/managing_switch_stacks.html",
+               "Stack Member Software Compatibility"),
+    ),
+    DeviceFamily.CATALYST_9300: GuideScope(
+        ("17.12.4",),
+        Source(G9300 + "stck_mgr_ha/b_1712_stck_mgr_ha_9300_cg/managing_switch_stacks.html",
+               "Stack Member Software Compatibility"),
+    ),
+    DeviceFamily.CATALYST_C1000: GuideScope(("15.2(7)E1",)),
+}
 
 
 def aggregation(source: str, locator: str) -> dict[CapabilityId, Source]:
@@ -220,19 +295,37 @@ def modern_l2(source: str) -> dict[CapabilityId, Source]:
     }
 
 
-FEATURES: dict[DeviceFamily, dict[CapabilityId, Source]] = {
-    DeviceFamily.CATALYST_2960X: aggregation(L2_2960, "channel-group and LAN Lite limits"),
-    DeviceFamily.CATALYST_3850: aggregation(L2_3850, "Configuring EtherChannels"),
-    DeviceFamily.CATALYST_C1000: aggregation(L2_1000, "Layer 2 EtherChannels and LACP modes"),
-    DeviceFamily.CATALYST_9200: {
+@dataclass(frozen=True, slots=True)
+class FeatureScope:
+    source: Source
+    releases: tuple[str, ...]
+
+
+def reviewed_features(
+    sources: dict[CapabilityId, Source], *releases: str,
+) -> dict[CapabilityId, FeatureScope]:
+    return {capability: FeatureScope(source, releases) for capability, source in sources.items()}
+
+
+FEATURES = {
+    DeviceFamily.CATALYST_2960X: reviewed_features(
+        aggregation(L2_2960, "channel-group and LAN Lite limits"), "15.2(7)E", "15.2(7)E7",
+    ),
+    DeviceFamily.CATALYST_3850: reviewed_features(
+        aggregation(L2_3850, "Configuring EtherChannels"), "16.12.12", "16.12.10a",
+    ),
+    DeviceFamily.CATALYST_C1000: reviewed_features(
+        aggregation(L2_1000, "Layer 2 EtherChannels and LACP modes"), "15.2(7)E1",
+    ),
+    DeviceFamily.CATALYST_9200: reviewed_features({
         **modern_l2(L2_9200),
         CiscoCapability.ACCESS: Source(I9200, "Switch Ports"),
         Capability.SVI: Source(I9200, "Layer 3 Interfaces"),
         Capability.ROUTED_PORT: Source(I9200, "Routed Ports"),
-        Capability.IPV4_ROUTING: Source(D9200, "High-performance IP routing"),
-        CiscoCapability.STATIC_ROUTE: Source(D9200, "High-performance IP routing"),
-    },
-    DeviceFamily.CATALYST_9300: {
+        Capability.IPV4_ROUTING: Source(IP_9200, "Enabling IP Unicast Routing"),
+        CiscoCapability.STATIC_ROUTE: Source(IP_9200, "Configuring Static Unicast Routes"),
+    }, "17.12.4"),
+    DeviceFamily.CATALYST_9300: reviewed_features({
         **modern_l2(L2_9300),
         CiscoCapability.ACCESS: Source(I9300, "Switch Ports"),
         Capability.ROUTED_PORT: Source(I9300, "Routed Ports"),
@@ -247,5 +340,5 @@ FEATURES: dict[DeviceFamily, dict[CapabilityId, Source]] = {
         CiscoCapability.AAA: Source(SEC_9300, "Controlling Switch Access; AAA and TACACS+"),
         CiscoCapability.BOOT: Source(SYS_9300, "Software Boot Modes"),
         CiscoCapability.STORAGE: Source(UPGRADE_9300, "Upgrading in Install Mode: flash space"),
-    },
+    }, "17.12.4"),
 }

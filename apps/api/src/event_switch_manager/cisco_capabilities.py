@@ -8,7 +8,9 @@ from uuid import UUID
 from .cisco_catalog import (
     ADVANTAGE,
     FEATURES,
+    GUIDE_SCOPES,
     PROFILES,
+    RELEASES,
     CapabilityId,
     CiscoCapability,
     Medium,
@@ -36,10 +38,11 @@ ETHERNET = re.compile(
     r"(gi(?:gabitethernet)?|te(?:ngigabitethernet)?|twe(?:ntyfivegige)?)"
     r"([1-9]\d*)/(\d+)/([1-9]\d*)", re.IGNORECASE,
 )
-PORT_FEATURES = {
+HARDWARE_PORT_FEATURES = {
     Capability.POE, CiscoCapability.POE_PLUS, CiscoCapability.PORT_MEDIA,
-    CiscoCapability.SPEED, CiscoCapability.DUPLEX,
+    CiscoCapability.PORT_LAYOUT,
 }
+INTERFACE_SETTINGS = {CiscoCapability.SPEED, CiscoCapability.DUPLEX}
 DHCP_FEATURES = {Capability.DHCP_SERVER, Capability.DHCP_RELAY, Capability.DHCP_CLIENT}
 PREREQUISITES: dict[CapabilityId, str] = {
     CiscoCapability.SSH_V2: "Crypto-enabled image and device keys",
@@ -153,15 +156,42 @@ def bind(
     return Binding(assignment, members[0], None, stack, None, members)
 
 
-def software_problem(profile: Profile, software: SoftwareProfile | None) -> Finding | None:
-    if not software or not re.fullmatch(profile.version_pattern, software.image, re.IGNORECASE):
-        return Support.UNKNOWN, "release-unmatched", f"Specify a release in {profile.train}."
-    license_name = software.license.casefold() if software.license else None
+@dataclass(frozen=True, slots=True)
+class Release:
+    version: str
+    label: str
+    source: Source
+
+
+def identify_release(profile: Profile, software: SoftwareProfile | None) -> Release | Finding:
+    if software is None:
+        return Support.UNKNOWN, "software-missing", "Supply the operating software release."
+    inventory = RELEASES[profile.family]
+    identifier = software.image.casefold()
+    if identifier in inventory.bootloaders:
+        return Support.UNKNOWN, "software-is-rommon", "Supply the running IOS or IOS XE release."
+    for version in inventory.releases:
+        if identifier == version.casefold():
+            return Release(version, f"{inventory.operating_system} {version}", inventory.source)
+    return Support.UNKNOWN, "release-unmatched", "No reviewed release identity for this platform."
+
+
+def software_evidence_scope(
+    profile: Profile, software: SoftwareProfile | None, guide_releases: tuple[str, ...] | None,
+) -> Release | Finding:
+    release = identify_release(profile, software)
+    if not isinstance(release, Release):
+        return release
+    if guide_releases is None:
+        return Support.UNKNOWN, "feature-evidence-missing", "Feature evidence missing."
+    if release.version not in guide_releases:
+        return Support.UNKNOWN, "release-evidence-missing", "No guide scope for this exact release."
+    license_name = software.license.casefold() if software and software.license else None
     accepted = {label.casefold() for label in profile.licenses}
     if (accepted and license_name not in accepted) or (not accepted and license_name is not None):
         scope = ", ".join(profile.licenses) or "the stock feature set with no explicit license"
         return Support.UNKNOWN, "license-unmatched", f"Documented license scope: {scope}."
-    return None
+    return release
 
 
 def stack_finding(binding: Binding, profile: Profile) -> Finding:
@@ -184,9 +214,6 @@ def stack_finding(binding: Binding, profile: Profile) -> Finding:
         or any(m.state != "ready" for m in members)
     ):
         return Support.UNKNOWN, "stack-layout-unresolved", "Unique, ready members are required."
-    problem = software_problem(profile, binding.assignment.software)
-    if problem:
-        return problem
     return Support.SUPPORTED, "stack-layout-documented", "Declared member layout fits the catalog."
 
 
@@ -205,33 +232,34 @@ def find_group(profile: Profile, binding: Binding) -> PortGroup | None:
     )
 
 
-def port_finding(
-    capability: CapabilityId, group: PortGroup, speed: Speed | None, duplex: Duplex | None,
-) -> Finding:
+def port_hardware_finding(capability: CapabilityId, group: PortGroup) -> Finding:
     if capability in {Capability.POE, CiscoCapability.POE_PLUS}:
         if group.poe_plus:
-            return Support.SUPPORTED, "poe-documented", "The port supports PoE and PoE+."
+            return Support.SUPPORTED, "poe-documented", "The port is rated for PoE and PoE+."
         return Support.UNSUPPORTED, "poe-unsupported", "The port does not provide PoE."
-    if capability in {CiscoCapability.SPEED, CiscoCapability.DUPLEX}:
-        if isinstance(speed, int) and speed > max(group.rates):
-            return Support.UNSUPPORTED, "speed-outside-port-range", "Speed exceeds the port rating."
-        if group.medium != Medium.COPPER:
-            return Support.UNKNOWN, "optic-unknown", "The installed transceiver is required."
-        if isinstance(speed, int) and speed not in group.rates:
-            return Support.UNSUPPORTED, "speed-unsupported", "Speed is outside copper port limits."
+    return Support.SUPPORTED, "port-documented", "The physical port matches the documented map."
+
+
+def port_setting_finding(
+    capability: CapabilityId, group: PortGroup, speed: Speed | None, duplex: Duplex | None,
+) -> Finding:
+    if isinstance(speed, int) and speed > max(group.rates):
+        return Support.UNSUPPORTED, "speed-outside-port-range", "Speed exceeds the port rating."
+    if group.medium != Medium.COPPER:
+        return Support.UNKNOWN, "optic-unknown", "The installed transceiver is required."
+    if isinstance(speed, int) and speed not in group.rates:
+        return Support.UNSUPPORTED, "speed-unsupported", "Speed is outside copper port limits."
     if capability == CiscoCapability.SPEED:
         if speed is None:
             return Support.UNKNOWN, "speed-required", "Select a speed or auto negotiation."
         return Support.SUPPORTED, "speed-documented", "Copper supports this speed setting."
-    if capability == CiscoCapability.DUPLEX:
-        if duplex is None:
-            return Support.UNKNOWN, "duplex-required", "Select a duplex setting."
-        if duplex == "half" and speed == 1000:
-            return Support.UNSUPPORTED, "duplex-unsupported", "1 Gbps requires full duplex."
-        if duplex == "half" and speed not in {10, 100}:
-            return Support.UNKNOWN, "duplex-speed-required", "Half duplex requires 10/100 Mbps."
-        return Support.SUPPORTED, "duplex-documented", "Copper supports this duplex setting."
-    return Support.SUPPORTED, "port-documented", "The physical port matches the documented map."
+    if duplex is None:
+        return Support.UNKNOWN, "duplex-required", "Select a duplex setting."
+    if duplex == "half" and speed == 1000:
+        return Support.UNSUPPORTED, "duplex-unsupported", "1 Gbps requires full duplex."
+    if duplex == "half" and speed not in {10, 100}:
+        return Support.UNKNOWN, "duplex-speed-required", "Half duplex requires 10/100 Mbps."
+    return Support.SUPPORTED, "duplex-documented", "Copper supports this duplex setting."
 
 
 def resolve_capability(
@@ -284,24 +312,37 @@ def resolve_capability(
         return decide((Support.UNKNOWN, "family-mismatch", "Assignment family conflicts with PID."))
 
     def cite(
-        source: Source, conditions: str, *, versioned: bool = False,
+        source: Source, conditions: str, *, release: Release | None = None,
         licenses: tuple[str, ...] = (),
     ) -> Evidence:
         return Evidence(
             url=source.url, section=source.section, family=profile.family, sku=pid,
-            version_scope=profile.train if versioned else None,
+            version_scope=release.label if release else None,
             licenses=licenses, conditions=conditions,
         )
 
+    def cite_release(release: Release) -> Evidence:
+        return cite(release.source, "Operating release identity for this PID.", release=release)
+
     hardware = cite(profile.hardware, "Documented chassis characteristics for the exact PID.")
+    guides = GUIDE_SCOPES[profile.family]
     if capability == CiscoCapability.IDENTITY:
         return decide((Support.SUPPORTED, "pid-documented", "The PID is listed."), (hardware,))
     if capability == CiscoCapability.STACK:
         finding = stack_finding(binding, profile)
-        scoped = finding[1] == "stack-layout-documented"
+        stack_hardware = cite(profile.hardware, profile.stack_conditions)
+        if finding[1] != "stack-layout-documented":
+            return decide(finding, (stack_hardware,))
+        stack_release = software_evidence_scope(profile, software, guides.interfaces)
+        if not isinstance(stack_release, Release):
+            return decide(stack_release)
+        if guides.stacks is None:
+            return decide((Support.UNKNOWN, "stack-evidence-missing", profile.stack_conditions))
         return decide(finding, (
-            cite(profile.hardware, profile.stack_conditions, versioned=scoped,
-                 licenses=profile.licenses if scoped else ()),
+            stack_hardware,
+            cite(guides.stacks, profile.stack_conditions,
+                 release=stack_release, licenses=profile.licenses),
+            cite_release(stack_release),
         ))
     if binding.member is not None and not (
         profile.stack_limit and binding.member <= profile.stack_limit
@@ -314,31 +355,39 @@ def resolve_capability(
             finding = (Support.UNKNOWN, "uplink-module-unknown", "Uplink module is required.")
         return decide(finding, (hardware,), profile.ports)
 
-    problem = software_problem(profile, software)
-    if problem:
-        return decide(problem)
     group = find_group(profile, binding)
     if port and group is None:
         return decide((Support.UNKNOWN, "port-layout-unknown", "Unknown interface map."),
                       (hardware,))
-    if capability in PORT_FEATURES or capability == CiscoCapability.PORT_LAYOUT:
-        if not port or not group:
+    if capability in HARDWARE_PORT_FEATURES:
+        if group is None:
+            return decide((Support.UNKNOWN, "port-required", "Select a physical interface."))
+        return decide(port_hardware_finding(capability, group), (hardware,), (group,))
+
+    if capability in INTERFACE_SETTINGS:
+        interface_release = software_evidence_scope(profile, software, guides.interfaces)
+        if not isinstance(interface_release, Release):
+            return decide(interface_release)
+        if port is None or group is None:
             return decide((Support.UNKNOWN, "port-required", "Select a physical interface."))
         interface_evidence = cite(
             Source(profile.interfaces, "Interface identification and speed/duplex guidelines"),
             f"{group.medium.value}, slot {group.slot}, indexes {group.first} through "
             f"{group.first + group.count - 1}. Optic and PoE budget require field verification.",
-            versioned=True, licenses=profile.licenses,
+            release=interface_release, licenses=profile.licenses,
         )
-        finding = port_finding(
+        finding = port_setting_finding(
             capability, group, speed if speed is not None else port.settings.speed,
             duplex if duplex is not None else port.settings.duplex,
         )
-        return decide(finding, (hardware, interface_evidence), (group,))
+        return decide(finding, (hardware, interface_evidence, cite_release(interface_release)),
+                      (group,))
 
     feature = FEATURES.get(profile.family, {}).get(capability)
-    if feature is None:
-        return decide((Support.UNKNOWN, "feature-evidence-missing", "Feature evidence missing."))
+    release = software_evidence_scope(profile, software, feature.releases if feature else None)
+    if not isinstance(release, Release):
+        return decide(release)
+    assert feature is not None
     licenses = profile.licenses
     if capability in DHCP_FEATURES:
         if software is None or (software.license or "").casefold() != ADVANTAGE.casefold():
@@ -350,9 +399,10 @@ def resolve_capability(
     prerequisite = PREREQUISITES.get(capability)
     if prerequisite:
         return decide((Support.UNKNOWN, "prerequisites-unobserved", prerequisite + " required."),
-                      (cite(feature, prerequisite, versioned=True, licenses=licenses),))
+                      (cite(feature.source, prerequisite, release=release, licenses=licenses),
+                       cite_release(release)))
     return decide(
         (Support.SUPPORTED, "feature-documented", "Vendor evidence applies to this profile."),
-        (cite(feature, "Feature availability. Operational prerequisites still apply.",
-              versioned=True, licenses=licenses),),
+        (cite(feature.source, "Feature availability. Operational prerequisites still apply.",
+              release=release, licenses=licenses), cite_release(release)),
     )
