@@ -76,6 +76,7 @@ body { margin: 0; min-width: 0; }
   margin-left: auto; display: flex; align-items: center; gap: var(--space);
   flex: 0 1 16rem; min-width: 0; font-size: var(--size-small);
 }
+.event-context label { flex: none; white-space: nowrap; }
 .event-context select { min-width: 0; width: 100%; color: var(--foreground); }
 .skip-link { position: fixed; top: .5rem; left: .5rem; z-index: 2; transform: translateY(-150%); }
 .skip-link:focus { transform: none; color: var(--foreground); background: var(--card); padding: .5rem .75rem; }
@@ -236,6 +237,7 @@ dialog:has(.port-editor) { width: min(68rem, calc(100% - 1rem)); }
 .port-editor table { min-width: 36rem; }
 .port-editor table th { text-align: left; }
 .port-editor table td, .port-editor table th { white-space: normal; overflow-wrap: anywhere; }
+.port-editor td.data-mono { white-space: nowrap; }
 .port-editor .port-mode-warning { background: var(--warning-surface); color: var(--warning); padding: .45rem .65rem; border: 1px solid var(--border); }
 .port-config > summary { max-width: 19rem; overflow: hidden; text-overflow: ellipsis; }
 .port-config dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .2rem .6rem; margin: .35rem 0 0; white-space: normal; }

@@ -1134,6 +1134,13 @@ test('keeps a pending port edit, draft and revision identity across locale chang
   await confirm.scrollIntoViewIfNeeded()
   await expect(confirm).toBeInViewport()
   await page.screenshot({ path: info.outputPath('zh-CN-before-after-320.png') })
+  const changesRegion = modal.getByRole('region', { name: '端口变更', exact: true })
+  await changesRegion.focus()
+  await expect(changesRegion).toBeFocused()
+  await page.keyboard.press('ArrowRight')
+  await expect.poll(() => changesRegion.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0)
+  await changesRegion.evaluate((node) => { node.scrollLeft = node.scrollWidth })
+  await page.screenshot({ path: info.outputPath('zh-CN-before-after-values-320.png') })
   await confirm.click()
   await expect(page.getByText('有未保存的更改', { exact: true })).toBeVisible()
   await page.setViewportSize({ width: 1440, height: 900 })
@@ -1276,6 +1283,7 @@ test('checks bilingual screens at workstation widths and saves a network through
         expect(pageWidth, locale + ' ' + view + ' at ' + width).toBeLessThanOrEqual(width + 1)
         layout.push({ locale, view, width, pageWidth })
         if (width === 1440 || view === 'planner') {
+          await page.mouse.move(width - 1, 899)
           await page.screenshot({ path: info.outputPath(locale + '-' + view + '-' + width + '.png'), fullPage: true })
         }
       }
