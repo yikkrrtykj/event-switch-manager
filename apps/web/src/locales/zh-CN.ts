@@ -670,4 +670,12 @@ export const zhCN = {
   controlOutcomeWarning: "仅警告",
   controlOutcomePending: "未就绪",
   controlOutcomeBlocked: "硬阻止",
+  controlMembershipTitle: "通道成员变更",
+  controlMembershipLacpRequired: "该模式同时需要 LACP 协商证据。",
+  controlMembershipBlocked: "拟提交通道新增的成员其文档 Port-Channel 能力不支持该聚合：{targets}。",
+  controlMembershipWarning: "拟提交通道新增成员的该模式能力证据为 UNKNOWN：{targets}。仅作为规划意图。",
+  controlMembershipPending: "以下成员的当前能力证据未就绪：{targets}。不施加硬限制。",
+  controlMembershipRemoved: "已移除 {count} 个成员；移除成员属于修复操作，不会因被移除成员的证据而被阻止。",
+  controlMembershipReordered: "成员顺序变化；成员集合未变化。",
+  controlMembershipKept: "未修改的成员保持原值；其历史证据不会阻止本次编辑。",
 } satisfies Record<MessageKey, MessageText>

@@ -6,7 +6,7 @@ import { capabilityName, capabilityReason } from './capability'
 import type { CapabilityTarget } from './capability'
 import type {
   CandidateControl, ControlOutcome, ControlReviewRow, ControlVerdict, FieldControl,
-  PortControlPolicy, RelatedCapability,
+  MembershipControl, PortControlPolicy, RelatedCapability,
 } from './portControlPolicy'
 
 const outcomeKeys = {
@@ -132,20 +132,68 @@ export function FieldControlNotice({ field, targets }: {
   </div>
 }
 
+export function MembershipControlNotice({ membership, targets }: {
+  membership: MembershipControl; targets: CapabilityTarget[]
+}) {
+  const { t } = useMessages()
+  if (!membership.added.length && !membership.removed.length && !membership.reordered) return null
+  const addedNames = membership.rows
+    .map((row) => targetLabels(targets, [row.targetKey]) || row.name || row.interfaceId)
+    .join(' · ')
+  const reasons = uniqueReasons(t, membership.verdicts)
+  return <div className="port-control-notice port-membership" data-control-membership="change"
+    data-control-membership-outcome={membership.outcome}>
+    <p className="port-membership-title">
+      {t('controlMembershipTitle')}
+      {membership.requiredLacp && <span className="muted"> · {t('controlMembershipLacpRequired')}</span>}
+    </p>
+    {membership.outcome === 'blocked' && <p className="port-control-blocked" role="alert">
+      {t('controlMembershipBlocked', { targets: addedNames })}
+      {reasons.length > 0 && <span className="port-control-reason"> {reasons.join(' · ')}</span>}
+    </p>}
+    {membership.outcome === 'warning' && <p className="port-control-warning" role="status">
+      {t('controlMembershipWarning', { targets: addedNames })}
+      {reasons.length > 0 && <span className="port-control-reason"> {reasons.join(' · ')}</span>}
+    </p>}
+    {membership.outcome === 'pending' && <p className="port-control-pending" role="status">
+      {t('controlMembershipPending', { targets: addedNames })}
+    </p>}
+    {membership.rows.length > 0 && <ul className="port-control-targets">
+      {membership.rows.map((row) => {
+        const rowReason = uniqueReasons(t, [row.verdict]).join(' · ')
+        return <li key={row.interfaceId} data-control-member={row.interfaceId}
+          data-control-outcome={row.verdict.outcome}>
+          <strong>{row.name ?? row.interfaceId}</strong>{' '}
+          <ControlOutcomeBadge outcome={row.verdict.outcome} />
+          {rowReason && <span className="port-control-reason"> {rowReason}</span>}
+        </li>
+      })}
+    </ul>}
+    {membership.removed.length > 0 && <p className="muted">
+      {t('controlMembershipRemoved', { count: membership.removed.length })}
+    </p>}
+    {membership.kept.length > 0 && <p className="muted">{t('controlMembershipKept')}</p>}
+    {membership.reordered && <p className="muted">{t('controlMembershipReordered')}</p>}
+  </div>
+}
+
 function reviewRows(policy: PortControlPolicy, rows: ControlReviewRow[], targets: CapabilityTarget[]) {
   const { t } = useMessages()
   return rows.map((row, index) => {
     const target = targets.find((item) => item.key === row.targetKey)
     const field = policy.fields[row.fieldKey]?.field
+    const fieldLabel = row.fieldKey === 'member_ids'
+      ? t('memberPorts') : field ? t(field.label) : row.fieldKey
+    const candidate = row.candidateLabel ?? (row.operation === 'reset'
+      ? t('controlPolicyResetCandidate') : reviewValue(t, policy, row))
     const reason = row.verdict.reasonCode
       ? capabilityReason(t, row.verdict.reasonCode, row.verdict.reason ?? '')
       : row.verdict.reason ?? ''
     return <tr key={index} data-control-outcome={row.verdict.outcome}
       data-control-field={row.fieldKey}>
       <td>{target ? controlTargetLabel(target) : row.targetKey}</td>
-      <td>{field ? t(field.label) : row.fieldKey}</td>
-      <td>{row.operation === 'reset' ? t('controlPolicyResetCandidate')
-        : reviewValue(t, policy, row)}</td>
+      <td>{fieldLabel}</td>
+      <td>{candidate}</td>
       <td><ControlOutcomeBadge outcome={row.verdict.outcome} /></td>
       <td>{reason}</td>
     </tr>
@@ -280,6 +328,8 @@ export function ControlReview({ policy, targets }: {
     {policy.hasPending && <p className="port-control-pending" role="status">
       {t('controlPolicyPendingNote')}
     </p>}
+    {policy.membership && <MembershipControlNotice membership={policy.membership}
+      targets={targets} />}
     {policy.review.length
       ? <Table label={t('controlReviewTable')}><thead><tr>
         <th scope="col">{t('controlPolicyTarget')}</th>

@@ -7,7 +7,7 @@ import { get, set } from './catalog'
 import type { Field } from './catalog'
 import { Fields, useFieldFocus } from './Editor'
 import { fingerprint, records } from './model'
-import type { Issue, Plan, RecordValue } from './model'
+import type { Issue, Plan, RecordValue, Value } from './model'
 import {
   CHANNEL_CAPABILITIES, PORT_CAPABILITIES, applyProposedChannel, applyProposedPorts,
   capabilitiesForChange, targetKey,
@@ -16,7 +16,8 @@ import type { CapabilityId, CapabilityTarget } from './capability'
 import { CapabilityPanel, CapabilityReview } from './CapabilityPanel'
 import { useDraftCapability } from './useCapability'
 import { evaluateControlPolicy } from './portControlPolicy'
-import { ControlPolicyPanel, ControlReview, FieldControlNotice } from './PortControlPanel'
+import type { MembershipChange } from './portControlPolicy'
+import { ControlPolicyPanel, ControlReview, FieldControlNotice, MembershipControlNotice } from './PortControlPanel'
 import { aggregatePortLabel, canResetPortField, commonPortValue, describePortValue, editPort, hasPortValue, isPortSetting, modeKey,
   physicalPortLabel, portFieldApplies, portMode } from './portSettings'
 import type { Operations, PortTarget } from './portSettings'
@@ -53,6 +54,16 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
   const hasCleanup = proposed.some(({ changes }) => changes.some((change) => change.operation === 'clearOnModeChange'))
   const currentValues = new Map(controls.map((field) => [field.key, commonPortValue(field, targets)]))
   const proposedRecord = proposed[0]?.next ?? record
+  const memberIds = (value: Value | undefined) => Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : []
+  const membership: MembershipChange | undefined = aggregate
+    ? {
+      original: memberIds(original.member_ids),
+      proposed: memberIds(proposedRecord.member_ids),
+      lacp: proposedRecord.lacp,
+    }
+    : undefined
   const previewPlan = aggregate
     ? applyProposedChannel(plan, proposedRecord)
     : applyProposedPorts(plan, proposed.map(({ index, next }) => ({ index, next })))
@@ -89,11 +100,11 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
   )
   const controlPolicy = evaluateControlPolicy({
     plan: previewPlan, targets: capabilityTargets, states: capabilityStates,
-    operations, fields: controls, aggregate,
+    operations, fields: controls, aggregate, membership,
   })
   const recheckPolicy = () => evaluateControlPolicy({
     plan: previewPlan, targets: capabilityTargets, states: capabilityStates,
-    operations, fields: controls, aggregate,
+    operations, fields: controls, aggregate, membership,
   })
   const changedCapabilities: Record<string, readonly CapabilityId[]> = {}
   if (aggregate) {
@@ -168,6 +179,8 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
             <Fields fields={identity} record={record} plan={plan} path={path} issues={issues} update={setRecord} />
           </details>
         </>}
+        {aggregate && controlPolicy.membership &&
+          <MembershipControlNotice membership={controlPolicy.membership} targets={capabilityTargets} />}
         <div className="status-strip"><Badge tone="warning">{t('notVerified')}</Badge>
           <span className="muted">{t('portHardwareEvidence')}</span></div>
         <div className="port-settings-grid">{controls.map((field) => {

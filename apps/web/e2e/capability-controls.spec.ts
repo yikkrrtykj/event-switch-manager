@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { expect, test } from '@playwright/test'
-import type { APIRequestContext, Locator, Page } from '@playwright/test'
+import type { APIRequestContext, Locator, Page, Request } from '@playwright/test'
 import type { Plan, RecordValue } from '../src/planner/model'
 
 const api = '/api/v1/events'
@@ -137,6 +137,48 @@ function mixedStackPlan(eventId: string): Plan {
   }
 }
 
+function mixedStackChannelPlan(eventId: string): Plan {
+  const firstDevice = randomUUID()
+  const secondDevice = randomUUID()
+  const assignment = randomUUID()
+  const first = randomUUID()
+  const second = randomUUID()
+  const aggregate = randomUUID()
+  const settings = { mode: 'access', access_vlan: 20 }
+  return {
+    schema_version: 1, event_id: eventId, management_vlan: 10,
+    vlans: [{ id: 10, name: 'Management', purpose: 'management' },
+      { id: 20, name: 'Players' }],
+    physical_devices: [
+      { id: firstDevice, vendor: 'cisco', model: 'C9300L-24P-4X',
+        verified_serial: 'E2E-STK-CH-' + firstDevice.slice(0, 8) },
+      // The second chassis has no exact PID and no verified serial, so only this
+      // member's capability result is UNKNOWN while the first one is documented.
+      { id: secondDevice, vendor: 'cisco', model: 'Catalyst 9300' },
+    ],
+    assignments: [{ id: assignment, hostname: 'Ctrl-Stack-Channel', role: 'access',
+      family: 'catalyst-9300', physical_device_id: firstDevice,
+      software: { image: '17.12.4', license: 'Network Advantage' } }],
+    stacks: [{
+      assignment_id: assignment,
+      members: [
+        { number: 1, physical_device_id: firstDevice, state: 'ready' },
+        { number: 2, physical_device_id: secondDevice, state: 'ready' },
+      ],
+    }],
+    physical_interfaces: [
+      { id: first, assignment_id: assignment, physical_device_id: firstDevice,
+        name: 'Gi1/0/1', stack_member: 1, settings },
+      { id: second, assignment_id: assignment, physical_device_id: secondDevice,
+        name: 'Gi2/0/1', stack_member: 2, settings },
+    ],
+    logical_interfaces: [{ id: aggregate, assignment_id: assignment,
+      name: 'Port-channel1', kind: 'port-channel' }],
+    port_channels: [{ interface_id: aggregate, number: 1, member_ids: [first],
+      settings, lacp: 'active' }],
+  }
+}
+
 function sfp28Plan(eventId: string): Plan {
   const device = randomUUID()
   const assignment = randomUUID()
@@ -160,6 +202,7 @@ function channelPlan(eventId: string, options: { image?: string } = {}): Plan {
   const assignment = randomUUID()
   const first = randomUUID()
   const second = randomUUID()
+  const third = randomUUID()
   const aggregate = randomUUID()
   const settings = { mode: 'access', access_vlan: 20 }
   return {
@@ -176,6 +219,8 @@ function channelPlan(eventId: string, options: { image?: string } = {}): Plan {
         name: 'Gi1/0/1', settings },
       { id: second, assignment_id: assignment, physical_device_id: device,
         name: 'Gi1/0/2', settings },
+      { id: third, assignment_id: assignment, physical_device_id: device,
+        name: 'Gi1/0/3', settings },
     ],
     logical_interfaces: [{ id: aggregate, assignment_id: assignment,
       name: 'Port-channel1', kind: 'port-channel' }],
@@ -194,6 +239,8 @@ async function previewDraft(
   })
   expect(response.status(), await response.text()).toBe(200)
   return await response.json() as {
+    draft_fingerprint: string
+    input_fingerprint: string
     decisions: {
       capability_id: string; verdict: string; reason_code: string
       port_groups: { medium: string; rates: number[] }[]
@@ -203,6 +250,80 @@ async function previewDraft(
 
 function decisionOf(preview: Awaited<ReturnType<typeof previewDraft>>, capability: string) {
   return preview.decisions.find((entry) => entry.capability_id === capability)!
+}
+
+type PreviewExchange = {
+  body: { plan: Plan; interface_id?: string | null }
+  response?: {
+    draft_fingerprint: string
+    input_fingerprint: string
+    decisions: {
+      capability_id: string
+      verdict: string
+      reason_code: string
+      affected: { interface_id: string | null }
+    }[]
+  }
+}
+
+function captureCapabilityPreviews(page: Page) {
+  const exchanges: PreviewExchange[] = []
+  const pending = new Map<Request, PreviewExchange>()
+  page.on('request', (entry) => {
+    if (!entry.url().includes('/plan/capability-preview')) return
+    const exchange: PreviewExchange = {
+      body: entry.postDataJSON() as PreviewExchange['body'],
+    }
+    exchanges.push(exchange)
+    pending.set(entry, exchange)
+  })
+  page.on('response', (response) => {
+    if (!response.url().includes('/plan/capability-preview')) return
+    const exchange = pending.get(response.request())
+    if (!exchange) return
+    pending.delete(response.request())
+    void response.json().then((body) => {
+      exchange.response = body as PreviewExchange['response']
+    }).catch(() => undefined)
+  })
+  return exchanges
+}
+
+function channelMembersOf(plan: Plan) {
+  return ((plan.port_channels as RecordValue[])[0]!.member_ids as string[]).slice()
+}
+
+async function channelMembersFromRevision(
+  request: APIRequestContext, eventId: string, revisionId: string,
+) {
+  const revision = await (await request.get(revisions(eventId) + '/' + revisionId)).json() as {
+    plan: Plan
+  }
+  return channelMembersOf(revision.plan)
+}
+
+function membersAre(plan: Plan, expected: string[]) {
+  const members = channelMembersOf(plan)
+  return members.length === expected.length &&
+    expected.every((id) => members.includes(id))
+}
+
+function interfaceName(plan: Plan, interfaceId: string) {
+  const port = (plan.physical_interfaces as RecordValue[])
+    .find((item) => item.id === interfaceId)
+  return String(port?.name ?? interfaceId)
+}
+
+async function openChannelEditor(page: Page) {
+  await page.getByRole('button', { name: 'Edit Port-Channel 1', exact: true }).click()
+  const modal = page.getByRole('dialog', { name: 'Edit Port-Channel', exact: true })
+  await expect(modal).toBeVisible()
+  return modal
+}
+
+async function openChannelMembers(modal: Locator) {
+  await modal.getByText('Aggregate interface and members', { exact: true }).click()
+  return modal.getByRole('group', { name: 'Member ports', exact: true })
 }
 
 test('blocks static PoE on documented non-PoE hardware and keeps it out of the draft', async ({ page, request }, info) => {
@@ -772,4 +893,322 @@ test('keeps static aggregation editable when LACP evidence is UNKNOWN', async ({
   await modal.getByRole('button', { name: 'Apply to draft', exact: true }).click()
   const draft = await viewDraft(page)
   expect((draft.port_channels as RecordValue[])[0]!.lacp).toBe('static')
+})
+
+test('judges member-only Port-Channel changes per added member and applies the exact draft', async ({ page, request }, info) => {
+  test.setTimeout(120_000)
+  const id = await createEvent(request, 'Synthetic channel membership controls')
+  const plan = channelPlan(id)
+  const saved = await planRecord(request, plan)
+  const exportUrl = revisions(id) + '/' + saved.id + '/export'
+  const historical = await request.get(exportUrl)
+  const historicalBody = await historical.body()
+  const historicalEtag = historical.headers().etag
+  const interfaces = plan.physical_interfaces as RecordValue[]
+  const [first, , third] = interfaces.map((item) => String(item.id))
+  const initialMembers = await channelMembersFromRevision(request, id, saved.id)
+  expect(initialMembers).toHaveLength(2)
+  const expectedAfterAdd = [...initialMembers, third!]
+  const assignmentId = String((plan.assignments as RecordValue[])[0]!.id!)
+  const range = await previewDraft(request, id, plan, assignmentId, first!,
+    ['lacp', 'port-channel'])
+  expect(decisionOf(range, 'lacp').verdict).toBe('supported')
+  expect(decisionOf(range, 'port-channel').verdict).toBe('supported')
+  const exchanges = captureCapabilityPreviews(page)
+  await openWorkspace(page, id)
+  const modal = await openChannelEditor(page)
+  const members = await openChannelMembers(modal)
+  await members.getByRole('button', { name: 'Add entry', exact: true }).click()
+  await members.getByLabel('Member ports 3', { exact: true }).selectOption(third!)
+  const membership = modal.locator('[data-control-membership="change"]')
+  await expect(membership).toHaveAttribute('data-control-membership-outcome', 'allowed')
+  await expect(membership.locator('[data-control-member="' + third + '"]'))
+    .toHaveAttribute('data-control-outcome', 'allowed')
+  await page.screenshot({ path: info.outputPath('channel-membership-add-1280.png') })
+  await expect.poll(() => exchanges.filter((exchange) =>
+    membersAre(exchange.body.plan, expectedAfterAdd) && exchange.response).length,
+  { timeout: 10_000 }).toBe(3)
+  const current = exchanges.filter((exchange) =>
+    membersAre(exchange.body.plan, expectedAfterAdd) && exchange.response)
+  for (const exchange of current) {
+    expect(exchange.response!.decisions.every((decision) =>
+      decision.affected.interface_id === exchange.body.interface_id)).toBe(true)
+    expect(channelMembersOf(exchange.body.plan)).toEqual(expectedAfterAdd)
+  }
+  const proposedPlan = {
+    ...plan,
+    port_channels: (plan.port_channels as RecordValue[]).map((channel) => ({
+      ...channel,
+      member_ids: expectedAfterAdd,
+    })),
+  }
+  const beforeChange = await previewDraft(request, id, plan, assignmentId, first!,
+    ['port-channel'])
+  const afterChange = await previewDraft(request, id, proposedPlan, assignmentId, first!,
+    ['port-channel'])
+  expect(afterChange.draft_fingerprint).not.toBe(beforeChange.draft_fingerprint)
+  expect(afterChange.input_fingerprint).not.toBe(beforeChange.input_fingerprint)
+  expect(current[0]!.response!.draft_fingerprint).not.toBe(beforeChange.draft_fingerprint)
+  await expect(modal.locator('.capability-target')).toHaveCount(3)
+
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  const changes = modal.getByRole('table', { name: 'Port changes' })
+  const memberRow = changes.getByRole('row', { name: /Member ports/ })
+  await expect(memberRow.getByRole('cell').nth(3)).not.toContainText('Gi1/0/3')
+  await expect(memberRow.getByRole('cell').nth(4)).toContainText('Gi1/0/3')
+  const controls = modal.getByRole('table', { name: 'Capability controls for the proposed change' })
+  const controlRow = controls.getByRole('row', { name: /Member ports/ })
+  await expect(controlRow).toHaveAttribute('data-control-outcome', 'allowed')
+  await expect(controlRow.getByRole('cell').nth(2)).toHaveText('Gi1/0/3')
+  await modal.getByRole('button', { name: 'Apply to draft', exact: true }).click()
+
+  const draft = await viewDraft(page)
+  expect(channelMembersOf(draft)).toEqual(expectedAfterAdd)
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
+  const unchanged = await request.get(exportUrl)
+  expect(await unchanged.body()).toEqual(historicalBody)
+  expect(unchanged.headers().etag).toBe(historicalEtag)
+  await page.getByRole('button', { name: 'Save revision', exact: true }).click()
+  await expect(page.getByText('Revision 2 saved.', { exact: true })).toBeVisible({ timeout: 15_000 })
+  const history = await (await request.get(revisions(id))).json() as { id: string }[]
+  expect(history).toHaveLength(2)
+  const canonicalMembers = await channelMembersFromRevision(request, id, history[1]!.id)
+  const removedMember = canonicalMembers[1]!
+  const expectedRemaining = canonicalMembers.filter((member) => member !== removedMember)
+  const stillUnchanged = await request.get(exportUrl)
+  expect(await stillUnchanged.body()).toEqual(historicalBody)
+  expect(stillUnchanged.headers().etag).toBe(historicalEtag)
+
+  const reopened = await openChannelEditor(page)
+  await openChannelMembers(reopened)
+  await reopened.getByRole('button', { name: 'Remove Member ports 2', exact: true }).click()
+  const removal = reopened.locator('[data-control-membership="change"]')
+  await expect(removal).toHaveAttribute('data-control-membership-outcome', 'allowed')
+  await expect(removal).toContainText(/member\(s\) removed/)
+  await reopened.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  const removedRow = reopened.getByRole('table', { name: 'Port changes' })
+    .getByRole('row', { name: /Member ports/ })
+  await expect(removedRow.getByRole('cell').nth(3)).toContainText(interfaceName(plan, removedMember))
+  await expect(removedRow.getByRole('cell').nth(4)).not.toContainText(interfaceName(plan, removedMember))
+  await reopened.getByRole('button', { name: 'Apply to draft', exact: true }).click()
+  const repaired = await viewDraft(page)
+  expect(channelMembersOf(repaired)).toEqual(expectedRemaining)
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(2)
+})
+
+test('keeps UNKNOWN added-member evidence editable while combining proposed LACP and Port-Channel', async ({ page, request }, info) => {
+  test.setTimeout(120_000)
+  const id = await createEvent(request, 'Synthetic channel membership UNKNOWN')
+  const plan = channelPlan(id, { image: '17.12.2r' })
+  const saved = await planRecord(request, plan)
+  const exportUrl = revisions(id) + '/' + saved.id + '/export'
+  const historical = await request.get(exportUrl)
+  const historicalBody = await historical.body()
+  const historicalEtag = historical.headers().etag
+  const interfaces = plan.physical_interfaces as RecordValue[]
+  const third = String(interfaces[2]!.id!)
+  const exchanges = captureCapabilityPreviews(page)
+  await openWorkspace(page, id)
+  const modal = await openChannelEditor(page)
+  const members = await openChannelMembers(modal)
+  await members.getByRole('button', { name: 'Add entry', exact: true }).click()
+  await members.getByLabel('Member ports 3', { exact: true }).selectOption(third)
+  const membership = modal.locator('[data-control-membership="change"]')
+  await expect(membership).toHaveAttribute('data-control-membership-outcome', 'warning', { timeout: 15_000 })
+  await expect(membership.locator('[data-control-member="' + third + '"]'))
+    .toHaveAttribute('data-control-outcome', 'warning')
+  const panel = modal.getByRole('region', { name: 'Cisco capability evidence' })
+  await expect(panel.getByText('UNKNOWN', { exact: true }).first()).toBeVisible()
+  await page.screenshot({ path: info.outputPath('channel-membership-unknown-1280.png') })
+  await expect.poll(() => exchanges.filter((exchange) => {
+    const channel = (exchange.body.plan.port_channels as RecordValue[])[0]!
+    const ids = (channel.member_ids as string[])
+    return ids.includes(third) && exchange.response
+  }).length, { timeout: 10_000 }).toBeGreaterThan(0)
+  const unknownExchange = exchanges.find((exchange) => {
+    const channel = (exchange.body.plan.port_channels as RecordValue[])[0]!
+    return (channel.member_ids as string[]).includes(third) && exchange.response
+  })!
+  const channelDecisions = unknownExchange.response!.decisions
+    .filter((decision) => decision.capability_id === 'port-channel' || decision.capability_id === 'lacp')
+  expect(channelDecisions.length).toBeGreaterThan(0)
+  for (const decision of channelDecisions) {
+    expect(decision.verdict).toBe('unknown')
+    expect(decision.reason_code).toBe('software-is-rommon')
+  }
+
+  await modal.getByLabel('LACP mode operation', { exact: true }).selectOption('set')
+  await modal.getByLabel('LACP mode', { exact: true }).selectOption('active')
+  await expect(membership.getByText(/LACP negotiation evidence is also required/)).toBeVisible()
+  await expect(membership).toHaveAttribute('data-control-membership-outcome', 'warning')
+  await modal.getByLabel('LACP mode', { exact: true }).selectOption('static')
+  await expect(membership.getByText(/LACP negotiation evidence is also required/)).toHaveCount(0)
+  await expect(membership).toHaveAttribute('data-control-membership-outcome', 'warning')
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  const controls = modal.getByRole('table', { name: 'Capability controls for the proposed change' })
+  await expect(controls.getByRole('row', { name: /Member ports/ }))
+    .toHaveAttribute('data-control-outcome', 'warning')
+  await expect(modal.getByRole('button', { name: 'Apply to draft', exact: true })).toBeEnabled()
+  await modal.getByRole('button', { name: 'Apply to draft', exact: true }).click()
+  const draft = await viewDraft(page)
+  expect((draft.port_channels as RecordValue[])[0]!.lacp).toBe('static')
+  expect(channelMembersOf(draft)).toContain(third)
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
+  await page.getByRole('button', { name: 'Save revision', exact: true }).click()
+  await expect(page.getByText('Revision 2 saved.', { exact: true })).toBeVisible({ timeout: 15_000 })
+  const unchanged = await request.get(exportUrl)
+  expect(await unchanged.body()).toEqual(historicalBody)
+  expect(unchanged.headers().etag).toBe(historicalEtag)
+})
+
+test('replacement members and late responses cannot restore the old evidence', async ({ page, request }) => {
+  test.setTimeout(120_000)
+  const id = await createEvent(request, 'Synthetic channel membership replacement')
+  const plan = channelPlan(id)
+  const saved = await planRecord(request, plan)
+  const exportUrl = revisions(id) + '/' + saved.id + '/export'
+  const historical = await request.get(exportUrl)
+  const historicalBody = await historical.body()
+  const historicalEtag = historical.headers().etag
+  const interfaces = plan.physical_interfaces as RecordValue[]
+  const [, , third] = interfaces.map((item) => String(item.id))
+  const initialMembers = await channelMembersFromRevision(request, id, saved.id)
+  expect(initialMembers).toHaveLength(2)
+  const removedMember = initialMembers[1]!
+  const expectedProposed = [initialMembers[0]!, third!]
+  await page.route('**/api/v1/events/*/plan/capability-preview', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    await route.continue()
+  })
+  const exchanges = captureCapabilityPreviews(page)
+  await openWorkspace(page, id)
+  const modal = await openChannelEditor(page)
+  const members = await openChannelMembers(modal)
+  await modal.getByRole('button', { name: 'Remove Member ports 2', exact: true }).click()
+  await members.getByRole('button', { name: 'Add entry', exact: true }).click()
+  await members.getByLabel('Member ports 2', { exact: true }).selectOption(third!)
+  const membership = modal.locator('[data-control-membership="change"]')
+  await expect(membership).toHaveAttribute('data-control-membership-outcome', 'allowed', { timeout: 20_000 })
+  await expect(membership.locator('[data-control-member="' + third + '"]'))
+    .toHaveAttribute('data-control-outcome', 'allowed')
+  await expect(modal.locator('.capability-target')).toHaveCount(2)
+  await expect.poll(() => exchanges.filter((exchange) =>
+    membersAre(exchange.body.plan, expectedProposed) && exchange.response).length,
+  { timeout: 20_000 }).toBe(2)
+  const replaced = exchanges.filter((exchange) =>
+    membersAre(exchange.body.plan, expectedProposed) && exchange.response)
+  for (const exchange of replaced) {
+    expect(exchange.response!.decisions.every((decision) =>
+      decision.affected.interface_id === exchange.body.interface_id)).toBe(true)
+    expect(channelMembersOf(exchange.body.plan)).toEqual(expectedProposed)
+  }
+  await page.waitForTimeout(1_200)
+  await expect(modal.locator('.capability-target')).toHaveCount(2)
+  await expect(membership.locator('[data-control-member]')).toHaveCount(1)
+  await expect(membership.locator('[data-control-member="' + removedMember + '"]')).toHaveCount(0)
+  await expect(membership).toHaveAttribute('data-control-membership-outcome', 'allowed')
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  const memberRow = modal.getByRole('table', { name: 'Port changes' })
+    .getByRole('row', { name: /Member ports/ })
+  await expect(memberRow.getByRole('cell').nth(3))
+    .toContainText(interfaceName(plan, removedMember))
+  await expect(memberRow.getByRole('cell').nth(4)).toContainText(interfaceName(plan, third!))
+  await expect(memberRow.getByRole('cell').nth(4))
+    .not.toContainText(interfaceName(plan, removedMember))
+  const controls = modal.getByRole('table', { name: 'Capability controls for the proposed change' })
+  await expect(controls.getByRole('row', { name: /Member ports/ })
+    .getByRole('cell').nth(2)).toHaveText(interfaceName(plan, third!))
+  await modal.getByRole('button', { name: 'Apply to draft', exact: true }).click()
+  const draft = await viewDraft(page)
+  expect(channelMembersOf(draft)).toEqual(expectedProposed)
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
+  const unchanged = await request.get(exportUrl)
+  expect(await unchanged.body()).toEqual(historicalBody)
+  expect(unchanged.headers().etag).toBe(historicalEtag)
+})
+
+test('allows a member-order-only change without capability evidence or dropped members', async ({ page, request }) => {
+  test.setTimeout(90_000)
+  const id = await createEvent(request, 'Synthetic channel member order')
+  const plan = channelPlan(id)
+  const saved = await planRecord(request, plan)
+  const exportUrl = revisions(id) + '/' + saved.id + '/export'
+  const historical = await request.get(exportUrl)
+  const historicalBody = await historical.body()
+  const historicalEtag = historical.headers().etag
+  const initialMembers = await channelMembersFromRevision(request, id, saved.id)
+  expect(initialMembers).toHaveLength(2)
+  const expectedSwapped = [initialMembers[1]!, initialMembers[0]!]
+  await openWorkspace(page, id)
+  const modal = await openChannelEditor(page)
+  await openChannelMembers(modal)
+  await modal.getByRole('button', { name: 'Move Member ports 2 up', exact: true }).click()
+  const membership = modal.locator('[data-control-membership="change"]')
+  await expect(membership).toHaveAttribute('data-control-membership-outcome', 'allowed')
+  await expect(membership.locator('[data-control-member]')).toHaveCount(0)
+  await expect(membership).toContainText(/Member order changed/)
+  await expect(modal.getByRole('alert').filter({ hasText: 'Apply is blocked' })).toHaveCount(0)
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  const memberRow = modal.getByRole('table', { name: 'Port changes' })
+    .getByRole('row', { name: /Member ports/ })
+  await expect(memberRow.getByRole('cell').nth(3)).toContainText(interfaceName(plan, initialMembers[0]!))
+  await expect(memberRow.getByRole('cell').nth(4)).toContainText(interfaceName(plan, initialMembers[1]!))
+  await modal.getByRole('button', { name: 'Apply to draft', exact: true }).click()
+  const draft = await viewDraft(page)
+  expect(channelMembersOf(draft)).toEqual(expectedSwapped)
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
+  const unchanged = await request.get(exportUrl)
+  expect(await unchanged.body()).toEqual(historicalBody)
+  expect(unchanged.headers().etag).toBe(historicalEtag)
+})
+
+test('judges a mixed Stack member by its own evidence instead of the first member', async ({ page, request }) => {
+  test.setTimeout(120_000)
+  const id = await createEvent(request, 'Synthetic mixed Stack channel member')
+  const plan = mixedStackChannelPlan(id)
+  const saved = await planRecord(request, plan)
+  const exportUrl = revisions(id) + '/' + saved.id + '/export'
+  const historical = await request.get(exportUrl)
+  const historicalBody = await historical.body()
+  const historicalEtag = historical.headers().etag
+  const interfaces = plan.physical_interfaces as RecordValue[]
+  const second = String(interfaces[1]!.id!)
+  const assignmentId = String((plan.assignments as RecordValue[])[0]!.id!)
+  const firstDecision = await previewDraft(request, id, plan, assignmentId,
+    String(interfaces[0]!.id!), ['port-channel'])
+  expect(decisionOf(firstDecision, 'port-channel').verdict).toBe('supported')
+  const secondDecision = await previewDraft(request, id, plan, assignmentId,
+    second, ['port-channel'])
+  expect(decisionOf(secondDecision, 'port-channel').verdict).toBe('unknown')
+  expect(decisionOf(secondDecision, 'port-channel').reason_code).toBe('identity-incomplete')
+  await openWorkspace(page, id)
+  const modal = await openChannelEditor(page)
+  const members = await openChannelMembers(modal)
+  await members.getByRole('button', { name: 'Add entry', exact: true }).click()
+  await members.getByLabel('Member ports 2', { exact: true }).selectOption(second)
+  const membership = modal.locator('[data-control-membership="change"]')
+  await expect(membership).toHaveAttribute('data-control-membership-outcome', 'warning', { timeout: 15_000 })
+  await expect(membership.locator('[data-control-member="' + second + '"]'))
+    .toHaveAttribute('data-control-outcome', 'warning')
+  await expect(membership.locator('[data-control-member]')).toHaveCount(1)
+  const panel = modal.getByRole('region', { name: 'Cisco capability evidence' })
+  await expect(panel.locator('.capability-target')).toHaveCount(2)
+  await expect(panel.getByText('SUPPORTED', { exact: true }).first()).toBeVisible()
+  await expect(panel.getByText('UNKNOWN', { exact: true }).first()).toBeVisible()
+  await expect(modal.getByRole('alert').filter({ hasText: 'Apply is blocked' })).toHaveCount(0)
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  const controls = modal.getByRole('table', { name: 'Capability controls for the proposed change' })
+  const row = controls.getByRole('row', { name: /Member ports/ })
+  await expect(row).toHaveAttribute('data-control-outcome', 'warning')
+  await expect(row.getByRole('cell').nth(2)).toHaveText('Gi2/0/1')
+  await expect(modal.getByRole('button', { name: 'Apply to draft', exact: true })).toBeEnabled()
+  await modal.getByRole('button', { name: 'Apply to draft', exact: true }).click()
+  const draft = await viewDraft(page)
+  expect(channelMembersOf(draft)).toHaveLength(2)
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
+  await page.getByRole('button', { name: 'Save revision', exact: true }).click()
+  await expect(page.getByText('Revision 2 saved.', { exact: true })).toBeVisible({ timeout: 15_000 })
+  const unchanged = await request.get(exportUrl)
+  expect(await unchanged.body()).toEqual(historicalBody)
+  expect(unchanged.headers().etag).toBe(historicalEtag)
 })

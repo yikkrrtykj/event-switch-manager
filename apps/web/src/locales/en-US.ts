@@ -668,4 +668,12 @@ export const enUS = {
   controlOutcomeWarning: "Warning only",
   controlOutcomePending: "Not current",
   controlOutcomeBlocked: "Hard blocked",
+  controlMembershipTitle: "Channel membership",
+  controlMembershipLacpRequired: "LACP negotiation evidence is also required by this mode.",
+  controlMembershipBlocked: "The proposed channel adds members whose documented Port-Channel capability does not support this aggregation: {targets}.",
+  controlMembershipWarning: "The proposed channel adds members with UNKNOWN capability evidence for this mode: {targets}. Planning intent only.",
+  controlMembershipPending: "Member capability evidence is not current for: {targets}. No hard limit is applied.",
+  controlMembershipRemoved: "{count} member(s) removed; removing members is a repair and is not blocked by removed-member evidence.",
+  controlMembershipReordered: "Member order changed; the member set is unchanged.",
+  controlMembershipKept: "Unchanged members are preserved; their historical evidence does not block this edit.",
 } as const

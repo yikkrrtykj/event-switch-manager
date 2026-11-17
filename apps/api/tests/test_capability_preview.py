@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+﻿from collections.abc import Iterator
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -85,6 +85,7 @@ def draft_plan(
 
 def channel_plan(
     event_id: str, *, lacp: str = "active", member_ids: tuple[str, ...] | None = None,
+    image: str = "17.12.4",
 ) -> dict[str, Any]:
     trunk = {"mode": "trunk", "native_vlan": 10, "allowed_vlans": [10, 20]}
     members = member_ids or (uid(10), uid(11))
@@ -99,7 +100,7 @@ def channel_plan(
         "assignments": [{
             "id": uid(2), "hostname": "channel-access", "role": "access",
             "family": "catalyst-9300", "physical_device_id": uid(1),
-            "software": {"image": "17.12.4", "license": "Network Advantage"},
+            "software": {"image": image, "license": "Network Advantage"},
         }],
         "physical_interfaces": [
             {"id": uid(10), "assignment_id": uid(2), "physical_device_id": uid(1),
@@ -428,6 +429,37 @@ def test_draft_channel_changes_are_in_fingerprints_without_persisting(client: Te
         assert result["decisions"][0]["affected"]["interface_name"] == "Gi1/0/1"
         assert "revision_id" not in result["decisions"][0]["affected"]
     assert client.get(f"{API}/events/{event_id}/plan-revisions").json() == []
+
+
+def test_draft_port_channel_evidence_range(client: TestClient) -> None:
+    """Pin the verdict range that the WEB-02C member policy may rely on.
+
+    CIS-01A currently has no UNSUPPORTED path for Port-Channel or LACP, so the
+    UI must not claim such API evidence. The synthetic browser-policy tests cover
+    that hard-block branch separately.
+    """
+    event_id = event(client)
+    known = preview(
+        client, event_id, channel_plan(event_id), ("port-channel", "lacp"),
+        interface_id=uid(10),
+    )
+    assert [(decision["verdict"], decision["reason_code"]) for decision in known["decisions"]] == [
+        ("supported", "feature-documented"), ("supported", "feature-documented"),
+    ]
+    verdicts: set[str] = set()
+    for image in ("17.12.4", "17.12.2r", "17.12.99"):
+        result = preview(
+            client, event_id, channel_plan(event_id, image=image), ("port-channel", "lacp"),
+            interface_id=uid(10),
+        )
+        verdicts.update(decision["verdict"] for decision in result["decisions"])
+    assert verdicts <= {"supported", "unknown"}
+    rommon = preview(
+        client, event_id, channel_plan(event_id, image="17.12.2r"),
+        ("port-channel", "lacp"), interface_id=uid(10),
+    )
+    for decision in rommon["decisions"]:
+        assert (decision["verdict"], decision["reason_code"]) == ("unknown", "software-is-rommon")
 
 
 def test_draft_imported_claims_cannot_promote_evidence(client: TestClient) -> None:

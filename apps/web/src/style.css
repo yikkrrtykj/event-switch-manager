@@ -339,6 +339,8 @@ dialog:has(.port-editor) { width: min(68rem, calc(100% - 1rem)); }
   background: var(--warning-surface); color: var(--warning);
 }
 .port-control-reason { color: var(--muted-foreground); font-size: var(--size-small); overflow-wrap: anywhere; }
+.port-membership { border-top: 1px dashed var(--border); padding-top: .4rem; }
+.port-membership-title { margin: 0; font-weight: 650; font-size: var(--size-small); }
 .port-control-matrix { margin-top: .35rem; border-top: 1px dashed var(--border); padding-top: .35rem; }
 .port-control-matrix-title { margin: 0; font-weight: 650; font-size: var(--size-small); }
 .port-control-matrix ul, .port-control-targets {

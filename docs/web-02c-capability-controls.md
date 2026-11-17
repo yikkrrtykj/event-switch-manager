@@ -48,8 +48,8 @@ VERIFIED badge remain visible on every result.
 | PoE | `static` requires a documented PoE-capable port: ALLOWED when supported, HARD_BLOCKED when the current evidence says UNSUPPORTED. `auto` on non-PoE hardware is WARNING_ONLY because it still needs PoE hardware when a powered device asks. `never` is ALLOWED: explicitly turning PoE off is a safe intent that needs no power budget. | Current `poe` decision (hardware evidence, independent of software identity). |
 | Access / Trunk / Routed | Each mode candidate is judged by its own feature evidence: `access`, `trunk` and `routed-port`. UNSUPPORTED blocks only that candidate; UNKNOWN warns. | Current feature decisions. |
 | PortFast / BPDU Guard | Explicit enabling candidates are judged by their feature evidence. The `disabled`/off candidate is always ALLOWED as a safe planning intent. | Current `portfast` and `bpdu-guard` decisions. |
-| LACP | `active`/`passive` require the `lacp` capability. `static` requires only the `port-channel` capability, so a static aggregation is never blocked because LACP negotiation is UNKNOWN. UNSUPPORTED blocks only the affected candidates; UNKNOWN warns. | Current `lacp` and `port-channel` decisions, one per selected member target. |
-| Port-Channel members | Adding/resizing an aggregate is judged against the `port-channel` capability for the proposed member targets; no target is silently skipped. | Current `port-channel` decision per member target. |
+| LACP | `active`/`passive` require **both** the `port-channel` aggregation capability and the `lacp` negotiation capability. `static` requires only the `port-channel` capability, so a static aggregation is never blocked because LACP negotiation is UNKNOWN. UNSUPPORTED blocks only the affected candidate set; UNKNOWN warns; a stale required result is NOT CURRENT. | Current `lacp` and `port-channel` decisions, one per selected member target. |
+| Port-Channel members | Member changes are compared as Original member IDs vs Proposed member IDs. Added members are evaluated individually against their own `port-channel` decision, plus `lacp` when the proposed mode is active/passive. Removed members are a repair and cannot block the edit. Kept members are preserved untouched. Order-only changes need no capability evidence. | Current `port-channel` and `lacp` decisions for each **added** target. |
 | IPv4 address on a routed port | Judged by `routed-port` and `ipv4-routing`. | Current feature decisions. |
 | Stack member / Stack layout | No hard control: a Stack member number is inventory identity, not a device write. The Stack capability and evidence stay visible as an advisory hint. A candidate Stack member number is never silently rewritten. | Current `stack` decision. |
 | Physical port and media | The documented `port_groups` medium and rates drive Speed/Duplex. UNKNOWN media or a missing transceiver remains WARNING_ONLY. | Current `port-media`, `speed` and `duplex` decisions. |
@@ -60,6 +60,46 @@ Speed, Duplex and PoE candidates use the documented port range for the exact
 physical interface. The maximum rate of the device family is never applied to
 every port, and a current `speed: SUPPORTED` verdict is never used to infer a
 different speed candidate.
+
+## Port-Channel membership changes
+
+The Port-Channel editor compares the Original Channel record with the Proposed
+Channel record and evaluates the membership delta explicitly. Member changes do
+not go through a synthetic Set operation: the policy receives the actual
+Original/Proposed member ID lists and the proposed LACP mode.
+
+| Change | Behaviour |
+| --- | --- |
+| Added member | Judged against that member's own current capability evidence. `port-channel` is required; `lacp` is also required when the proposed mode is `active` or `passive`. UNSUPPORTED hard-blocks; UNKNOWN is warning-only; loading/stale/error is NOT CURRENT and never reuses an old verdict. |
+| Removed member | Treated as a repair. The removed member's evidence cannot block the edit, and its historical value is not re-evaluated. |
+| Replaced member | The new target is judged from its own evidence. Removed-member evidence is never borrowed. |
+| Unchanged historical member | Preserved as-is. An unchanged UNSUPPORTED member does not block unrelated member edits and is not auto-cleared. |
+| Order-only change | Same member set, no capability requirement. The exact proposed order is carried into the draft. |
+| Mixed devices / Stack members | Every added target is judged separately; the first member's result is never applied to the rest. |
+| Apply | The confirmation step rechecks the policy with the actual Proposed Channel membership before the draft can change. A hard-blocked addition disables Apply and lists the affected members. |
+
+### Aggregation capability matrix
+
+| Proposed LACP mode | Required capabilities for the Channel and each added member | LACP UNKNOWN | LACP UNSUPPORTED |
+| --- | --- | --- | --- |
+| `active` | `port-channel` **and** `lacp` | WARNING_ONLY | HARD_BLOCKED |
+| `passive` | `port-channel` **and** `lacp` | WARNING_ONLY | HARD_BLOCKED |
+| `static` | `port-channel` only | WARNING_ONLY from Port-Channel only; LACP state is irrelevant | LACP state is irrelevant |
+
+A required capability that is loading/stale/error makes the combined result NOT
+CURRENT. Any explicitly UNSUPPORTED required capability makes it HARD_BLOCKED,
+even when the other required capability is supported.
+
+### Current CIS-01A aggregation verdict range
+
+The checked Cisco catalog currently produces only `supported` and `unknown` for
+`port-channel` and `lacp` (known release = supported; ROMMON, unmatched release,
+missing License scope = UNKNOWN). It has **no UNSUPPORTED path** for those two
+capabilities. The browser therefore must not claim real-API UNSUPPORTED
+Port-Channel evidence. The HARD_BLOCKED aggregation branch is covered by
+explicitly labelled synthetic Vitest cases; real API + Playwright cover
+member-only edits, replacement, UNKNOWN, mixed Stack targets, Apply data and
+identity preservation.
 
 ## Reset and Keep
 
@@ -122,19 +162,25 @@ with a supported candidate. Fields left on Keep are not rewritten.
 ## Tests
 
 - Vitest: candidate matrix for PoE, Speed, Duplex, mode, PortFast, BPDU Guard,
-  LACP vs static aggregation, reset defaults, batch per-target judgement,
-  preserved historical values, stale/loading/error isolation and advisory
-  capabilities.
-- API: the existing draft preview contract stays the only capability source;
-  port groups, PID/software/License/ROMMON/interface/Stack and read-only
-  revision identity keep their existing regressions.
+  LACP vs static aggregation, combined Port-Channel + LACP requirements,
+  member-add/remove/replace/keep/order deltas, mixed targets, explicitly
+  synthetic UNSUPPORTED aggregation hard-blocks, reset defaults, batch
+  per-target judgement, preserved historical values, stale/loading/error
+  isolation and advisory capabilities.
+- API: the draft preview contract stays the only capability source; port
+  groups, PID/software/License/ROMMON/interface/Stack, the actual
+  Port-Channel/LACP verdict range and read-only revision identity keep their
+  existing regressions.
 - Playwright (packaged build and Vite proxy): non-PoE static block, PoE-capable
   allowance, copper rate limits, optical UNKNOWN, Speed/Duplex linkage,
   ROMMON/unknown patch warning-only, License and PID/interface re-judgement,
   LACP/static separation, mixed batch, no silent partial update, Keep/Reset/Set,
-  historical unsupported preservation, UNKNOWN save, stale/error without reuse,
-  old asynchronous response isolation, Before/After consistency, bilingual
-  states, revision identity and the existing LACP/Transit/VPN safety tests.
+  member-only add/remove/replace/order edits, mixed Stack member judgement,
+  UNKNOWN member intent save, late member-response isolation, membership
+  Before/After and applied JSON equality, no extra revision, historical
+  unsupported preservation, stale/error without reuse, old asynchronous
+  response isolation, Before/After consistency, bilingual states, revision
+  identity and the existing LACP/Transit/VPN safety tests.
 - Hallmark v2.0.0 static lint and browser review at 320, 800, 1280, 1440 and
   1920 CSS pixels, keyboard/focus, screen-reader text, error states and reduced
   motion.

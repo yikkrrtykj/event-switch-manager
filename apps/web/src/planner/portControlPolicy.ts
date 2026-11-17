@@ -65,6 +65,33 @@ export type ControlReviewRow = {
   operation: 'set' | 'reset'
   value: Value | undefined
   verdict: ControlVerdict
+  /** Human label for membership rows; regular rows use the field candidate. */
+  candidateLabel?: string
+}
+
+export type MembershipChange = {
+  original: readonly string[]
+  proposed: readonly string[]
+  /** Proposed channel LACP mode; active/passive also require LACP evidence. */
+  lacp?: Value
+}
+
+export type MemberControlRow = {
+  targetKey: string
+  interfaceId: string
+  name: string | null
+  verdict: ControlVerdict
+}
+
+export type MembershipControl = {
+  added: string[]
+  removed: string[]
+  kept: string[]
+  reordered: boolean
+  requiredLacp: boolean
+  rows: MemberControlRow[]
+  verdicts: ControlVerdict[]
+  outcome: ControlOutcome
 }
 
 export type RelatedCapability = {
@@ -84,6 +111,8 @@ export type PortControlPolicy = {
   pending: ControlReviewRow[]
   preserved: { fieldKey: string; value: Value | undefined; verdicts: ControlVerdict[] }[]
   related: RelatedCapability[]
+  /** Only present for the Port-Channel editor when the member list changes. */
+  membership?: MembershipControl
   hasBlocked: boolean
   hasWarning: boolean
   hasPending: boolean
@@ -96,10 +125,13 @@ export type ControlPolicyInput = {
   operations: Operations
   fields: Field[]
   aggregate?: boolean
+  membership?: MembershipChange
 }
 
 type TargetEvidence = {
   key: string
+  interfaceId: string | null
+  name: string | null
   status: EvidenceStatus
   current: boolean
   record: RecordValue
@@ -129,6 +161,23 @@ function worst(outcomes: ControlOutcome[]): ControlOutcome {
   )
 }
 
+/**
+ * Combining several required capabilities differs from combining independent
+ * targets: a missing/stale result for one required capability is NOT CURRENT,
+ * not a warning, because the requirement set cannot be judged yet.
+ */
+const requirementRank: Readonly<Record<ControlOutcome, number>> = {
+  allowed: 0, warning: 1, pending: 2, blocked: 3,
+}
+
+function combineRequirements(parts: ControlVerdict[]): ControlVerdict {
+  let chosen = parts[0]!
+  for (const part of parts) {
+    if (requirementRank[part.outcome] > requirementRank[chosen.outcome]) chosen = part
+  }
+  return chosen
+}
+
 function stateStatus(state?: CapabilityState): EvidenceStatus {
   if (!state) return 'idle'
   if (state.status === 'current') return 'current'
@@ -148,6 +197,8 @@ function evidenceFor(input: ControlPolicyInput): TargetEvidence[] {
     const current = status === 'current'
     return {
       key: target.key,
+      interfaceId: target.interfaceId ?? null,
+      name: target.name ?? null,
       status,
       current,
       record: records[index] ?? {},
@@ -313,9 +364,15 @@ function disabledFeature(target: TargetEvidence, capability: CapabilityId): Cont
 }
 
 function lacpCandidate(target: TargetEvidence, value: Value | undefined): ControlVerdict {
-  // Static aggregation needs Port-Channel support, not LACP negotiation.
+  // Active/passive negotiation needs both the Port-Channel aggregate capability
+  // and LACP. Static aggregation needs only Port-Channel, never LACP.
   if (value === 'static') return decisionVerdict(target, 'port-channel')
-  if (value === 'active' || value === 'passive') return decisionVerdict(target, 'lacp')
+  if (value === 'active' || value === 'passive') {
+    return combineRequirements([
+      decisionVerdict(target, 'port-channel'),
+      decisionVerdict(target, 'lacp'),
+    ])
+  }
   return warningCandidate(target, value)
 }
 
@@ -353,7 +410,6 @@ function candidateVerdict(
     case 'settings.bpdu_guard': return bpduGuardCandidate(target, value)
     case 'settings.address': return addressCandidate(target, value)
     case 'lacp': return lacpCandidate(target, value)
-    case 'member_ids': return decisionVerdict(target, 'port-channel')
     default: return unrestricted(target, value)
   }
 }
@@ -375,8 +431,6 @@ function resetVerdict(target: TargetEvidence, field: Field): ControlVerdict {
     case 'settings.portfast': return disabledFeature(target, 'portfast')
     case 'settings.bpdu_guard': return disabledFeature(target, 'bpdu-guard')
     case 'lacp': return lacpCandidate(target, 'active')
-    case 'member_ids': return verdict(target, 'allowed', 'port-channel',
-      'control-not-restricted', null, [], target.status)
     default:
       return verdict(target, 'allowed', null, 'control-default', null, [], target.status)
   }
@@ -447,6 +501,65 @@ function keptCandidate(targets: TargetEvidence[], field: Field): CandidateContro
   }
 }
 
+function uniqueIds(values: readonly string[]): string[] {
+  return [...new Set(values)]
+}
+
+/**
+ * Judge only the Port-Channel membership delta.
+ *
+ * Added members are evaluated individually against their own target evidence.
+ * Removed members are a repair and their evidence cannot block the edit. Kept
+ * members are preserved untouched. Member order alone changes no capability.
+ */
+function membershipControl(
+  change: MembershipChange, targets: TargetEvidence[],
+): MembershipControl {
+  const original = uniqueIds(change.original)
+  const proposed = uniqueIds(change.proposed)
+  const before = new Set(original)
+  const after = new Set(proposed)
+  const added = proposed.filter((id) => !before.has(id))
+  const removed = original.filter((id) => !after.has(id))
+  const kept = proposed.filter((id) => before.has(id))
+  const reordered = added.length === 0 && removed.length === 0 &&
+    (original.length !== proposed.length || original.some((id, index) => proposed[index] !== id))
+  const requiredLacp = change.lacp === 'active' || change.lacp === 'passive'
+  const byInterface = new Map<string, TargetEvidence>()
+  for (const target of targets) {
+    if (target.interfaceId) byInterface.set(target.interfaceId, target)
+  }
+  const rows: MemberControlRow[] = added.map((interfaceId) => {
+    const target = byInterface.get(interfaceId)
+    if (!target) {
+      const synthetic: TargetEvidence = {
+        key: 'member:' + interfaceId, interfaceId, name: null, status: 'idle',
+        current: false, record: {}, decisions: new Map(),
+      }
+      return {
+        targetKey: synthetic.key, interfaceId, name: null,
+        verdict: pending(synthetic, 'port-channel'),
+      }
+    }
+    const parts = [decisionVerdict(target, 'port-channel')]
+    if (requiredLacp) parts.push(decisionVerdict(target, 'lacp'))
+    return {
+      targetKey: target.key, interfaceId, name: target.name,
+      verdict: combineRequirements(parts),
+    }
+  })
+  return {
+    added,
+    removed,
+    kept,
+    reordered,
+    requiredLacp,
+    rows,
+    verdicts: rows.map((row) => row.verdict),
+    outcome: rows.length ? worst(rows.map((row) => row.verdict.outcome)) : 'allowed',
+  }
+}
+
 export function evaluateControlPolicy(input: ControlPolicyInput): PortControlPolicy {
   const targets = evidenceFor(input)
   const fields: Record<string, FieldControl> = {}
@@ -514,6 +627,25 @@ export function evaluateControlPolicy(input: ControlPolicyInput): PortControlPol
     }
   }
 
+  const membership = input.membership
+    ? membershipControl(input.membership, targets)
+    : undefined
+  if (membership) {
+    for (const row of membership.rows) {
+      review.push({
+        targetKey: row.targetKey,
+        fieldKey: 'member_ids',
+        operation: 'set',
+        value: row.interfaceId,
+        candidateLabel: row.name ?? row.interfaceId,
+        verdict: row.verdict,
+      })
+    }
+    if (membership.outcome === 'blocked') hasBlocked = true
+    if (membership.outcome === 'warning') hasWarning = true
+    if (membership.outcome === 'pending') hasPending = true
+  }
+
   const related = RELATED_CAPABILITIES.map((capability) => ({
     capability,
     targets: targets.map((target) => {
@@ -534,6 +666,7 @@ export function evaluateControlPolicy(input: ControlPolicyInput): PortControlPol
     pending: review.filter((row) => row.verdict.outcome === 'pending'),
     preserved,
     related,
+    membership,
     hasBlocked,
     hasWarning,
     hasPending,

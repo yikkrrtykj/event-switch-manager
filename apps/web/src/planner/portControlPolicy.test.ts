@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { catalog } from './catalog'
 import type { Field } from './catalog'
 import { evaluateControlPolicy } from './portControlPolicy'
+import type { MembershipChange } from './portControlPolicy'
 import { isPortSetting } from './portSettings'
 import type { Operations } from './portSettings'
 import type {
@@ -91,6 +92,7 @@ function evaluate(options: {
   operations?: Operations
   fields?: Field[]
   aggregate?: boolean
+  membership?: MembershipChange
 }) {
   return evaluateControlPolicy({
     plan,
@@ -99,6 +101,64 @@ function evaluate(options: {
     operations: options.operations ?? {},
     fields: options.fields ?? portFields,
     aggregate: options.aggregate,
+    membership: options.membership,
+  })
+}
+
+function channelRecord(members: string[], lacp = 'active'): RecordValue {
+  return {
+    interface_id: 'logical-1', number: 1, member_ids: members, lacp,
+    settings: { mode: 'trunk', native_vlan: 10, allowed_vlans: [10] },
+  }
+}
+
+function memberTargets(members: string[], channel: RecordValue): CapabilityTarget[] {
+  return members.map((id, index) => portTarget(
+    `assignment-1:${id}:standalone`,
+    port(id, { mode: 'trunk' }),
+    { name: `Gi1/0/${index + 1}`, channel },
+  ))
+}
+
+function memberState(portChannel: CapabilityVerdict, lacp: CapabilityVerdict = 'supported') {
+  return state([
+    decision('port-channel', portChannel, {
+      reasonCode: portChannel === 'supported' ? 'feature-documented'
+        : portChannel === 'unknown' ? 'release-unmatched' : 'feature-license-unverified',
+    }),
+    decision('lacp', lacp, {
+      reasonCode: lacp === 'supported' ? 'feature-documented'
+        : lacp === 'unknown' ? 'release-unmatched' : 'feature-license-unverified',
+    }),
+  ])
+}
+
+function channelPolicy(options: {
+  original: string[]
+  proposed: string[]
+  lacp?: string
+  verdicts?: Record<string, {
+    pc: CapabilityVerdict; lacp?: CapabilityVerdict; stale?: boolean
+  }>
+}) {
+  const channel = channelRecord(options.proposed, options.lacp ?? 'static')
+  const targets = memberTargets(options.proposed, channel)
+  const states: Record<string, CapabilityState> = {}
+  for (const target of targets) {
+    const entry = options.verdicts?.[target.interfaceId!]
+    states[target.key] = entry?.stale ? state([], 'stale')
+      : entry ? memberState(entry.pc, entry.lacp) : memberState('supported')
+  }
+  return evaluate({
+    targets,
+    states,
+    fields: channelFields,
+    aggregate: true,
+    membership: {
+      original: options.original,
+      proposed: options.proposed,
+      lacp: options.lacp ?? 'static',
+    },
   })
 }
 
@@ -247,49 +307,215 @@ describe('capability-driven control policy', () => {
       .toBe('warning')
   })
 
-  it('separates Port-Channel support from LACP negotiation for static aggregation', () => {
+  it('combines Port-Channel and LACP required capabilities for negotiation modes', () => {
     const key = 'assignment-1:interface-1:standalone'
     const channel: RecordValue = {
       interface_id: 'logical-1', number: 1, member_ids: ['interface-1'], lacp: 'static',
       settings: { mode: 'trunk', native_vlan: 10, allowed_vlans: [10] },
     }
     const targets = [portTarget(key, port('interface-1', { mode: 'trunk' }), { channel })]
-    const unsupportedLacp = evaluate({
-      targets,
-      states: {
-        [key]: state([
-          decision('lacp', 'unsupported'),
-          decision('port-channel', 'supported'),
-          decision('trunk', 'supported'),
-        ]),
-      },
-      fields: channelFields,
-      aggregate: true,
-    })
-    const lacp = unsupportedLacp.fields.lacp!
-    expect(lacp.candidates.find((candidate) => candidate.value === 'static')!.outcome).toBe('allowed')
-    expect(lacp.candidates.find((candidate) => candidate.value === 'active')!.outcome).toBe('blocked')
-    expect(lacp.candidates.find((candidate) => candidate.value === 'passive')!.outcome).toBe('blocked')
+    const negotiation = (portChannel: CapabilityVerdict, lacp: CapabilityVerdict) => {
+      const policy = evaluate({
+        targets,
+        states: {
+          [key]: state([
+            decision('port-channel', portChannel),
+            decision('lacp', lacp),
+          ]),
+        },
+        fields: channelFields,
+        aggregate: true,
+      })
+      const field = policy.fields.lacp!
+      return (value: string) => field.candidates.find((candidate) => candidate.value === value)!.outcome
+    }
 
-    const unsupportedChannel = evaluate({
-      targets,
-      states: {
-        [key]: state([
-          decision('lacp', 'supported'),
-          decision('port-channel', 'unsupported'),
-        ]),
-      },
-      fields: channelFields,
-      aggregate: true,
-    })
-    expect(unsupportedChannel.fields.lacp!.candidates
-      .find((candidate) => candidate.value === 'static')!.outcome).toBe('blocked')
-    expect(unsupportedChannel.fields.lacp!.candidates
-      .find((candidate) => candidate.value === 'active')!.outcome).toBe('allowed')
+    const bothSupported = negotiation('supported', 'supported')
+    expect(bothSupported('active')).toBe('allowed')
+    expect(bothSupported('passive')).toBe('allowed')
+    expect(bothSupported('static')).toBe('allowed')
+
+    const unsupportedLacp = negotiation('supported', 'unsupported')
+    expect(unsupportedLacp('static')).toBe('allowed')
+    expect(unsupportedLacp('active')).toBe('blocked')
+    expect(unsupportedLacp('passive')).toBe('blocked')
+
+    // Active/passive also require Port-Channel aggregation, not only LACP.
+    const unsupportedChannel = negotiation('unsupported', 'supported')
+    expect(unsupportedChannel('static')).toBe('blocked')
+    expect(unsupportedChannel('active')).toBe('blocked')
+    expect(unsupportedChannel('passive')).toBe('blocked')
+
+    const unknownChannel = negotiation('unknown', 'supported')
+    expect(unknownChannel('static')).toBe('warning')
+    expect(unknownChannel('active')).toBe('warning')
   })
 
-  it('keeps an unselected PoE candidate neutral instead of claiming an intent', () => {
-    const { targets, states } = poeState('unsupported')
+  it('judges only added members and records a membership row', () => {
+    const policy = channelPolicy({
+      original: ['interface-1', 'interface-2'],
+      proposed: ['interface-1', 'interface-2', 'interface-3'],
+    })
+    const membership = policy.membership!
+    expect(membership.added).toEqual(['interface-3'])
+    expect(membership.removed).toEqual([])
+    expect(membership.kept).toEqual(['interface-1', 'interface-2'])
+    expect(membership.outcome).toBe('allowed')
+    expect(membership.rows).toHaveLength(1)
+    expect(membership.rows[0]?.verdict.outcome).toBe('allowed')
+    const row = policy.review.find((entry) => entry.fieldKey === 'member_ids')!
+    expect(row.targetKey).toBe(membership.rows[0]!.targetKey)
+    expect(row.candidateLabel).toBe('Gi1/0/3')
+    expect(policy.hasBlocked).toBe(false)
+  })
+
+  it('warns for an UNKNOWN added member and never claims support', () => {
+    const policy = channelPolicy({
+      original: ['interface-1', 'interface-2'],
+      proposed: ['interface-1', 'interface-2', 'interface-3'],
+      verdicts: { 'interface-3': { pc: 'unknown' } },
+    })
+    const membership = policy.membership!
+    expect(membership.outcome).toBe('warning')
+    expect(membership.rows[0]?.verdict.reasonCode).toBe('release-unmatched')
+    expect(policy.hasBlocked).toBe(false)
+    expect(policy.hasWarning).toBe(true)
+  })
+
+  // CIS-01A currently cannot produce Port-Channel UNSUPPORTED through the real
+  // API; this synthetic state covers the hard-block branch explicitly.
+  it('synthetic UNSUPPORTED Port-Channel evidence hard-blocks an added member', () => {
+    const policy = channelPolicy({
+      original: ['interface-1', 'interface-2'],
+      proposed: ['interface-1', 'interface-2', 'interface-3'],
+      verdicts: { 'interface-3': { pc: 'unsupported' } },
+    })
+    const membership = policy.membership!
+    expect(membership.outcome).toBe('blocked')
+    expect(policy.hasBlocked).toBe(true)
+    expect(membership.rows[0]?.verdict.reasonCode).toBe('feature-license-unverified')
+    expect(policy.blocked.some((row) => row.fieldKey === 'member_ids')).toBe(true)
+  })
+
+  it('treats member removal as a repair even when the removed member is unsupported', () => {
+    const policy = channelPolicy({
+      original: ['interface-1', 'interface-2'],
+      proposed: ['interface-1'],
+      verdicts: { 'interface-2': { pc: 'unsupported' } },
+    })
+    const membership = policy.membership!
+    expect(membership.removed).toEqual(['interface-2'])
+    expect(membership.added).toEqual([])
+    expect(membership.rows).toEqual([])
+    expect(membership.outcome).toBe('allowed')
+    expect(policy.hasBlocked).toBe(false)
+    expect(policy.review.some((row) => row.fieldKey === 'member_ids')).toBe(false)
+  })
+
+  it('keeps an unchanged historical UNSUPPORTED member without blocking or clearing it', () => {
+    const policy = channelPolicy({
+      original: ['interface-1', 'interface-2'],
+      proposed: ['interface-1', 'interface-2', 'interface-3'],
+      verdicts: { 'interface-1': { pc: 'unsupported' }, 'interface-3': { pc: 'supported' } },
+    })
+    const membership = policy.membership!
+    expect(membership.kept).toEqual(['interface-1', 'interface-2'])
+    expect(membership.added).toEqual(['interface-3'])
+    expect(membership.outcome).toBe('allowed')
+    expect(policy.hasBlocked).toBe(false)
+    expect(policy.blocked).toEqual([])
+  })
+
+  it('replacement judges the new member, not the removed member evidence', () => {
+    const repaired = channelPolicy({
+      original: ['interface-1', 'interface-2'],
+      proposed: ['interface-1', 'interface-3'],
+      verdicts: { 'interface-2': { pc: 'unsupported' }, 'interface-3': { pc: 'supported' } },
+    })
+    expect(repaired.membership!.removed).toEqual(['interface-2'])
+    expect(repaired.membership!.added).toEqual(['interface-3'])
+    expect(repaired.membership!.outcome).toBe('allowed')
+
+    // Synthetic negative: the replacement target's own UNSUPPORTED evidence blocks.
+    const blocked = channelPolicy({
+      original: ['interface-1', 'interface-2'],
+      proposed: ['interface-1', 'interface-3'],
+      verdicts: { 'interface-2': { pc: 'supported' }, 'interface-3': { pc: 'unsupported' } },
+    })
+    expect(blocked.membership!.outcome).toBe('blocked')
+    expect(blocked.membership!.rows[0]?.targetKey).toContain('interface-3')
+  })
+
+  it('allows a pure member order change without capability evidence', () => {
+    const policy = channelPolicy({
+      original: ['interface-1', 'interface-2'],
+      proposed: ['interface-2', 'interface-1'],
+      verdicts: { 'interface-1': { pc: 'unsupported' }, 'interface-2': { pc: 'unsupported' } },
+    })
+    const membership = policy.membership!
+    expect(membership.added).toEqual([])
+    expect(membership.removed).toEqual([])
+    expect(membership.reordered).toBe(true)
+    expect(membership.outcome).toBe('allowed')
+    expect(policy.hasBlocked).toBe(false)
+  })
+
+  it('judges mixed added members individually instead of reusing the first result', () => {
+    const policy = channelPolicy({
+      original: ['interface-1'],
+      proposed: ['interface-1', 'interface-2', 'interface-3'],
+      verdicts: { 'interface-2': { pc: 'supported' }, 'interface-3': { pc: 'unsupported' } },
+    })
+    const membership = policy.membership!
+    expect(membership.rows).toHaveLength(2)
+    expect(membership.rows.find((row) => row.interfaceId === 'interface-2')?.verdict.outcome)
+      .toBe('allowed')
+    expect(membership.rows.find((row) => row.interfaceId === 'interface-3')?.verdict.outcome)
+      .toBe('blocked')
+    expect(membership.outcome).toBe('blocked')
+  })
+
+  it('requires LACP evidence for added members only when the proposed mode negotiates', () => {
+    const activeUnknownLacp = channelPolicy({
+      original: ['interface-1'],
+      proposed: ['interface-1', 'interface-3'],
+      lacp: 'active',
+      verdicts: { 'interface-3': { pc: 'supported', lacp: 'unknown' } },
+    })
+    expect(activeUnknownLacp.membership!.requiredLacp).toBe(true)
+    expect(activeUnknownLacp.membership!.outcome).toBe('warning')
+
+    const activeUnsupportedLacp = channelPolicy({
+      original: ['interface-1'],
+      proposed: ['interface-1', 'interface-3'],
+      lacp: 'passive',
+      verdicts: { 'interface-3': { pc: 'supported', lacp: 'unsupported' } },
+    })
+    expect(activeUnsupportedLacp.membership!.outcome).toBe('blocked')
+
+    const staticWithUnsupportedLacp = channelPolicy({
+      original: ['interface-1'],
+      proposed: ['interface-1', 'interface-3'],
+      lacp: 'static',
+      verdicts: { 'interface-3': { pc: 'supported', lacp: 'unsupported' } },
+    })
+    expect(staticWithUnsupportedLacp.membership!.requiredLacp).toBe(false)
+    expect(staticWithUnsupportedLacp.membership!.outcome).toBe('allowed')
+  })
+
+  it('does not reuse a stale member verdict', () => {
+    const policy = channelPolicy({
+      original: ['interface-1'],
+      proposed: ['interface-1', 'interface-3'],
+      verdicts: { 'interface-3': { pc: 'unsupported', stale: true } },
+    })
+    const membership = policy.membership!
+    expect(membership.outcome).toBe('pending')
+    expect(policy.hasBlocked).toBe(false)
+    expect(policy.hasPending).toBe(true)
+  })
+
+  it('keeps an unselected PoE candidate neutral instead of claiming an intent', () => {    const { targets, states } = poeState('unsupported')
     const policy = evaluate({
       targets, states,
       operations: { 'settings.poe_mode': { kind: 'set', value: null } },
