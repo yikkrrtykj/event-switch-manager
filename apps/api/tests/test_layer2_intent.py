@@ -345,6 +345,7 @@ def test_mode_and_routed_transitions_use_planning_baseline(client: TestClient) -
     assert access_to_trunk["before_source"] == "planning-baseline"
     assert access_to_trunk["after_source"] == "event-plan"
     assert "access_vlan" in access_to_trunk["cleanup"]
+    assert access_to_trunk["dependencies"]
     switchport_to_routed = changes[("Gi1/0/2", "mode")]
     assert switchport_to_routed["transition"] == "switchport-to-routed"
     assert "native_vlan" in switchport_to_routed["cleanup"]
@@ -718,3 +719,68 @@ def test_structural_conflicts_are_separate_from_capability_evidence() -> None:
     assert "plan-invalid" in invalid.deployment_blockers
     assert invalid.cli is None
     assert invalid.executable is False
+
+
+def test_role_policy_change_is_emitted_for_root_priority(client: TestClient) -> None:
+    event_id = event(client)
+    first_plan = make_plan(event_id, ports=[
+        {"name": "Gi1/0/1", "settings": {"mode": "access", "access_vlan": 20}},
+    ])
+    first = save(client, event_id, first_plan)
+    second_plan = copy.deepcopy(first_plan)
+    second_plan["assignments"][0]["role"] = "core"
+    second = save(client, event_id, second_plan)
+    result = intent(client, event_id, second["id"])
+    assert result["baseline"]["revision_id"] == first["id"]
+    changes = change_index(result)
+    root_priority = changes[("L2-Access", "root-priority")]
+    assert root_priority["before"] == 32768
+    assert root_priority["after"] == 4096
+    assert root_priority["after_source"] == "reviewed-default-policy"
+    device = device_intent(result)
+    assert device["desired"]["root_priority"] == {
+        "priority": 4096, "source": "reviewed-default-policy", "policy": "role-priority-v1",
+    }
+    assert device["desired"]["spanning_tree"]["source"] == "reviewed-default-policy"
+    assert device["desired"]["vtp"]["source"] == "reviewed-default-policy"
+    assert result["readiness"]["structured_intent_valid"] is True
+
+
+def test_stack_member_interface_ownership_change_is_in_changeset() -> None:
+    event_id = new_id()
+    first_plan = make_stack_plan(event_id)
+    first_state = EventPlan.model_validate(first_plan)
+    second_plan = copy.deepcopy(first_plan)
+    second_plan["physical_interfaces"][0]["stack_member"] = 2
+    second_state = EventPlan.model_validate(second_plan)
+
+    first_revision = PlanRevision(
+        id=UUID(new_id()), number=1, created_at=datetime.now(UTC),
+        content_hash="a" * 64, schema_version=1, plan=first_state,
+        warnings=(), validation_errors=(), validation_status="VALID_WITH_WARNINGS",
+    )
+    second_revision = PlanRevision(
+        id=UUID(new_id()), number=2, created_at=datetime.now(UTC),
+        content_hash="b" * 64, schema_version=1, plan=second_state,
+        warnings=(), validation_errors=(), validation_status="VALID_WITH_WARNINGS",
+    )
+    result = build_layer2_intent(second_revision, first_revision)
+    changes = {
+        (change.target_name, change.field): change
+        for change in result.devices[0].changes
+    }
+    stack_change = changes[("Gi1/0/1", "stack_member")]
+    assert stack_change.transition == "stack-member-change"
+    assert (stack_change.before, stack_change.after) == (1, 2)
+    assert stack_change.dependencies
+    dependency_kinds = {dependency.kind for dependency in result.devices[0].dependencies}
+    assert "stack-member-binding" in dependency_kinds
+    dependent = next(
+        dependency for dependency in result.devices[0].dependencies
+        if dependency.kind == "stack-member-binding"
+    )
+    assert stack_change.change_id in dependent.required_by
+    assert result.readiness.deployment_allowed is False
+    assert result.cli is None
+    assert result.executable is False
+    assert result.device_writes_enabled is False

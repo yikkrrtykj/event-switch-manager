@@ -90,6 +90,7 @@ class DependencyKind(StrEnum):
     MODE_CLEANUP = "mode-cleanup"
     ROUTED_BOUNDARY = "routed-boundary"
     UNUSED_PORT_POLICY = "unused-port-policy"
+    STACK_MEMBER_BINDING = "stack-member-binding"
 
 
 class DocumentationVerdict(StrEnum):
@@ -1000,6 +1001,7 @@ def _port_fields(port: PhysicalPortIntent) -> dict[str, JsonValue | None]:
         "portfast": port.portfast,
         "bpdu_guard": port.bpdu_guard,
         "port_channel": port.port_channel,
+        "stack_member": port.stack_member,
     }
 
 
@@ -1058,6 +1060,8 @@ def _physical_changes(
             transition = "allowed-vlans-change"
         elif field == "routed_address":
             transition = "routed-boundary-change"
+        elif field == "stack_member":
+            transition = "stack-member-change"
         changes.append(_interface_change(
             context, port, field, before_value, after_value,
             transition=transition,
@@ -1185,6 +1189,10 @@ def _dependencies(
         if change.field == "routed_address" or change.transition == "routed-boundary-change":
             required.setdefault(
                 (DependencyKind.ROUTED_BOUNDARY, change.target_name), set(),
+            ).add(change.change_id)
+        if change.field == "stack_member":
+            required.setdefault(
+                (DependencyKind.STACK_MEMBER_BINDING, change.target_name), set(),
             ).add(change.change_id)
         if (
             change.field == "shutdown_intent"
@@ -1343,6 +1351,16 @@ def _build_device_intent(
     )
     changes = _device_changes(before_state, desired, context)
     dependencies = _dependencies(changes, desired)
+    dependency_ids: dict[str, list[str]] = {}
+    for dependency in dependencies:
+        for change_id in dependency.required_by:
+            dependency_ids.setdefault(change_id, []).append(dependency.dependency_id)
+    changes = tuple(
+        change.model_copy(update={
+            "dependencies": tuple(dependency_ids.get(change.change_id, ())),
+        })
+        for change in changes
+    )
     conflicts = _conflicts(plan, assignment, desired)
     checks = _capability_checks(revision, plan, assignment, desired)
     structured_valid = plan_valid and not any(

@@ -93,7 +93,8 @@ Per assignment/device the engine returns:
     ISPs or Transit are intended `shutdown`;
 - physical ports: switchport/routed boundary, mode, access/native/allowed VLAN,
   routed address, description, admin state and shutdown intent, speed, duplex,
-  PoE, PortFast, BPDU Guard, Port-Channel membership and unused flag;
+  PoE, PortFast, BPDU Guard, Port-Channel membership, Stack member ownership and
+  unused flag;
 - Port-Channels: logical interface, number, members, LACP mode
   (`active`/`passive`/`static`), L2 settings.
 
@@ -117,14 +118,15 @@ produces a `PlannedChange`:
   `port-channel-member-to-independent`, `lacp-active-to-passive`,
   `native-vlan-change`, `allowed-vlans-change`, `spanning-tree-edge-change`,
   `bpdu-guard-change`, `poe-mode-change`, `speed-change`, `duplex-change`,
-  `shutdown-intent-change`;
+  `shutdown-intent-change`, `stack-member-change`;
 - cleanup intent for old settings that must not survive a transition;
-- dependency IDs.
+- dependency IDs (the same IDs appear in the device `IntentDependency`
+  `required_by` lists).
 
 `IntentDependency` entries model ordering intent without commands:
 `vlan-definition`, `port-channel-interface`, `port-channel-membership`,
-`member-detach`, `mode-cleanup`, `routed-boundary`, `unused-port-policy`, each
-with the change IDs that require it.
+`member-detach`, `mode-cleanup`, `routed-boundary`, `unused-port-policy`,
+`stack-member-binding`, each with the change IDs that require it.
 
 ## Conflicts and validation findings
 
@@ -158,6 +160,8 @@ evidence fails closed at the documentation-readiness level.
 - standalone and Stack identity/interface binding;
 - access↔trunk, switchport↔routed, channel-member↔independent and LACP
   active/passive transitions with planning baseline and cleanup dependencies;
+- review-policy role changes for root priority and Stack member/interface
+  ownership changes;
 - VLAN/native/allowed, STP defaults, root priority, VTP, PoE, Speed/Duplex,
   description, shutdown intent and unused-port policy;
 - fail-closed ROMMON, unknown identity and unknown-optics evidence;
