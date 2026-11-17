@@ -142,6 +142,23 @@ class DeviceIdentity(Record):
     stack_members: tuple[StackMemberIntent, ...]
 
 
+class RemovedAssignment(Record):
+    """Planning-baseline assignment removed from the current revision."""
+
+    change_id: str
+    assignment_id: UUID
+    identity: DeviceIdentity
+    baseline_revision_id: UUID
+    baseline_revision_hash: str
+    note: str
+    transition: Literal["assignment-removed"] = "assignment-removed"
+    before_source: Literal["planning-baseline"] = "planning-baseline"
+    after: None = None
+    after_exists: Literal[False] = False
+    device_state: Literal["unknown"] = "unknown"
+    requires_field_verification: Literal[True] = True
+
+
 class VlanIntent(Record):
     vlan_id: int
     name: str | None
@@ -304,6 +321,7 @@ class Layer2Intent(Record):
     vlan_changes: tuple[PlannedChange, ...]
     vlan_dependencies: tuple[IntentDependency, ...]
     devices: tuple[DeviceLayer2Intent, ...]
+    removed_assignments: tuple[RemovedAssignment, ...]
     conflicts: tuple[IntentConflict, ...]
     validation_findings: tuple[PlanIssue, ...]
     deployment_blockers: tuple[str, ...]
@@ -680,7 +698,12 @@ def _capability_checks(
     if "routed" in modes:
         device_capabilities.append(Capability.ROUTED_PORT)
     if desired.port_channels:
-        device_capabilities.extend((Capability.LACP, CiscoCapability.PORT_CHANNEL))
+        device_capabilities.append(CiscoCapability.PORT_CHANNEL)
+        if any(
+            channel.lacp in {"active", "passive"}
+            for channel in desired.port_channels
+        ):
+            device_capabilities.append(Capability.LACP)
     if any(port.portfast is not None for port in desired.physical_ports) or any(
         channel.settings.portfast is not None for channel in desired.port_channels
     ):
@@ -725,7 +748,10 @@ def _capability_checks(
 
 
 def _documentation_verdict(checks: Iterable[CapabilityCheck]) -> DocumentationVerdict:
-    verdicts = {check.verdict for check in checks}
+    check_list = tuple(checks)
+    if not check_list:
+        return DocumentationVerdict.UNKNOWN
+    verdicts = {check.verdict for check in check_list}
     if Support.UNSUPPORTED in verdicts:
         return DocumentationVerdict.UNSUPPORTED
     if Support.UNKNOWN in verdicts:
@@ -840,6 +866,30 @@ def _conflicts(
                 ),
                 target=port.name,
                 severity="ERROR",
+            ))
+    for member in stack_members.values():
+        asset = _physical_device(plan, member.physical_device_id)
+        if asset is None or _exact_pid(asset) is None:
+            conflicts.append(IntentConflict(
+                code="stack-member-identity-incomplete",
+                message=(
+                    "A Stack member lacks an exact verified PID/serial in the "
+                    "planning inventory; it must not be treated as a verified "
+                    "healthy member."
+                ),
+                target=assignment.hostname,
+                severity="WARNING",
+            ))
+        if member.state != "ready":
+            conflicts.append(IntentConflict(
+                code="stack-member-not-ready",
+                message=(
+                    f"Planning inventory marks Stack member {member.number} as "
+                    f"'{member.state}'. This is not hardware-verified state and "
+                    "requires field confirmation."
+                ),
+                target=assignment.hostname,
+                severity="WARNING",
             ))
     for port in desired.physical_ports:
         settings = next(
@@ -1493,6 +1543,7 @@ def _identity_changes(
         return (), ()
     changes: list[PlannedChange] = []
     conflicts: list[IntentConflict] = []
+    state_changed = False
     before_physical = (
         str(before.physical_device_id) if before.physical_device_id is not None else None
     )
@@ -1562,6 +1613,14 @@ def _identity_changes(
                     transition="stack-member-pid-change",
                     after_source=EVENT_PLAN_SOURCE,
                 ))
+            if previous.state != current.state:
+                changes.append(_device_change(
+                    context, f"stack-member:{number}:state",
+                    _json(previous.state), _json(current.state),
+                    transition="stack-member-state-change",
+                    after_source=EVENT_PLAN_SOURCE,
+                ))
+                state_changed = True
     if any(
         change.field == "stack-identity" or change.field.startswith("stack-member:")
         for change in changes
@@ -1572,6 +1631,18 @@ def _identity_changes(
                 "The planning Stack member/chassis map changed; this is not proof "
                 "that a real Stack replacement, merge, split or renumbering happened. "
                 "Field verification and capability evidence collection are required."
+            ),
+            target=after.hostname,
+            severity="WARNING",
+        ))
+    if state_changed:
+        conflicts.append(IntentConflict(
+            code="stack-member-state-change-requires-field-verification",
+            message=(
+                "A planning inventory Stack member state changed. This is not a "
+                "verified hardware observation: a missing member is not proof it is "
+                "physically offline, and a ready member is not proof it recovered. "
+                "Field verification is required."
             ),
             target=after.hostname,
             severity="WARNING",
@@ -1868,12 +1939,13 @@ def _blockers(
     conflicts: Iterable[IntentConflict],
     plan_valid: bool,
 ) -> tuple[str, ...]:
+    conflict_list = tuple(conflicts)
     blockers = list(INTENT_BASE_BLOCKERS)
     if not plan_valid:
         blockers.append("plan-invalid")
-    if any(conflict.severity == "ERROR" for conflict in conflicts):
+    if any(conflict.severity == "ERROR" for conflict in conflict_list):
         blockers.append("structured-intent-invalid")
-    conflict_codes = {conflict.code for conflict in conflicts}
+    conflict_codes = {conflict.code for conflict in conflict_list}
     if (
         "device-identity-change-requires-field-verification" in conflict_codes
         or "interface-ownership-change-requires-field-verification" in conflict_codes
@@ -1881,6 +1953,19 @@ def _blockers(
         blockers.append("field-verification-required:device-identity")
     if "stack-identity-change-requires-field-verification" in conflict_codes:
         blockers.append("field-verification-required:stack-identity")
+    if (
+        "stack-member-state-change-requires-field-verification" in conflict_codes
+        or "stack-member-not-ready" in conflict_codes
+    ):
+        blockers.append("field-verification-required:stack-member-state")
+    if "stack-member-identity-incomplete" in conflict_codes:
+        blockers.append("field-verification-required:stack-member-identity")
+    for conflict in conflict_list:
+        if conflict.code == "assignment-removed-requires-field-verification":
+            blockers.append(
+                f"assignment-removal-requires-field-verification:{conflict.target}"
+            )
+            blockers.append(f"device-wipe-not-authorized:{conflict.target}")
     for check in checks:
         identifier = f"{check.capability.value}:{check.subject}"
         if check.verdict == Support.UNSUPPORTED:
@@ -1888,6 +1973,62 @@ def _blockers(
         elif check.verdict == Support.UNKNOWN:
             blockers.append(f"capability-unknown:{identifier}")
     return tuple(dict.fromkeys(blockers))
+
+
+
+
+def _removed_assignments(
+    plan: EventPlan,
+    baseline_plan: EventPlan | None,
+    baseline: PlanRevision | None,
+) -> tuple[RemovedAssignment, ...]:
+    if baseline_plan is None or baseline is None:
+        return ()
+    current_ids = {assignment.id for assignment in plan.assignments}
+    removed = sorted(
+        (
+            assignment for assignment in baseline_plan.assignments
+            if assignment.id not in current_ids
+        ),
+        key=lambda assignment: (assignment.hostname, str(assignment.id)),
+    )
+    return tuple(
+        RemovedAssignment(
+            change_id=_change_id(
+                str(assignment.id), ChangeTarget.DEVICE, str(assignment.id),
+                "presence",
+            ),
+            assignment_id=assignment.id,
+            identity=_identity(baseline_plan, assignment),
+            baseline_revision_id=baseline.id,
+            baseline_revision_hash=baseline.content_hash,
+            note=(
+                "This Assignment existed in the Planning Baseline and is absent "
+                "from the current revision. This is a planning difference only: "
+                "it is not authorization to wipe or clear the real switch, and no "
+                "hardware state or capability evidence is verified."
+            ),
+        )
+        for assignment in removed
+    )
+
+
+def _removal_conflicts(
+    removed: Iterable[RemovedAssignment],
+) -> tuple[IntentConflict, ...]:
+    return tuple(
+        IntentConflict(
+            code="assignment-removed-requires-field-verification",
+            message=(
+                "The planning inventory removed this Assignment. Human field "
+                "confirmation is required; planning removal does not authorize a "
+                "device wipe, Console/SSH operation or any hardware change."
+            ),
+            target=str(entry.assignment_id),
+            severity="WARNING",
+        )
+        for entry in removed
+    )
 
 
 def build_layer2_intent(
@@ -1913,6 +2054,7 @@ def build_layer2_intent(
         baseline_revision_hash=baseline.content_hash if baseline is not None else None,
     )
     vlan_changes = _event_vlan_changes(baseline_vlans, event_vlans, event_context)
+    removed_assignments = _removed_assignments(plan, baseline_plan, baseline)
     devices = tuple(
         _build_device_intent(
             revision, plan, baseline_plan, assignment, baseline, plan_valid,
@@ -1921,6 +2063,7 @@ def build_layer2_intent(
     )
     conflicts = (
         *_cross_device_conflicts(plan),
+        *_removal_conflicts(removed_assignments),
         *(conflict for device in devices for conflict in device.conflicts),
     )
     checks = tuple(check for device in devices for check in device.capability_checks)
@@ -1951,6 +2094,7 @@ def build_layer2_intent(
         vlan_changes=vlan_changes,
         vlan_dependencies=vlan_dependencies,
         devices=devices,
+        removed_assignments=removed_assignments,
         conflicts=conflicts,
         validation_findings=(
             *revision.validation_errors,

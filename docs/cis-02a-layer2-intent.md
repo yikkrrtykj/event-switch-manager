@@ -36,6 +36,7 @@ Top-level response:
   "vlan_changes": [ … ],
   "vlan_dependencies": [ … ],
   "devices": [ … ],
+  "removed_assignments": [ … ],
   "conflicts": [ … ],
   "validation_findings": [ … ],
   "deployment_blockers": [ … ],
@@ -58,6 +59,26 @@ Top-level response:
 `planning-baseline-unavailable`. The device running-config was not read: all
 Before state is explicitly `device_state: "unknown"` and is the previous saved
 planning revision, never a claim about the actual device.
+
+### Removed Assignments
+
+`removed_assignments` records every Assignment that existed in the immediate
+Planning Baseline but is absent from the current saved revision. Each entry
+uses the stable Assignment UUID and carries the baseline identity snapshot,
+`baseline_revision_id` / `baseline_revision_hash`, an explicit
+`transition="assignment-removed"`, `before_source="planning-baseline"`, and
+`after=null` / `after_exists=false`. The note and the
+`assignment-removed-requires-field-verification` warning make clear that a
+planning removal is **not** authorization to wipe or clear a real switch.
+
+Each removed Assignment also adds deterministic deployment blockers
+`assignment-removal-requires-field-verification:<assignment_uuid>` and
+`device-wipe-not-authorized:<assignment_uuid>`. Removed assignments are not
+fabricated into `devices`, are not given current-revision Cisco capability
+checks, and do not alter retained devices' desired state or ChangeSet.
+Deleting all assignments, deleting one while retaining several, recreating the
+same hostname under a different UUID, and hostname-only changes are all
+distinguished by Assignment UUID.
 
 ### VLAN definition scope
 
@@ -184,13 +205,25 @@ verified execution plan. No self-edge or cycle is created between changes.
 Stack identities are separately diffable: assignment physical-device binding
 (`physical-device-id`), Stack identity state (`stack-identity`), member
 add/remove (`stack-member:<n>:definition`), member chassis replacement
-(`stack-member:<n>:physical-device-id`) and member PID change
-(`stack-member:<n>:pid`). A physical port also reports its own
+(`stack-member:<n>:physical-device-id`), member PID change
+(`stack-member:<n>:pid`) and member state change
+(`stack-member:<n>:state`, transition `stack-member-state-change`). A physical port also reports its own
 `physical_device_id` change. These are planning differences only and add
 `device-identity-change-requires-field-verification` /
 `stack-identity-change-requires-field-verification` warnings plus
 `field-verification-required:…` blockers; the engine never claims a real Stack
 replacement/merge/split/renumbering happened.
+
+Stack member `state` changes (`ready`/`missing`/`unknown`) are planning
+inventory changes only. They emit a
+`stack-member-state-change-requires-field-verification` warning and
+`field-verification-required:stack-member-state` blocker. `missing` is not
+proof that a member is physically offline, `missing -> ready` is not proof it
+recovered, and `unknown -> ready` never marks hardware verification as passed.
+Members whose plan identity lacks an exact PID/serial also emit
+`stack-member-identity-incomplete` and
+`field-verification-required:stack-member-identity`; an exact PID on another
+member never makes an incomplete Stack healthy.
 
 Port-Channel mode changes reuse the physical-port transition/cleanup logic:
 `access-to-trunk`, `trunk-to-access`, `switchport-to-routed`,
@@ -254,7 +287,13 @@ CIS-02A calls the existing CIS-01A resolver for the exact revision target:
 identity, port layout, VLAN, Rapid PVST+, VTP Transparent, access/trunk/routed
 port, PortFast, BPDU Guard, Stack when a Stack exists, Port-Channel and LACP for
 aggregates, and per-interface port media/PoE/speed/duplex where the intent uses
-them. Each `CapabilityCheck` carries verdict, reason code, reason and evidence
+them. LACP is required only when at least one aggregate is
+`active`/`passive`; a static Port-Channel requires Port-Channel capability only.
+This is evaluated across all current aggregate intent, so a mixed
+static+active set still requires LACP, a static set does not, and a
+Port-Channel UNKNOWN verdict remains UNKNOWN and is never promoted to
+SUPPORTED by omitting the LACP check. Synthetic unit tests exercise
+UNSUPPORTED/UNKNOWN branches without extending the Cisco evidence catalog. Each `CapabilityCheck` carries verdict, reason code, reason and evidence
 scope. Model names are never used to guess capabilities; missing or unknown
 evidence fails closed at the documentation-readiness level.
 
@@ -290,24 +329,21 @@ evidence fails closed at the documentation-readiness level.
 - VLAN dependency backlinks on created, renamed, removed and unreferenced VLAN
   changes, with no duplicate/dangling dependency IDs and no change/dependency ID
   confusion;
+- contract-level revision difference matrix in
+  `apps/api/tests/test_layer2_intent_contract.py`: VLAN create/rename/delete,
+  Assignment add/remove, Stack member add/remove/state/chassis replacement,
+  physical port add/remove/ownership, Port-Channel add/remove/member change and
+  Access/Trunk/Routed transitions;
+- Assignment removal identity/revision-source/field-verification coverage,
+  including delete-all, retain-multiple, same-hostname new-UUID recreation and
+  hostname-only rename;
+- Stack member state `ready`/`missing`/`unknown` transitions, missing->ready and
+  unknown->ready warning behavior, and incomplete Stack identity fail-closed;
+- static Port-Channel LACP omission, mixed static+active behavior, ROMMON and
+  unknown-License UNKNOWN preservation, and synthetic UNSUPPORTED/UNKNOWN
+  capability branches;
 - no CLI output and no device write path (`cli=null`, `executable=false`,
   `device_writes_enabled=false`).
-
-### Known boundary observations (not expanded in this change-set fix)
-
-The following are recorded for a future review, not silently expanded here:
-
-- Removing an entire Assignment between revisions currently drops it from
-  `devices` without a top-level removed-device ChangeSet record.
-- A Stack member `state` change (for example `ready` to `missing`) is visible in
-  the desired Stack identity but is not emitted as a `PlannedChange` field.
-- Static Port-Channels still receive an LACP capability check because LACP is
-  added for every Port-Channel; only PORT-CHANNEL is strictly required for a
-  static aggregate. On the reviewed families LACP evidence is supported, so
-  this is diagnostic hygiene rather than a current deployment blocker.
-
-They are intentionally not mixed into this dependency remediation; evidence is
-kept for a separate scoped fix.
 
 ## Out of scope
 
