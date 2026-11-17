@@ -485,7 +485,13 @@ def test_vlan_reference_removal_without_definition_change_is_a_difference(
     assert vlan_item["baseline"]["value"] == {"vlan_id": 20, "name": "Players"}
     assert vlan_item["diff"]["changed"] is True
     assert vlan_item["diff"]["transition"] == "vlan-unreferenced"
-    assert vlan_item["diff"]["change_id"] is None
+    set_change = next(
+        change for change in cast(list[dict[str, Any]], device["planned_diff"])
+        if change["target_kind"] == "device" and change["field"] == "vlans"
+    )
+    assert set_change["transition"] == "vlan-set-change"
+    assert vlan_item["diff"]["change_id"] == set_change["change_id"]
+    assert "planned-difference" in vlan_item["risk"]["codes"]
     assert any(
         code == "no-current-plan-intent" for code in vlan_item["risk"]["codes"]
     )
