@@ -288,6 +288,17 @@ describe('capability-driven control policy', () => {
       .find((candidate) => candidate.value === 'active')!.outcome).toBe('allowed')
   })
 
+  it('keeps an unselected PoE candidate neutral instead of claiming an intent', () => {
+    const { targets, states } = poeState('unsupported')
+    const policy = evaluate({
+      targets, states,
+      operations: { 'settings.poe_mode': { kind: 'set', value: null } },
+    })
+    const candidate = policy.fields['settings.poe_mode']!.candidate!
+    expect(candidate.outcome).toBe('warning')
+    expect(candidate.verdicts[0]?.reasonCode).toBe('candidate-unavailable')
+  })
+
   it('treats reset by documented default behaviour and never hard-blocks repair', () => {
     const { targets, states } = poeState('unsupported')
     const policy = evaluate({ targets, states, operations: { 'settings.poe_mode': { kind: 'reset' } } })

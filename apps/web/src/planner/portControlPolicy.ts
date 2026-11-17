@@ -265,6 +265,10 @@ function poeCandidate(target: TargetEvidence, value: Value | undefined): Control
   if (value === 'never') {
     return verdict(target, 'allowed', 'poe', 'poe-disabled', null, [], target.status)
   }
+  if (value == null || value === '') {
+    return verdict(target, 'warning', 'poe', 'candidate-unavailable', null,
+      [], target.status)
+  }
   if (!target.current) return pending(target, 'poe')
   const decision = target.decisions.get('poe')
   if (!decision) return missing(target, 'poe')
