@@ -20,6 +20,14 @@ from .cisco_capabilities import (
 from .cisco_catalog import CapabilityId
 from .models import Device, EventPlanRevision
 from .planning.inventory import EventDeviceAssignment
+from .planning.layer2_config_preview import (
+    Layer2ConfigPreview,
+    Layer2DeviceConfigPreview,
+    PreviewInputError,
+    PreviewTargetNotFound,
+    build_device_layer2_config_preview,
+    build_layer2_config_preview,
+)
 from .planning.layer2_intent import Layer2Intent, build_layer2_intent
 from .planning.persistence import (
     current_plan_issues,
@@ -182,13 +190,55 @@ def read_layer2_intent(
     event_id: UUID, revision_id: UUID, session: DatabaseSession,
 ) -> Layer2Intent:
     """Diagnostic CIS-02A intent for one immutable revision; read-only, no CLI."""
+    revision, baseline = revision_and_baseline(event_id, revision_id, session)
+    return build_layer2_intent(revision, baseline)
+
+
+def revision_and_baseline(
+    event_id: UUID, revision_id: UUID, session: DatabaseSession,
+) -> tuple[PlanRevision, PlanRevision | None]:
     revision = revision_view(session, require_revision(event_id, revision_id, session))
     previous = session.scalar(select(EventPlanRevision).where(
         EventPlanRevision.event_id == event_id,
         EventPlanRevision.number < revision.number,
     ).order_by(EventPlanRevision.number.desc()))
     baseline = revision_view(session, previous) if previous is not None else None
-    return build_layer2_intent(revision, baseline)
+    return revision, baseline
+
+
+def revision_intent(
+    event_id: UUID, revision_id: UUID, session: DatabaseSession,
+) -> tuple[PlanRevision, Layer2Intent]:
+    revision, baseline = revision_and_baseline(event_id, revision_id, session)
+    return revision, build_layer2_intent(revision, baseline)
+
+
+@router.get("/plan-revisions/{revision_id}/layer2-config-preview")
+def read_layer2_config_preview(
+    event_id: UUID, revision_id: UUID, session: DatabaseSession,
+) -> Layer2ConfigPreview:
+    """CIS-02B1 review-only L2 config preview; no CLI, no device operation."""
+    revision, intent = revision_intent(event_id, revision_id, session)
+    try:
+        return build_layer2_config_preview(revision, intent)
+    except PreviewInputError as exc:
+        raise HTTPException(status_code=409, detail=exc.reason_code) from None
+
+
+@router.get(
+    "/plan-revisions/{revision_id}/layer2-config-preview/devices/{assignment_id}",
+)
+def read_device_layer2_config_preview(
+    event_id: UUID, revision_id: UUID, assignment_id: UUID, session: DatabaseSession,
+) -> Layer2DeviceConfigPreview:
+    """CIS-02B1 preview for one Assignment; no other device is mixed in."""
+    revision, intent = revision_intent(event_id, revision_id, session)
+    try:
+        return build_device_layer2_config_preview(revision, intent, assignment_id)
+    except PreviewInputError as exc:
+        raise HTTPException(status_code=409, detail=exc.reason_code) from None
+    except PreviewTargetNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
 
 
 @router.post("/plan/capability-preview")
