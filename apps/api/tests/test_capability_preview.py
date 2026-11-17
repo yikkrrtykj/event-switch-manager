@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+﻿from collections.abc import Iterator
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -85,6 +85,7 @@ def draft_plan(
 
 def channel_plan(
     event_id: str, *, lacp: str = "active", member_ids: tuple[str, ...] | None = None,
+    image: str = "17.12.4",
 ) -> dict[str, Any]:
     trunk = {"mode": "trunk", "native_vlan": 10, "allowed_vlans": [10, 20]}
     members = member_ids or (uid(10), uid(11))
@@ -99,7 +100,7 @@ def channel_plan(
         "assignments": [{
             "id": uid(2), "hostname": "channel-access", "role": "access",
             "family": "catalyst-9300", "physical_device_id": uid(1),
-            "software": {"image": "17.12.4", "license": "Network Advantage"},
+            "software": {"image": image, "license": "Network Advantage"},
         }],
         "physical_interfaces": [
             {"id": uid(10), "assignment_id": uid(2), "physical_device_id": uid(1),
@@ -303,6 +304,45 @@ def test_draft_medium_and_rate_differences(
     assert (group["medium"], group["rates"]) == (medium, rates)
 
 
+def test_draft_candidates_keep_documented_port_groups(client: TestClient) -> None:
+    """The Port Editor candidate policy relies on the documented range for every target."""
+    event_id = event(client)
+    plan = draft_plan(event_id, pid="C9300L-24T-4G")
+    copper = by_capability(preview(
+        client, event_id, plan, ("speed", "duplex", "poe"), interface_id=uid(3),
+    ))
+    assert (copper["speed"]["verdict"], copper["speed"]["reason_code"]) == (
+        "unknown", "speed-required",
+    )
+    assert copper["speed"]["port_groups"][0]["medium"] == "copper-rj45"
+    assert copper["speed"]["port_groups"][0]["rates"] == [10, 100, 1000]
+    assert copper["duplex"]["port_groups"][0]["rates"] == [10, 100, 1000]
+    assert copper["poe"]["verdict"] == "unsupported"
+    assert copper["poe"]["port_groups"][0]["poe_plus"] is False
+
+    plan["physical_interfaces"][0]["name"] = "GigabitEthernet1/1/4"
+    fiber_speed = preview(client, event_id, plan, ("speed",), interface_id=uid(3), speed=1000)
+    assert (fiber_speed["decisions"][0]["verdict"], fiber_speed["decisions"][0]["reason_code"]) == (
+        "unknown", "optic-unknown",
+    )
+    assert fiber_speed["decisions"][0]["port_groups"][0]["medium"] == "sfp"
+    assert fiber_speed["decisions"][0]["port_groups"][0]["rates"] == [1000]
+
+    plan["physical_interfaces"][0]["name"] = "Gi1/0/1"
+    outside = preview(client, event_id, plan, ("speed",), interface_id=uid(3), speed=2500)
+    assert outside["decisions"][0]["verdict"] == "unsupported"
+    assert outside["decisions"][0]["reason_code"] == "speed-outside-port-range"
+    assert outside["decisions"][0]["port_groups"][0]["rates"] == [10, 100, 1000]
+
+    licensed = draft_plan(event_id, pid="C9300L-24T-4G", license_name="LAN Base")
+    unknown = by_capability(preview(
+        client, event_id, licensed, ("speed", "duplex"), interface_id=uid(3),
+    ))
+    for capability in ("speed", "duplex"):
+        assert unknown[capability]["reason_code"] == "license-unmatched"
+        assert unknown[capability]["port_groups"] == []
+
+
 def test_draft_speed_and_duplex_options(client: TestClient) -> None:
     event_id = event(client)
     plan = draft_plan(event_id)
@@ -389,6 +429,37 @@ def test_draft_channel_changes_are_in_fingerprints_without_persisting(client: Te
         assert result["decisions"][0]["affected"]["interface_name"] == "Gi1/0/1"
         assert "revision_id" not in result["decisions"][0]["affected"]
     assert client.get(f"{API}/events/{event_id}/plan-revisions").json() == []
+
+
+def test_draft_port_channel_evidence_range(client: TestClient) -> None:
+    """Pin the verdict range that the WEB-02C member policy may rely on.
+
+    CIS-01A currently has no UNSUPPORTED path for Port-Channel or LACP, so the
+    UI must not claim such API evidence. The synthetic browser-policy tests cover
+    that hard-block branch separately.
+    """
+    event_id = event(client)
+    known = preview(
+        client, event_id, channel_plan(event_id), ("port-channel", "lacp"),
+        interface_id=uid(10),
+    )
+    assert [(decision["verdict"], decision["reason_code"]) for decision in known["decisions"]] == [
+        ("supported", "feature-documented"), ("supported", "feature-documented"),
+    ]
+    verdicts: set[str] = set()
+    for image in ("17.12.4", "17.12.2r", "17.12.99"):
+        result = preview(
+            client, event_id, channel_plan(event_id, image=image), ("port-channel", "lacp"),
+            interface_id=uid(10),
+        )
+        verdicts.update(decision["verdict"] for decision in result["decisions"])
+    assert verdicts <= {"supported", "unknown"}
+    rommon = preview(
+        client, event_id, channel_plan(event_id, image="17.12.2r"),
+        ("port-channel", "lacp"), interface_id=uid(10),
+    )
+    for decision in rommon["decisions"]:
+        assert (decision["verdict"], decision["reason_code"]) == ("unknown", "software-is-rommon")
 
 
 def test_draft_imported_claims_cannot_promote_evidence(client: TestClient) -> None:
