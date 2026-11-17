@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { expect, test } from '@playwright/test'
-import type { APIRequestContext, Page } from '@playwright/test'
+import type { APIRequestContext, Page, Request } from '@playwright/test'
 import type { Plan, RecordValue, Revision } from '../src/planner/model'
 
 const api = '/api/v1/events'
@@ -194,19 +194,33 @@ test('port-channel preview uses the proposed channel record', async ({ page, req
   const exportUrl = revisions(id) + '/' + saved.id + '/export'
   const historical = await request.get(exportUrl)
   const historicalBody = await historical.body()
-  const previewBodies: { plan: Plan }[] = []
-  const previewResponses: { draft_fingerprint: string; input_fingerprint: string }[] = []
+  type PreviewBody = { plan: Plan; interface_id?: string | null }
+  type PreviewResult = {
+    draft_fingerprint: string
+    input_fingerprint: string
+    decisions: { affected: { interface_id: string | null } }[]
+  }
+  type PreviewExchange = { body: PreviewBody; response?: PreviewResult }
+  const exchanges: PreviewExchange[] = []
+  const pending = new Map<Request, PreviewExchange>()
+  const channelIn = (body: PreviewBody) =>
+    (body.plan.port_channels as Record<string, unknown>[])[0]!
   page.on('request', (entry) => {
-    if (entry.url().includes('/plan/capability-preview')) {
-      previewBodies.push(entry.postDataJSON() as { plan: Plan })
-    }
+    if (!entry.url().includes('/plan/capability-preview')) return
+    const exchange: PreviewExchange = { body: entry.postDataJSON() as PreviewBody }
+    exchanges.push(exchange)
+    pending.set(entry, exchange)
   })
   page.on('response', async (response) => {
-    if (response.url().includes('/plan/capability-preview')) {
-      previewResponses.push(await response.json() as {
-        draft_fingerprint: string; input_fingerprint: string
-      })
-    }
+    if (!response.url().includes('/plan/capability-preview')) return
+    const exchange = pending.get(response.request())
+    if (!exchange) return
+    exchange.response = await response.json() as PreviewResult
+    pending.delete(response.request())
+  })
+  await page.route('**/api/v1/events/*/plan/capability-preview', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    await route.continue()
   })
   await openWorkspace(page, id)
   await page.getByRole('button', { name: 'Edit Port-Channel 1', exact: true }).click()
@@ -216,19 +230,23 @@ test('port-channel preview uses the proposed channel record', async ({ page, req
   const panel = modal.getByRole('region', { name: 'Cisco capability evidence' })
   await expect(operation).toHaveValue('keep')
   await expect(mode).toHaveValue('active')
-  await expect.poll(() => previewBodies.length).toBeGreaterThanOrEqual(2)
-  const initialCount = previewBodies.length
-  const initialResponseCount = previewResponses.length
-  const initial = previewBodies.at(-1)!
-  const initialResponse = previewResponses.at(-1)!
-  const initialChannel = (initial.plan.port_channels as Record<string, unknown>[])[0]!
+  await expect.poll(() => exchanges.filter((exchange) =>
+    channelIn(exchange.body).lacp === 'active' && exchange.response).length,
+  { timeout: 10_000 }).toBe(2)
+  const initial = exchanges.filter((exchange) =>
+    channelIn(exchange.body).lacp === 'active' && exchange.response)
+  for (const exchange of initial) {
+    expect(exchange.response!.decisions.every((decision) =>
+      decision.affected.interface_id === exchange.body.interface_id)).toBe(true)
+  }
+  const initialByInterface = new Map(initial.map((exchange) =>
+    [exchange.body.interface_id!, exchange.response!] as const))
+  expect([...initialByInterface.keys()]).toHaveLength(2)
+  const initialChannel = channelIn(initial[0]!.body)
   expect(initialChannel.lacp).toBe('active')
   expect(initialChannel.member_ids).toHaveLength(2)
+  await expect(panel.getByText('Unsaved draft', { exact: true }).first()).toBeVisible()
 
-  await page.route('**/api/v1/events/*/plan/capability-preview', async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    await route.continue()
-  })
   await operation.selectOption('set')
   await mode.selectOption('passive')
   await expect(modal.getByText('Stale', { exact: true }).first()).toBeVisible()
@@ -237,16 +255,27 @@ test('port-channel preview uses the proposed channel record', async ({ page, req
   await expect(row.getByRole('cell').nth(3)).toHaveText('active')
   await expect(row.getByRole('cell').nth(4)).toHaveText('passive')
   await modal.getByRole('button', { name: 'Back to edit', exact: true }).click()
-  await expect.poll(() => previewBodies.length, { timeout: 10_000 }).toBe(initialCount + 2)
-  await expect.poll(() => previewResponses.length, { timeout: 10_000 }).toBe(initialResponseCount + 2)
-  const latest = previewBodies.at(-1)!
-  const latestResponse = previewResponses.at(-1)!
-  const latestChannel = (latest.plan.port_channels as Record<string, unknown>[])[0]!
+  await expect.poll(() => exchanges.filter((exchange) =>
+    channelIn(exchange.body).lacp === 'passive' && exchange.response).length,
+  { timeout: 10_000 }).toBe(2)
+  const latest = exchanges.filter((exchange) =>
+    channelIn(exchange.body).lacp === 'passive' && exchange.response)
+  const latestByInterface = new Map(latest.map((exchange) =>
+    [exchange.body.interface_id!, exchange.response!] as const))
+  expect([...latestByInterface.keys()].sort()).toEqual([...initialByInterface.keys()].sort())
+  for (const [interfaceId, before] of initialByInterface) {
+    const after = latestByInterface.get(interfaceId)!
+    expect(after.draft_fingerprint).not.toBe(before.draft_fingerprint)
+    expect(after.input_fingerprint).not.toBe(before.input_fingerprint)
+  }
+  const latestChannel = channelIn(latest[0]!.body)
   expect(latestChannel.lacp).toBe('passive')
   expect(latestChannel.member_ids).toEqual(initialChannel.member_ids)
   expect(latestChannel.settings).toMatchObject({ mode: 'trunk', native_vlan: 10, allowed_vlans: [10, 20] })
-  expect(latestResponse.draft_fingerprint).not.toBe(initialResponse.draft_fingerprint)
-  expect(latestResponse.input_fingerprint).not.toBe(initialResponse.input_fingerprint)
+  for (const exchange of latest) {
+    expect(exchange.response!.decisions.every((decision) =>
+      decision.affected.interface_id === exchange.body.interface_id)).toBe(true)
+  }
   await expect(modal.getByText('Stale', { exact: true })).toHaveCount(0)
   await expect(panel.getByText('SUPPORTED', { exact: true }).first()).toBeVisible()
   await page.unroute('**/api/v1/events/*/plan/capability-preview')
