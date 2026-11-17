@@ -6,8 +6,15 @@ import { Badge, Button, Dialog, Select, Table } from '../components/ui'
 import { get, set } from './catalog'
 import type { Field } from './catalog'
 import { Fields, useFieldFocus } from './Editor'
-import { fingerprint } from './model'
+import { fingerprint, records } from './model'
 import type { Issue, Plan, RecordValue } from './model'
+import {
+  CHANNEL_CAPABILITIES, PORT_CAPABILITIES, applyProposedChannel, applyProposedPorts,
+  capabilitiesForChange, targetKey,
+} from './capability'
+import type { CapabilityId, CapabilityTarget } from './capability'
+import { CapabilityPanel, CapabilityReview } from './CapabilityPanel'
+import { useDraftCapability } from './useCapability'
 import { aggregatePortLabel, canResetPortField, commonPortValue, describePortValue, editPort, hasPortValue, isPortSetting, modeKey,
   physicalPortLabel, portFieldApplies, portMode } from './portSettings'
 import type { Operations, PortTarget } from './portSettings'
@@ -43,6 +50,57 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
   const changed = creating || proposed.some((item) => item.changed)
   const hasCleanup = proposed.some(({ changes }) => changes.some((change) => change.operation === 'clearOnModeChange'))
   const currentValues = new Map(controls.map((field) => [field.key, commonPortValue(field, targets)]))
+  const proposedRecord = proposed[0]?.next ?? record
+  const previewPlan = aggregate
+    ? applyProposedChannel(plan, proposedRecord)
+    : applyProposedPorts(plan, proposed.map(({ index, next }) => ({ index, next })))
+  const capabilityTargets: CapabilityTarget[] = (() => {
+    if (aggregate) {
+      const physical = records(plan, 'physical_interfaces')
+      const members = Array.isArray(proposedRecord.member_ids) ? proposedRecord.member_ids : []
+      return members.flatMap((id) => {
+        if (typeof id !== 'string') return []
+        const member = physical.find((item) => item.id === id)
+        if (!member || typeof member.assignment_id !== 'string' || typeof member.id !== 'string') return []
+        const target = physicalPortLabel(t, plan, member)
+        const stackMember = typeof member.stack_member === 'number' ? member.stack_member : undefined
+        return [{
+          key: targetKey(member.assignment_id, member.id, stackMember),
+          assignmentId: member.assignment_id, interfaceId: member.id, stackMember,
+          device: target.device, member: target.member, name: target.name,
+          item: member, channel: proposedRecord,
+        }]
+      })
+    }
+    return proposed.flatMap(({ next, device, member, name }) => {
+      if (typeof next.assignment_id !== 'string' || typeof next.id !== 'string') return []
+      const stackMember = typeof next.stack_member === 'number' ? next.stack_member : undefined
+      return [{
+        key: targetKey(next.assignment_id, next.id, stackMember),
+        assignmentId: next.assignment_id, interfaceId: next.id, stackMember,
+        device, member, name, item: next,
+      }]
+    })
+  })()
+  const capabilityStates = useDraftCapability(
+    previewPlan, capabilityTargets, aggregate ? CHANNEL_CAPABILITIES : PORT_CAPABILITIES,
+  )
+  const changedCapabilities: Record<string, readonly CapabilityId[]> = {}
+  if (aggregate) {
+    const ids = [...new Set(proposed.flatMap(({ changes }) => changes
+      .filter((change) => change.operation !== 'keep')
+      .flatMap((change) => capabilitiesForChange(change.field.key))))]
+    for (const target of capabilityTargets) changedCapabilities[target.key] = ids
+  } else {
+    for (const item of proposed) {
+      if (typeof item.next.assignment_id !== 'string' || typeof item.next.id !== 'string') continue
+      const stackMember = typeof item.next.stack_member === 'number' ? item.next.stack_member : undefined
+      const key = targetKey(item.next.assignment_id, item.next.id, stackMember)
+      changedCapabilities[key] = [...new Set(item.changes
+        .filter((change) => change.operation !== 'keep')
+        .flatMap((change) => capabilitiesForChange(change.field.key)))]
+    }
+  }
 
   useEffect(() => { onFormDirty(dirty) }, [dirty, onFormDirty])
   useEffect(() => () => onFormDirty(false), [onFormDirty])
@@ -79,6 +137,8 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
             </tr>)) : <tr key={index}><td>{device}</td><td>{member}</td>
               <td className="data-mono">{name}</td><td colSpan={4}>{t('noChanges')}</td></tr>
         })}</tbody></Table>
+        <CapabilityReview states={capabilityStates} targets={capabilityTargets}
+          changed={changedCapabilities} />
       </> : <>
         {batch ? <Table label={t('targetPorts')}><thead><tr>
           <th scope="col">{t('device')}</th><th scope="col">{t('stackMember')}</th><th scope="col">{t('interface')}</th><th scope="col">{t('currentMode')}</th>
@@ -152,6 +212,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
               </div>}
           </fieldset>
         })}</div>
+        <CapabilityPanel states={capabilityStates} targets={capabilityTargets} />
       </>}
       <div className="actions">
         <Button onClick={cancel}>{t('cancel')}</Button>

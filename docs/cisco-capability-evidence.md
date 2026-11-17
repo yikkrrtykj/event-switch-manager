@@ -99,6 +99,24 @@ WEB-02 may show documented support, limits and independent device-verification s
 UNKNOWN remains editable as planning intent. The read path leaves the revision UUID,
 canonical JSON, SHA-256 and ETag intact. The UI integration is tracked at #5.
 
+### Unsaved draft preview
+
+The Port Editor calls a separate read-only endpoint for the current draft:
+
+`POST /api/v1/events/{event_id}/plan/capability-preview`
+
+The body carries the complete EventPlan plus 1–32 distinct capability IDs, the
+assignment, an optional interface or Stack member, and optional speed/duplex
+overrides. The response uses `source: "unsaved-draft"` and returns a canonical
+`draft_fingerprint` and a complete `input_fingerprint`. A draft target has no
+`revision_id` or `revision_hash`, so it cannot impersonate a saved revision. The
+request never writes to the database, allocates a revision or changes a historical
+revision. Event and assignment identity mismatches return 422; an interface outside
+the submitted assignment returns 404. Unknown inputs and unavailable evidence fail
+closed. Results keep `verification: not-verified`, `deployment_status: blocked` and
+add `draft-not-persisted` to the blockers. See
+[WEB-02B draft-aware capability preview](web-02b-capability-preview.md).
+
 The Foundation CI runs the synthetic capability cases and existing regressions on Windows
 and Linux. Hardware and Console discovery stay SKIP / NOT VERIFIED. Device writes and
 deployment generation remain BLOCKED.

@@ -1,7 +1,9 @@
-"""Resolve documentation against a saved revision without granting deployment permission."""
+"""Resolve documentation for a saved revision or draft without granting deployment."""
 
+import json
 import re
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
@@ -27,7 +29,7 @@ from .planning.inventory import (
     SoftwareProfile,
     StackSnapshot,
 )
-from .planning.plan import PlanRevision
+from .planning.plan import EventPlan, PlanRevision
 from .planning.types import Record
 
 type Speed = int | Literal["auto"]
@@ -90,8 +92,74 @@ class CapabilityDecision(Record):
     deployment_blockers: tuple[str, ...]
 
 
+class DraftTarget(Record):
+    """Draft target identity. It deliberately has no persisted revision identifiers."""
+
+    event_id: UUID
+    assignment_id: UUID
+    physical_device_id: UUID | None
+    interface_id: UUID | None
+    interface_name: str | None
+    stack_member: int | None
+    sku: str | None
+    software: str | None
+    license: str | None
+
+
+class DraftCapabilityDecision(Record):
+    capability_id: CapabilityId
+    verdict: Support
+    reason_code: str
+    reason: str
+    evidence: tuple[Evidence, ...]
+    affected: DraftTarget
+    port_groups: tuple[PortGroup, ...]
+    verification: Literal["not-verified"] = "not-verified"
+    deployment_status: Literal["blocked"] = "blocked"
+    blocks_deployment: Literal[True] = True
+    deployment_blockers: tuple[str, ...]
+
+
+class DraftCapabilityPreview(Record):
+    source: Literal["unsaved-draft"] = "unsaved-draft"
+    draft_fingerprint: str
+    input_fingerprint: str
+    decisions: tuple[DraftCapabilityDecision, ...]
+
+
 class TargetNotFound(LookupError):
-    """The requested assignment or interface is outside this revision scope."""
+    """The requested assignment or interface is outside this plan scope."""
+
+
+@dataclass(frozen=True, slots=True)
+class TargetFields:
+    event_id: UUID
+    assignment_id: UUID
+    physical_device_id: UUID | None
+    interface_id: UUID | None
+    interface_name: str | None
+    stack_member: int | None
+    sku: str | None
+    software: str | None
+    license: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityContext:
+    plan: EventPlan
+    validation_status: Literal["VALID", "VALID_WITH_WARNINGS", "INVALID"]
+    source: Literal["saved-revision", "unsaved-draft"]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedCapability:
+    verdict: Support
+    reason_code: str
+    reason: str
+    evidence: tuple[Evidence, ...]
+    port_groups: tuple[PortGroup, ...]
+    target: TargetFields
+    deployment_blockers: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,12 +180,15 @@ def exact_pid(asset: PhysicalDevice | None) -> str | None:
 
 
 def bind(
-    revision: PlanRevision, assignment_id: UUID, interface_id: UUID | None, member: int | None,
+    plan: EventPlan, assignment_id: UUID, interface_id: UUID | None, member: int | None,
+    source: Literal["saved-revision", "unsaved-draft"] = "saved-revision",
 ) -> Binding:
-    plan = revision.plan
     assignment = next((a for a in plan.assignments if a.id == assignment_id), None)
     if assignment is None:
-        raise TargetNotFound("Assignment not found in revision")
+        raise TargetNotFound(
+            "Assignment not found in revision" if source == "saved-revision"
+            else "Assignment not found in plan"
+        )
     port = None
     if interface_id is not None:
         port = next((p for p in plan.physical_interfaces
@@ -262,8 +333,8 @@ def port_setting_finding(
     return Support.SUPPORTED, "duplex-documented", "Copper supports this duplex setting."
 
 
-def resolve_capability(
-    revision: PlanRevision,
+def _resolve(
+    context: CapabilityContext,
     assignment_id: UUID,
     capability: CapabilityId,
     *,
@@ -271,14 +342,13 @@ def resolve_capability(
     stack_member: int | None = None,
     speed: Speed | None = None,
     duplex: Duplex | None = None,
-) -> CapabilityDecision:
+) -> ResolvedCapability:
     """Evaluate only applicable vendor evidence. Device verification is independent."""
-    binding = bind(revision, assignment_id, interface_id, stack_member)
+    binding = bind(context.plan, assignment_id, interface_id, stack_member, context.source)
     asset, port, software = binding.asset, binding.port, binding.assignment.software
     pid = exact_pid(asset)
-    target = Target(
-        event_id=revision.plan.event_id, revision_id=revision.id,
-        revision_hash=revision.content_hash, assignment_id=assignment_id,
+    target = TargetFields(
+        event_id=context.plan.event_id, assignment_id=assignment_id,
         physical_device_id=asset.id if asset and (not binding.stack or binding.member) else None,
         interface_id=interface_id, interface_name=port.name if port else None,
         stack_member=binding.member, sku=asset.model if asset else None,
@@ -288,16 +358,18 @@ def resolve_capability(
 
     def decide(
         finding: Finding, evidence: tuple[Evidence, ...] = (), groups: tuple[PortGroup, ...] = (),
-    ) -> CapabilityDecision:
+    ) -> ResolvedCapability:
         verdict, code, reason = finding
         blockers = ["deployment-generation-disabled", "hardware-not-verified"]
+        if context.source == "unsaved-draft":
+            blockers.append("draft-not-persisted")
         if verdict != Support.SUPPORTED:
             blockers.append(code)
-        if revision.validation_status == "INVALID":
+        if context.validation_status == "INVALID":
             blockers.append("plan-invalid")
-        return CapabilityDecision(
-            capability_id=capability, verdict=verdict, reason_code=code, reason=reason,
-            evidence=evidence, affected=target, port_groups=groups,
+        return ResolvedCapability(
+            verdict=verdict, reason_code=code, reason=reason,
+            evidence=evidence, port_groups=groups, target=target,
             deployment_blockers=tuple(blockers),
         )
 
@@ -406,3 +478,89 @@ def resolve_capability(
         (cite(feature.source, "Feature availability. Operational prerequisites still apply.",
               release=release, licenses=licenses), cite_release(release)),
     )
+
+
+def resolve_capability(
+    revision: PlanRevision,
+    assignment_id: UUID,
+    capability: CapabilityId,
+    *,
+    interface_id: UUID | None = None,
+    stack_member: int | None = None,
+    speed: Speed | None = None,
+    duplex: Duplex | None = None,
+) -> CapabilityDecision:
+    """Read one capability for a persisted revision without changing its identity."""
+    resolved = _resolve(
+        CapabilityContext(revision.plan, revision.validation_status, "saved-revision"),
+        assignment_id, capability, interface_id=interface_id, stack_member=stack_member,
+        speed=speed, duplex=duplex,
+    )
+    target = resolved.target
+    return CapabilityDecision(
+        capability_id=capability, verdict=resolved.verdict, reason_code=resolved.reason_code,
+        reason=resolved.reason, evidence=resolved.evidence,
+        affected=Target(
+            event_id=target.event_id, revision_id=revision.id,
+            revision_hash=revision.content_hash, assignment_id=target.assignment_id,
+            physical_device_id=target.physical_device_id, interface_id=target.interface_id,
+            interface_name=target.interface_name, stack_member=target.stack_member,
+            sku=target.sku, software=target.software, license=target.license,
+        ),
+        port_groups=resolved.port_groups, deployment_blockers=resolved.deployment_blockers,
+    )
+
+
+def resolve_draft_capability(
+    plan: EventPlan,
+    validation_status: Literal["VALID", "VALID_WITH_WARNINGS", "INVALID"],
+    assignment_id: UUID,
+    capability: CapabilityId,
+    *,
+    interface_id: UUID | None = None,
+    stack_member: int | None = None,
+    speed: Speed | None = None,
+    duplex: Duplex | None = None,
+) -> DraftCapabilityDecision:
+    """Evaluate an unsaved draft. It never receives or returns a revision identifier."""
+    resolved = _resolve(
+        CapabilityContext(plan, validation_status, "unsaved-draft"),
+        assignment_id, capability, interface_id=interface_id, stack_member=stack_member,
+        speed=speed, duplex=duplex,
+    )
+    target = resolved.target
+    return DraftCapabilityDecision(
+        capability_id=capability, verdict=resolved.verdict, reason_code=resolved.reason_code,
+        reason=resolved.reason, evidence=resolved.evidence,
+        affected=DraftTarget(
+            event_id=target.event_id, assignment_id=target.assignment_id,
+            physical_device_id=target.physical_device_id, interface_id=target.interface_id,
+            interface_name=target.interface_name, stack_member=target.stack_member,
+            sku=target.sku, software=target.software, license=target.license,
+        ),
+        port_groups=resolved.port_groups, deployment_blockers=resolved.deployment_blockers,
+    )
+
+
+def preview_fingerprint(
+    content_hash: str,
+    assignment_id: UUID,
+    capabilities: tuple[CapabilityId, ...],
+    *,
+    interface_id: UUID | None,
+    stack_member: int | None,
+    speed: Speed | None,
+    duplex: Duplex | None,
+) -> str:
+    """Fingerprint the exact draft and query inputs so stale previews are detectable."""
+    payload = {
+        "draft": content_hash,
+        "assignment_id": str(assignment_id),
+        "capabilities": [capability.value for capability in capabilities],
+        "interface_id": str(interface_id) if interface_id else None,
+        "stack_member": stack_member,
+        "speed": speed,
+        "duplex": duplex,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
