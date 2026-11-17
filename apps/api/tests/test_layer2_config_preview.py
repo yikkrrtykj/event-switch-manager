@@ -14,19 +14,23 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from test_event_plans import API, ORIGIN
-from test_layer2_intent import event, intent, make_plan, new_id, save
+from test_layer2_intent import event, intent, make_plan, make_stack_plan, new_id, save
 
 import event_switch_manager.planning.layer2_config_preview as layer2_config_preview
 from event_switch_manager.app import create_app
 from event_switch_manager.planning.layer2_config_preview import (
+    JSON_SCHEMA_DIALECT,
     PREVIEW_CONTRACT_ID,
     PREVIEW_SCHEMA_VERSION,
     Layer2ConfigPreview,
     Layer2DeviceConfigPreview,
     PreviewInputError,
+    aggregate_preview_json_schema,
     build_layer2_config_preview,
     config_preview_json_schema,
+    device_preview_json_schema,
     preview_contract_fingerprint,
     verify_intent_binding,
 )
@@ -577,51 +581,236 @@ def test_preview_exposes_no_cli_or_device_operation_path(
     assert "cli: None" in source
 
 
-def test_json_schema_is_published_and_validates_documents(
+_MISSING = object()
+
+
+def published_schema(client: TestClient, kind: str) -> dict[str, Any]:
+    response = client.get(f"{API}/contracts/layer2-config-preview/schema/{kind}")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("application/schema+json")
+    return cast(dict[str, Any], response.json())
+
+
+def collect_refs(value: object) -> Iterator[str]:
+    if isinstance(value, dict):
+        mapping = cast(dict[str, object], value)
+        for key, item_value in mapping.items():
+            if key == "$ref" and isinstance(item_value, str):
+                yield item_value
+            yield from collect_refs(item_value)
+    elif isinstance(value, list):
+        for item_value in cast(list[object], value):
+            yield from collect_refs(item_value)
+
+
+def resolve_pointer(document: object, pointer: str) -> object:
+    assert pointer.startswith("#/"), pointer
+    node: object = document
+    for token in pointer[2:].split("/"):
+        token = token.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, list):
+            node = cast(list[object], node)[int(token)]
+        else:
+            mapping = cast(dict[str, object], node)
+            assert token in mapping, pointer
+            node = mapping[token]
+    return node
+
+
+def mutate(
+    document: dict[str, Any], path: tuple[str | int, ...], value: object,
+) -> dict[str, Any]:
+    clone = copy.deepcopy(document)
+    node: Any = clone
+    for token in path[:-1]:
+        node = node[token]
+    if value is _MISSING:
+        del node[path[-1]]
+    else:
+        node[path[-1]] = value
+    return clone
+
+
+def schema_errors(schema: dict[str, Any], document: object) -> list[str]:
+    validator = Draft202012Validator(schema)
+    return [error.message for error in validator.iter_errors(document)]
+
+
+def test_schema_catalog_and_document_schema_media_types(
     client: TestClient,
 ) -> None:
-    response = client.get(f"{API}/contracts/layer2-config-preview/schema")
-    assert response.status_code == 200
-    assert "application/schema+json" in response.headers["content-type"]
-    schema = cast(dict[str, Any], response.json())
-    assert schema["contract_id"] == PREVIEW_CONTRACT_ID
-    assert schema["preview_schema_version"] == PREVIEW_SCHEMA_VERSION
-    assert schema["intent_schema_version"] == 1
-    aggregate = cast(dict[str, Any], schema["aggregate"])
-    device_schema = cast(dict[str, Any], schema["device"])
-    assert aggregate["title"] == "Layer2ConfigPreview"
+    catalog_response = client.get(f"{API}/contracts/layer2-config-preview/schema")
+    assert catalog_response.status_code == 200
+    assert catalog_response.headers["content-type"].startswith("application/json")
+    catalog = cast(dict[str, Any], catalog_response.json())
+    assert catalog == config_preview_json_schema()
+    assert catalog["contract_id"] == PREVIEW_CONTRACT_ID
+    assert catalog["preview_schema_version"] == PREVIEW_SCHEMA_VERSION
+    assert catalog["intent_schema_version"] == 1
+    assert "$schema" not in catalog
+    assert "properties" not in catalog
+    assert preview_contract_fingerprint() == preview_contract_fingerprint()
+    assert len(preview_contract_fingerprint()) == 64
+
+    aggregate_schema = published_schema(client, "aggregate")
+    device_schema = published_schema(client, "device")
+    assert catalog["aggregate"] == aggregate_schema
+    assert catalog["device"] == device_schema
+    assert aggregate_schema == aggregate_preview_json_schema()
+    assert device_schema == device_preview_json_schema()
+    assert aggregate_schema["$schema"] == JSON_SCHEMA_DIALECT
+    assert device_schema["$schema"] == JSON_SCHEMA_DIALECT
+    assert aggregate_schema["title"] == "Layer2ConfigPreview"
     assert device_schema["title"] == "Layer2DeviceConfigPreview"
-    properties = cast(dict[str, dict[str, Any]], aggregate["properties"])
+    properties = cast(dict[str, dict[str, Any]], aggregate_schema["properties"])
     assert properties["executable"]["const"] is False
     assert properties["device_writes_enabled"]["const"] is False
     assert properties["cli"]["type"] == "null"
     assert properties["cli"]["default"] is None
     assert properties["preview_schema_version"]["const"] == 1
     assert properties["contract_id"]["const"] == PREVIEW_CONTRACT_ID
-    assert "ConfigItem" in cast(dict[str, Any], aggregate["$defs"])
-    assert schema == config_preview_json_schema()
-    assert preview_contract_fingerprint() == preview_contract_fingerprint()
-    assert len(preview_contract_fingerprint()) == 64
+    assert "ConfigItem" in cast(dict[str, Any], aggregate_schema["$defs"])
 
     openapi = cast(
         dict[str, Any], client.get(f"{API}/openapi.json").json(),
     )
-    schema_response = cast(
+    paths = cast(dict[str, dict[str, Any]], openapi["paths"])
+    catalog_content = cast(
         dict[str, Any],
-        openapi["paths"][f"{API}/contracts/layer2-config-preview/schema"]["get"][
-            "responses"
-        ]["200"]["content"],
+        paths[f"{API}/contracts/layer2-config-preview/schema"]["get"]["responses"][
+            "200"
+        ]["content"],
     )
-    assert "application/schema+json" in schema_response
-    assert "application/json" not in schema_response
+    assert "application/json" in catalog_content
+    assert "application/schema+json" not in catalog_content
+    for kind in ("aggregate", "device"):
+        content = cast(
+            dict[str, Any],
+            paths[f"{API}/contracts/layer2-config-preview/schema/{kind}"]["get"][
+                "responses"
+            ]["200"]["content"],
+        )
+        assert "application/schema+json" in content
+        assert "application/json" not in content
 
-    event_id = event(client)
+
+def test_published_document_schemas_validate_real_preview_documents(
+    client: TestClient,
+) -> None:
+    aggregate_schema = published_schema(client, "aggregate")
+    device_schema = published_schema(client, "device")
+    for schema in (aggregate_schema, device_schema):
+        Draft202012Validator.check_schema(schema)
+        assert schema["type"] == "object"
+        assert schema["additionalProperties"] is False
+        assert schema["$defs"]
+        refs = set(collect_refs(schema))
+        assert refs
+        for ref in refs:
+            assert ref.startswith("#/")
+            assert resolve_pointer(schema, ref) is not None
+
+    def routed_plan(event_id: str) -> dict[str, Any]:
+        return make_plan(event_id, ports=[{
+            "name": "Gi1/0/1",
+            "settings": {"mode": "routed", "address": "10.0.0.1/30"},
+        }])
+
+    builders = (
+        ("channel", full_plan),
+        ("stack", make_stack_plan),
+        ("routed", routed_plan),
+    )
+    for label, builder in builders:
+        event_id = event(client, f"Schema validation {label}")
+        saved = save(client, event_id, builder(event_id))
+        aggregate = preview(client, event_id, saved["id"])
+        errors = schema_errors(aggregate_schema, aggregate)
+        assert not errors, f"{label} aggregate: {errors[:3]}"
+        assert isinstance(
+            Layer2ConfigPreview.model_validate(aggregate), Layer2ConfigPreview,
+        )
+        for device in cast(list[Device], aggregate["devices"]):
+            document = device_document(
+                client, event_id, saved["id"], device["assignment_id"],
+            )
+            errors = schema_errors(device_schema, document)
+            assert not errors, f"{label} device {device['hostname']}: {errors[:3]}"
+            assert isinstance(
+                Layer2DeviceConfigPreview.model_validate(document),
+                Layer2DeviceConfigPreview,
+            )
+
+    baseline_event = event(client, "Schema validation baseline")
+    first_plan = full_plan(baseline_event)
+    save(client, baseline_event, first_plan)
+    second_plan = copy.deepcopy(first_plan)
+    second_plan["physical_interfaces"][0]["settings"] = {
+        "mode": "trunk", "native_vlan": 10, "allowed_vlans": [10, 20],
+    }
+    second = save(client, baseline_event, second_plan)
+    aggregate = preview(client, baseline_event, second["id"])
+    assert aggregate["before_state_evidence"] == "planning-baseline"
+    assert not schema_errors(aggregate_schema, aggregate)
+    for device in cast(list[Device], aggregate["devices"]):
+        document = device_document(
+            client, baseline_event, second["id"], device["assignment_id"],
+        )
+        assert not schema_errors(device_schema, document)
+
+
+def test_published_document_schemas_reject_unsafe_or_malformed_documents(
+    client: TestClient,
+) -> None:
+    aggregate_schema = published_schema(client, "aggregate")
+    device_schema = published_schema(client, "device")
+    event_id = event(client, "Schema rejection")
     saved = save(client, event_id, full_plan(event_id))
-    result = preview(client, event_id, saved["id"])
-    assignment_id = cast(Device, result["devices"][0])["assignment_id"]
-    document = device_document(client, event_id, saved["id"], assignment_id)
-    assert Layer2ConfigPreview.model_validate(result) is not None
-    assert Layer2DeviceConfigPreview.model_validate(document) is not None
+    aggregate = preview(client, event_id, saved["id"])
+    device = device_document(
+        client, event_id, saved["id"],
+        cast(Device, aggregate["devices"][0])["assignment_id"],
+    )
+    aggregate_mutations: tuple[tuple[str, tuple[str | int, ...], object], ...] = (
+        ("executable true", ("executable",), True),
+        ("device writes true", ("device_writes_enabled",), True),
+        ("cli string", ("cli",), "interface Gi1/0/1"),
+        ("preview schema version", ("preview_schema_version",), 2),
+        ("contract id", ("contract_id",), "other-contract"),
+        ("missing preview fingerprint", ("preview_fingerprint",), _MISSING),
+        ("missing event id", ("event_id",), _MISSING),
+        ("devices type", ("devices",), "not-a-list"),
+        (
+            "nested deployable",
+            ("devices", 0, "deployability", "deployable"),
+            True,
+        ),
+    )
+    for label, path, value in aggregate_mutations:
+        mutated = mutate(aggregate, path, value)
+        errors = schema_errors(aggregate_schema, mutated)
+        assert errors, label
+    device_mutations: tuple[tuple[str, tuple[str | int, ...], object], ...] = (
+        ("executable true", ("executable",), True),
+        ("device writes true", ("device_writes_enabled",), True),
+        ("cli string", ("cli",), "interface Gi1/0/1"),
+        ("preview schema version", ("preview_schema_version",), 2),
+        ("contract id", ("contract_id",), "other-contract"),
+        ("missing device", ("device",), _MISSING),
+        ("missing revision id", ("revision_id",), _MISSING),
+        ("vlan scope type", ("vlan_scope",), []),
+        (
+            "nested deployable",
+            ("device", "deployability", "deployable"),
+            True,
+        ),
+    )
+    for label, path, value in device_mutations:
+        mutated = mutate(device, path, value)
+        errors = schema_errors(device_schema, mutated)
+        assert errors, label
+    assert not Draft202012Validator(aggregate_schema).is_valid({})
+    assert not Draft202012Validator(device_schema).is_valid({})
 
 
 def test_planning_baseline_values_and_unknown_baseline_fields(

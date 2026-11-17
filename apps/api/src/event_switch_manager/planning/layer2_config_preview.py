@@ -1329,14 +1329,38 @@ def build_device_layer2_config_preview(
     return draft.model_copy(update={"preview_fingerprint": _fingerprint(draft)})
 
 
+JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
+
+
+def aggregate_preview_json_schema() -> dict[str, object]:
+    """Return the Draft 2020-12 JSON Schema for an aggregate preview document."""
+    return {
+        **Layer2ConfigPreview.model_json_schema(),
+        "$schema": JSON_SCHEMA_DIALECT,
+    }
+
+
+def device_preview_json_schema() -> dict[str, object]:
+    """Return the Draft 2020-12 JSON Schema for a single-device preview document."""
+    return {
+        **Layer2DeviceConfigPreview.model_json_schema(),
+        "$schema": JSON_SCHEMA_DIALECT,
+    }
+
+
 def config_preview_json_schema() -> dict[str, object]:
-    """Return the versioned JSON Schema for both preview documents."""
+    """Return the versioned Schema Catalog wrapper for both preview documents.
+
+    The catalog is a directory, not itself a document validator. Use
+    :func:`aggregate_preview_json_schema` or :func:`device_preview_json_schema`
+    for a schema that can be handed directly to a standard validator.
+    """
     return {
         "contract_id": PREVIEW_CONTRACT_ID,
         "preview_schema_version": PREVIEW_SCHEMA_VERSION,
         "intent_schema_version": SUPPORTED_INTENT_SCHEMA_VERSION,
-        "aggregate": Layer2ConfigPreview.model_json_schema(),
-        "device": Layer2DeviceConfigPreview.model_json_schema(),
+        "aggregate": aggregate_preview_json_schema(),
+        "device": device_preview_json_schema(),
     }
 
 
@@ -1346,6 +1370,7 @@ def preview_contract_fingerprint() -> str:
 
 
 __all__ = [
+    "JSON_SCHEMA_DIALECT",
     "PREVIEW_BASE_BLOCKERS",
     "PREVIEW_CONTRACT_ID",
     "PREVIEW_SCHEMA_VERSION",
@@ -1374,9 +1399,11 @@ __all__ = [
     "PreviewTargetNotFound",
     "VlanDefinitionReference",
     "VlanScopePreview",
+    "aggregate_preview_json_schema",
     "build_device_layer2_config_preview",
     "build_layer2_config_preview",
     "config_preview_json_schema",
+    "device_preview_json_schema",
     "intent_fingerprint",
     "preview_contract_fingerprint",
     "verify_intent_binding",

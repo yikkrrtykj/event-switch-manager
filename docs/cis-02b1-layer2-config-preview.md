@@ -36,7 +36,9 @@ All routes are read-only `GET` requests.
 | --- | --- |
 | `/api/v1/events/{event_id}/plan-revisions/{revision_id}/layer2-config-preview` | One preview document with `devices[]`. |
 | `/api/v1/events/{event_id}/plan-revisions/{revision_id}/layer2-config-preview/devices/{assignment_id}` | One self-contained document for a single Assignment. |
-| `/api/v1/contracts/layer2-config-preview/schema` | Versioned JSON Schema (`application/schema+json`) for both documents. |
+| `/api/v1/contracts/layer2-config-preview/schema` | Schema Catalog (`application/json`): contract metadata plus both document schemas. |
+| `/api/v1/contracts/layer2-config-preview/schema/aggregate` | Draft 2020-12 JSON Schema for the aggregate document (`application/schema+json`). |
+| `/api/v1/contracts/layer2-config-preview/schema/device` | Draft 2020-12 JSON Schema for the single-device document (`application/schema+json`). |
 
 A revision from another event returns `404`. An Assignment outside the revision
 intent returns `404`. A revision whose CIS-02A intent cannot be bound to it
@@ -345,23 +347,38 @@ on another Assignment can never be merged into it.
 
 ## JSON Schema
 
-`GET /api/v1/contracts/layer2-config-preview/schema` returns:
+The contract publishes one Schema Catalog and two document schemas:
+
+| Route | Media type | Purpose |
+| --- | --- | --- |
+| `/api/v1/contracts/layer2-config-preview/schema` | `application/json` | Catalog: `contract_id`, both schema versions, and the two generated schemas. It is a directory, not a validator schema. |
+| `/api/v1/contracts/layer2-config-preview/schema/aggregate` | `application/schema+json` | Aggregate preview document schema, directly usable by a standard validator. |
+| `/api/v1/contracts/layer2-config-preview/schema/device` | `application/schema+json` | Single-device preview document schema, directly usable by a standard validator. |
+
+The catalog body is:
 
 ```json
 {
   "contract_id": "cis-02b1-layer2-config-preview-v1",
   "preview_schema_version": 1,
   "intent_schema_version": 1,
-  "aggregate": { "$defs": { "…": "…" }, "properties": { "…": "…" } },
-  "device": { "$defs": { "…": "…" }, "properties": { "…": "…" } }
+  "aggregate": { "$schema": "https://json-schema.org/draft/2020-12/schema", "…": "…" },
+  "device": { "$schema": "https://json-schema.org/draft/2020-12/schema", "…": "…" }
 }
 ```
 
-The schema is generated from the typed Pydantic models, published as
-`application/schema+json`, and covers the safety constants
-(`executable: false`, `device_writes_enabled: false`, `cli: null`,
-`preview_schema_version: 1`). Tests validate generated documents against the
-models and assert the schema constants.
+Both document schemas are generated from the typed Pydantic models (one source,
+no hand-written duplicate), declare the Draft 2020-12 `$schema`, set
+`additionalProperties: false`, and carry their `$defs` inline so every `$ref`
+(`#/$defs/...`) resolves inside the returned document. They encode the safety
+constants as `const`/`type: null` constraints: `executable: false`,
+`device_writes_enabled: false`, `cli: null`, `preview_schema_version: 1` and the
+contract ID. A standard Draft 2020-12 validator accepts real saved-revision,
+Stack, Port-Channel and routed-port previews, and rejects `executable: true`,
+`device_writes_enabled: true`, a non-null `cli`, a wrong schema version, a wrong
+contract ID, missing required fields and wrong field types. Tests use the
+independent `jsonschema` package for this; `Pydantic.model_validate` is kept only
+as a complementary check, not as a substitute.
 
 ## Model examples
 
@@ -491,7 +508,10 @@ The preview suite covers:
 - missing PID, missing License, ROMMON image and Stack identity failure;
 - invalid revisions, cross-event isolation, unknown Assignment, immutable
   revision history and deterministic fingerprints;
-- JSON Schema publication and model validation;
+- JSON Schema publication: catalog media type, direct aggregate/device schemas,
+  Draft 2020-12 validation of real saved revision/Stack/Port-Channel/routed
+  documents, `$ref`/`$defs` resolution, and rejection of unsafe or malformed
+  documents by an independent `jsonschema` validator;
 - no CLI output, no command field, no device-operation route and `GET`-only
   preview routes.
 

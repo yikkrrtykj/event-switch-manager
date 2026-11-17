@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -9,10 +9,27 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from .models import Device, Event
-from .planning.layer2_config_preview import config_preview_json_schema
+from .planning.layer2_config_preview import (
+    aggregate_preview_json_schema,
+    config_preview_json_schema,
+    device_preview_json_schema,
+)
 from .schemas import DeviceInput, DeviceView, EventInput, EventView, HealthView
 
 router = APIRouter(prefix="/api/v1")
+
+SCHEMA_MEDIA_TYPE = "application/schema+json"
+
+
+def _schema_route_responses(description: str) -> dict[int | str, dict[str, Any]]:
+    return {
+        200: {
+            "description": description,
+            "content": {
+                SCHEMA_MEDIA_TYPE: {"schema": {"type": "object"}},
+            },
+        },
+    }
 
 
 def get_session(request: Request) -> Iterator[Session]:
@@ -37,21 +54,44 @@ def health(session: DatabaseSession) -> HealthView:
 
 @router.get(
     "/contracts/layer2-config-preview/schema",
-    response_class=Response,
-    responses={
-        200: {
-            "description": "CIS-02B1 Layer 2 configuration preview JSON Schema",
-            "content": {
-                "application/schema+json": {"schema": {"type": "object"}},
-            },
-        },
-    },
+    response_class=JSONResponse,
 )
 def read_layer2_config_preview_schema() -> JSONResponse:
-    """Versioned JSON Schema for the read-only CIS-02B1 preview contract."""
+    """Schema Catalog for the read-only CIS-02B1 preview contract.
+
+    The catalog is a directory of contract metadata and document schemas. It is
+    not itself a JSON Schema validator; use the aggregate or device schema route.
+    """
+    return JSONResponse(content=config_preview_json_schema())
+
+
+@router.get(
+    "/contracts/layer2-config-preview/schema/aggregate",
+    response_class=Response,
+    responses=_schema_route_responses(
+        "Draft 2020-12 JSON Schema for an aggregate CIS-02B1 preview document"
+    ),
+)
+def read_layer2_config_preview_aggregate_schema() -> JSONResponse:
+    """Directly validatable aggregate preview document JSON Schema."""
     return JSONResponse(
-        content=config_preview_json_schema(),
-        media_type="application/schema+json",
+        content=aggregate_preview_json_schema(),
+        media_type=SCHEMA_MEDIA_TYPE,
+    )
+
+
+@router.get(
+    "/contracts/layer2-config-preview/schema/device",
+    response_class=Response,
+    responses=_schema_route_responses(
+        "Draft 2020-12 JSON Schema for a single-device CIS-02B1 preview document"
+    ),
+)
+def read_layer2_config_preview_device_schema() -> JSONResponse:
+    """Directly validatable single-device preview document JSON Schema."""
+    return JSONResponse(
+        content=device_preview_json_schema(),
+        media_type=SCHEMA_MEDIA_TYPE,
     )
 
 
