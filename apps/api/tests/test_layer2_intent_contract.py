@@ -494,14 +494,15 @@ def test_static_port_channel_does_not_require_lacp(client: TestClient) -> None:
     assert static_result["readiness"]["vendor_documentation"] == "unknown"
     assert static_result["readiness"]["deployment_allowed"] is False
 
-    active_event = event(client, "Static active comparison")
-    active_plan = channel_plan(active_event, lacp_modes=["active"])
-    active = save(client, active_event, active_plan)
-    active_result = intent(client, active_event, active["id"])
-    assert any(
-        check["capability"] == "lacp"
-        for check in device_map(active_result)["L2-Access"]["capability_checks"]
-    )
+    for mode in ("active", "passive"):
+        mode_event = event(client, f"Static {mode} comparison")
+        mode_plan = channel_plan(mode_event, lacp_modes=[mode])
+        mode_saved = save(client, mode_event, mode_plan)
+        mode_result = intent(client, mode_event, mode_saved["id"])
+        assert any(
+            check["capability"] == "lacp"
+            for check in device_map(mode_result)["L2-Access"]["capability_checks"]
+        )
 
     mixed_event = event(client, "Static mixed comparison")
     mixed_plan = channel_plan(mixed_event, lacp_modes=["static", "active"])
