@@ -3,11 +3,13 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import Engine, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from .models import Device, Event
+from .planning.layer2_config_preview import config_preview_json_schema
 from .schemas import DeviceInput, DeviceView, EventInput, EventView, HealthView
 
 router = APIRouter(prefix="/api/v1")
@@ -31,6 +33,15 @@ def health(session: DatabaseSession) -> HealthView:
     except SQLAlchemyError:
         raise HTTPException(status_code=503, detail="Planning database unavailable") from None
     return HealthView(status="ok", database="ready", device_writes_enabled=False)
+
+
+@router.get("/contracts/layer2-config-preview/schema", response_class=JSONResponse)
+def read_layer2_config_preview_schema() -> JSONResponse:
+    """Versioned JSON Schema for the read-only CIS-02B1 preview contract."""
+    return JSONResponse(
+        content=config_preview_json_schema(),
+        media_type="application/schema+json",
+    )
 
 
 @router.get("/events", response_model=list[EventView])
