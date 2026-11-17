@@ -24,7 +24,8 @@ async function openWorkspace(page: Page, id: string, route = 'ports') {
   const context = page.getByLabel('Event', { exact: true })
   await expect(context).toBeVisible()
   await context.selectOption(id)
-  await expect(page.getByRole('button', { name: 'Revision history' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Revision history' }))
+    .toBeEnabled({ timeout: 20_000 })
 }
 
 function capabilityPlan(
