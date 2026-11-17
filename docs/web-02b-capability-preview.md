@@ -119,3 +119,6 @@ reissue a capability query.
   screenshot/overflow checks at 320, 800, 1280, 1440 and 1920 CSS pixels.
 - Hardware and field verification remain SKIP / NOT VERIFIED. No Cisco CLI
   renderer, Console execution, Hillstone write or deployment path is added.
+
+The WEB-02C controls layer maps these decisions to Port Editor candidates; see [WEB-02C capability-driven controls](web-02c-capability-controls.md).
+

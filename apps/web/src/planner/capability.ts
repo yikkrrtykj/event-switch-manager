@@ -189,6 +189,15 @@ const reasonLabels: Readonly<Record<string, MessageKey>> = {
   'prerequisites-unobserved': 'capabilityReasonPrerequisitesUnobserved',
   'feature-license-unverified': 'capabilityReasonFeatureLicenseUnverified',
   'plan-invalid': 'capabilityReasonPlanInvalid',
+  'control-evidence-pending': 'capabilityReasonControlEvidencePending',
+  'control-evidence-missing': 'capabilityReasonControlEvidenceMissing',
+  'candidate-unavailable': 'capabilityReasonCandidateUnavailable',
+  'poe-disabled': 'capabilityReasonPoeDisabled',
+  'poe-negotiation-unverified': 'capabilityReasonPoeNegotiationUnverified',
+  'poe-default-unverified': 'capabilityReasonPoeDefaultUnverified',
+  'feature-disabled': 'capabilityReasonFeatureDisabled',
+  'control-not-restricted': 'capabilityReasonControlNotRestricted',
+  'control-default': 'capabilityReasonControlDefault',
 }
 
 const blockerLabels: Readonly<Record<string, MessageKey>> = {

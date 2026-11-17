@@ -9,8 +9,14 @@ import type { Field } from './catalog'
 import { fingerprint, object } from './model'
 import type { Issue, Plan, RecordValue, Value } from './model'
 
-type FieldsProps = { fields: Field[]; plan: Plan; record: RecordValue; path: string; issues: Issue[]; update: (record: RecordValue) => void }
-export function Fields({ fields, plan, record, path, issues, update }: FieldsProps) {
+type ChoiceState = { disabled?: (string | number)[] }
+type FieldsProps = {
+  fields: Field[]; plan: Plan; record: RecordValue; path: string; issues: Issue[]
+  update: (record: RecordValue) => void
+  choiceStates?: Record<string, ChoiceState>
+  notes?: Record<string, ReactNode>
+}
+export function Fields({ fields, plan, record, path, issues, update, choiceStates, notes }: FieldsProps) {
   const { t, locale } = useMessages()
   const grid = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -36,19 +42,23 @@ export function Fields({ fields, plan, record, path, issues, update }: FieldsPro
     const available = field.reference ? options(plan, field.reference,
       (candidate) => field.accepts?.(candidate, record, plan) ?? true)
       : (field.choices ?? []).map((id) => ({ id, label: id === '' ? t('unspecified') : enumLabel(t, id, field.key) }))
+    const disabledChoices = choiceStates?.[field.key]?.disabled ?? []
     const selection = (current: Value | undefined) => <>
       {!available.some((item) => item.id === '') && <option value="">
         {field.optional ? t('unspecified') : t('selectARecord')}</option>}
       {current != null && current !== '' && !available.some((item) => item.id === current) &&
         <option value={String(current)}>{t('unresolvedChoice', { value: String(current) })}</option>}
-      {available.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+      {available.map((item) => <option key={item.id} value={item.id}
+        disabled={disabledChoices.includes(item.id) || undefined}>{item.label}</option>)}
     </>
     const lookup = (id: string) => available.find((item) => String(item.id) === id)?.id ?? null
     const findings = issues.filter((issue) => issue.path === key)
+    const note = notes?.[field.key]
     const attributes = {
       'data-field': key,
       'aria-invalid': findings.some((issue) => issue.severity === 'ERROR') || undefined,
       'aria-describedby': findings.length ? key + '-issues' : undefined,
+      'aria-details': note ? key + '-note' : undefined,
     }
     if (field.type === 'refs' || field.type === 'records') {
       const nested = field.children ?? []
@@ -74,6 +84,7 @@ export function Fields({ fields, plan, record, path, issues, update }: FieldsPro
         </div>)}
         {findings.length > 0 && <div id={key + '-issues'}>{findings.map((issue, index) =>
           <small key={index} className={issue.severity === 'ERROR' ? 'error-text' : 'muted'}>{describeIssue(issue, locale, t)}</small>)}</div>}
+        {note && <div id={key + '-note'} className="field-note">{note}</div>}
         <Button onClick={() => change([...entries, field.type === 'records' ? defaults(nested) : null])}>{t('addEntry')}</Button>
       </fieldset>
     }
@@ -95,6 +106,7 @@ export function Fields({ fields, plan, record, path, issues, update }: FieldsPro
             }} />}
       {findings.length > 0 && <div id={key + '-issues'}>{findings.map((issue, index) =>
         <small key={index} className={issue.severity === 'ERROR' ? 'error-text' : 'muted'}>{describeIssue(issue, locale, t)}</small>)}</div>}
+      {note && <div id={key + '-note'} className="field-note">{note}</div>}
     </div>
   })}</div>
 }

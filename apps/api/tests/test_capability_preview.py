@@ -303,6 +303,45 @@ def test_draft_medium_and_rate_differences(
     assert (group["medium"], group["rates"]) == (medium, rates)
 
 
+def test_draft_candidates_keep_documented_port_groups(client: TestClient) -> None:
+    """The Port Editor candidate policy relies on the documented range for every target."""
+    event_id = event(client)
+    plan = draft_plan(event_id, pid="C9300L-24T-4G")
+    copper = by_capability(preview(
+        client, event_id, plan, ("speed", "duplex", "poe"), interface_id=uid(3),
+    ))
+    assert (copper["speed"]["verdict"], copper["speed"]["reason_code"]) == (
+        "unknown", "speed-required",
+    )
+    assert copper["speed"]["port_groups"][0]["medium"] == "copper-rj45"
+    assert copper["speed"]["port_groups"][0]["rates"] == [10, 100, 1000]
+    assert copper["duplex"]["port_groups"][0]["rates"] == [10, 100, 1000]
+    assert copper["poe"]["verdict"] == "unsupported"
+    assert copper["poe"]["port_groups"][0]["poe_plus"] is False
+
+    plan["physical_interfaces"][0]["name"] = "GigabitEthernet1/1/4"
+    fiber_speed = preview(client, event_id, plan, ("speed",), interface_id=uid(3), speed=1000)
+    assert (fiber_speed["decisions"][0]["verdict"], fiber_speed["decisions"][0]["reason_code"]) == (
+        "unknown", "optic-unknown",
+    )
+    assert fiber_speed["decisions"][0]["port_groups"][0]["medium"] == "sfp"
+    assert fiber_speed["decisions"][0]["port_groups"][0]["rates"] == [1000]
+
+    plan["physical_interfaces"][0]["name"] = "Gi1/0/1"
+    outside = preview(client, event_id, plan, ("speed",), interface_id=uid(3), speed=2500)
+    assert outside["decisions"][0]["verdict"] == "unsupported"
+    assert outside["decisions"][0]["reason_code"] == "speed-outside-port-range"
+    assert outside["decisions"][0]["port_groups"][0]["rates"] == [10, 100, 1000]
+
+    licensed = draft_plan(event_id, pid="C9300L-24T-4G", license_name="LAN Base")
+    unknown = by_capability(preview(
+        client, event_id, licensed, ("speed", "duplex"), interface_id=uid(3),
+    ))
+    for capability in ("speed", "duplex"):
+        assert unknown[capability]["reason_code"] == "license-unmatched"
+        assert unknown[capability]["port_groups"] == []
+
+
 def test_draft_speed_and_duplex_options(client: TestClient) -> None:
     event_id = event(client)
     plan = draft_plan(event_id)
