@@ -603,6 +603,18 @@ def test_json_schema_is_published_and_validates_documents(
     assert preview_contract_fingerprint() == preview_contract_fingerprint()
     assert len(preview_contract_fingerprint()) == 64
 
+    openapi = cast(
+        dict[str, Any], client.get(f"{API}/openapi.json").json(),
+    )
+    schema_response = cast(
+        dict[str, Any],
+        openapi["paths"][f"{API}/contracts/layer2-config-preview/schema"]["get"][
+            "responses"
+        ]["200"]["content"],
+    )
+    assert "application/schema+json" in schema_response
+    assert "application/json" not in schema_response
+
     event_id = event(client)
     saved = save(client, event_id, full_plan(event_id))
     result = preview(client, event_id, saved["id"])
@@ -660,6 +672,8 @@ def test_planning_baseline_values_and_unknown_baseline_fields(
     assert speed["planned"]["value"] == 1000
     assert speed["baseline"]["state"] == "not-in-baseline"
     assert speed["baseline"]["value"] is None
+    assert speed["baseline"]["revision_id"] == first["id"]
+    assert speed["baseline"]["revision_hash"] == first["content_hash"]
     access_vlan = item(device, "Gi1/0/1", "access_vlan")
     assert access_vlan["planned"]["present"] is False
     assert access_vlan["planned"]["source"] == "not-in-plan"

@@ -180,6 +180,12 @@ def test_stack_identity_member_state_and_unresolved_pid_fail_closed(
         blocker.startswith("identity-incomplete:stack-member-not-ready:2:missing")
         for blocker in missing_device["deployability"]["blockers"]
     )
+    item_blockers = item(missing_device, "Gi2/0/1", "mode")["deployability"]["blockers"]
+    assert "identity-incomplete:stack-member-not-ready:2:missing" in item_blockers
+    assert not any(
+        blocker.startswith("identity-incomplete:identity-incomplete:")
+        for blocker in item_blockers
+    )
 
     unresolved_plan = copy.deepcopy(first_plan)
     unresolved_plan["physical_devices"][1]["verified_serial"] = None
@@ -353,11 +359,14 @@ def test_port_channel_lacp_modes_and_direct_member_migration(
     removed_number = item(detached_device, "Port-channel2", "number")
     assert removed_number["planned"]["present"] is False
     assert removed_number["baseline"]["value"] == 2
+    assert removed_number["diff"]["changed"] is True
     removal = next(
         change for change in cast(list[dict[str, Any]], detached_device["planned_diff"])
         if change["target_id"] == removed_logical and change["field"] == "presence"
     )
     assert removal["transition"] == "port-channel-removed"
+    assert removed_number["diff"]["transition"] == "port-channel-removed"
+    assert removed_number["diff"]["change_id"] == removal["change_id"]
     assert any(
         dependency["kind"] == "port-channel-removal"
         for dependency in cast(
@@ -490,6 +499,52 @@ def test_vlan_reference_removal_without_definition_change_is_a_difference(
     assert definitions[20]["change_id"] is None
     assert definitions[20]["transition"] is None
     assert item(device, "Gi1/0/2", "access_vlan")["planned"]["value"] == 10
+
+
+def test_removed_interface_is_reported_as_a_planned_removal(
+    client: TestClient,
+) -> None:
+    event_id = event(client, "Preview interface removal")
+    first_plan = make_plan(
+        event_id,
+        ports=[
+            {"name": "Gi1/0/1", "settings": dict(ACCESS)},
+            {"name": "Gi1/0/2", "settings": dict(ACCESS)},
+        ],
+    )
+    save(client, event_id, first_plan)
+    removed_port = first_plan["physical_interfaces"][1]["id"]
+    second_plan = copy.deepcopy(first_plan)
+    second_plan["physical_interfaces"] = second_plan["physical_interfaces"][:1]
+    second = save(client, event_id, second_plan)
+    result = preview(client, event_id, second["id"])
+    device = first_device(result)
+    removed_mode = item(device, "Gi1/0/2", "mode")
+    assert removed_mode["planned"]["present"] is False
+    assert removed_mode["planned"]["source"] == "not-in-plan"
+    assert removed_mode["baseline"]["value"] == "access"
+    assert removed_mode["diff"]["changed"] is True
+    assert removed_mode["diff"]["transition"] == "interface-removed"
+    presence = next(
+        change for change in cast(list[dict[str, Any]], device["planned_diff"])
+        if change["target_id"] == removed_port and change["field"] == "presence"
+    )
+    assert presence["transition"] == "interface-removed"
+    assert removed_mode["diff"]["change_id"] == presence["change_id"]
+    assert all(
+        candidate["diff"]["changed"] is True
+        for candidate in items(device) if candidate["target_name"] == "Gi1/0/2"
+    )
+    assert device["summary"]["changed_items"] >= 1
+    statements = cast(list[str], device["human_readable"]["statements"])
+    assert any(
+        statement.startswith("Gi1/0/2: no current planning intent")
+        for statement in statements
+    )
+    assert not any(
+        statement.startswith("Gi1/0/2: planned None boundary, unchanged")
+        for statement in statements
+    )
 
 
 def test_unused_port_shutdown_and_explicit_admin_state_provenance(

@@ -873,8 +873,7 @@ def _item_blockers(
         )
     if gate == "identity-incomplete":
         blockers.extend(
-            f"identity-incomplete:{code}" for code in risk.codes
-            if code.startswith("identity-incomplete:")
+            code for code in risk.codes if code.startswith("identity-incomplete:")
         )
     if gate == "intent-invalid":
         blockers.append("structured-intent-invalid")
@@ -915,8 +914,8 @@ def _baseline_value(
         )
     if baseline is None:
         return BaselineValue(
-            state="not-in-baseline", value=None, revision_id=None,
-            revision_hash=None,
+            state="not-in-baseline", value=None, revision_id=revision_id,
+            revision_hash=revision_hash,
         )
     return BaselineValue(
         state="planning-baseline", value=baseline.value,
@@ -926,11 +925,16 @@ def _baseline_value(
 
 def _matching_change(
     context: _DeviceContext, draft: _Draft,
+    planned: _Draft | None,
 ) -> PlannedChange | None:
     change = context.changes.get(_draft_key(draft))
     if change is None and draft.target_kind == "vlan":
         # CIS-02A records a rename under the ``name`` field of the same VLAN.
         change = context.changes.get((draft.target_kind, draft.target_id, "name"))
+    if change is None and planned is None:
+        # A removed interface/Port-Channel emits only a ``presence`` change; it is
+        # the removal/cleanup difference for every field of that target.
+        change = context.changes.get((draft.target_kind, draft.target_id, "presence"))
     return change
 
 
@@ -942,7 +946,7 @@ def _config_item(
     draft = planned if planned is not None else baseline
     assert draft is not None
     capability = _assess_capability(context, planned)
-    change = _matching_change(context, draft)
+    change = _matching_change(context, draft, planned)
     conflicts = _matching_conflicts(context.device.conflicts, draft)
     risk = _risk(context, planned, baseline, capability, change, conflicts)
     gate = _gate_from_risk(risk)
@@ -1079,6 +1083,13 @@ def _human_readable(
             PreviewCategory.ROUTED_BOUNDARY,
         } or item.field != "mode":
             continue
+        if not item.planned.present:
+            statements.append(
+                f"{item.target_name}: no current planning intent; planning "
+                f"baseline {item.baseline.value}. The change set records "
+                f"{item.diff.transition or 'a planned removal'}."
+            )
+            continue
         if item.diff.changed:
             baseline_text = (
                 "no earlier planning baseline"
@@ -1097,16 +1108,30 @@ def _human_readable(
             )
     for item in items:
         if item.category is PreviewCategory.LACP and item.diff.changed:
-            statements.append(
-                f"{item.target_name}: planned LACP mode {item.planned.value}, "
-                f"previous planning baseline {item.baseline.value}."
-            )
+            if item.planned.present:
+                statements.append(
+                    f"{item.target_name}: planned LACP mode {item.planned.value}, "
+                    f"previous planning baseline {item.baseline.value}."
+                )
+            else:
+                statements.append(
+                    f"{item.target_name}: LACP mode no longer planned; change set "
+                    f"records {item.diff.transition or 'removal'}."
+                )
     for item in items:
         if item.category is PreviewCategory.VLAN and item.diff.changed:
-            statements.append(
-                f"VLAN {item.target_id}: {item.diff.transition or 'planned change'}, "
-                f"planned name {item.planned.value}, baseline {item.baseline.value}."
-            )
+            if item.planned.present:
+                statements.append(
+                    f"VLAN {item.target_id}: "
+                    f"{item.diff.transition or 'planned change'}, planned name "
+                    f"{item.planned.value}, baseline {item.baseline.value}."
+                )
+            else:
+                statements.append(
+                    f"VLAN {item.target_id}: "
+                    f"{item.diff.transition or 'planned change'}, no current "
+                    f"planning intent, baseline {item.baseline.value}."
+                )
     statements.append(
         "CIS-02A dependency IDs below are association metadata only and are not an "
         "execution order; no command sequence is authorised by this preview."
@@ -1279,7 +1304,7 @@ def build_layer2_config_preview(
 def build_device_layer2_config_preview(
     revision: PlanRevision, intent: Layer2Intent, assignment_id: UUID,
 ) -> Layer2DeviceConfigPreview:
-    """Build one self-contained preview for exactly one Assignment."""
+    """One Assignment document; the event VLAN reference scope stays event-level."""
     verify_intent_binding(revision, intent)
     device = next(
         (item for item in intent.devices

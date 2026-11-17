@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import Engine, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -35,7 +35,18 @@ def health(session: DatabaseSession) -> HealthView:
     return HealthView(status="ok", database="ready", device_writes_enabled=False)
 
 
-@router.get("/contracts/layer2-config-preview/schema", response_class=JSONResponse)
+@router.get(
+    "/contracts/layer2-config-preview/schema",
+    response_class=Response,
+    responses={
+        200: {
+            "description": "CIS-02B1 Layer 2 configuration preview JSON Schema",
+            "content": {
+                "application/schema+json": {"schema": {"type": "object"}},
+            },
+        },
+    },
+)
 def read_layer2_config_preview_schema() -> JSONResponse:
     """Versioned JSON Schema for the read-only CIS-02B1 preview contract."""
     return JSONResponse(

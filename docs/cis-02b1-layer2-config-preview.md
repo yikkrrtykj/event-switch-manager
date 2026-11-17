@@ -139,6 +139,12 @@ device appears in `vlan_scope` and never as that device's configuration intent.
 This is tested explicitly; the preview does not invent per-device deployment
 intent.
 
+`vlan_scope` is event-level reference data in both documents. In a per-device
+document its `dependencies[*].required_by` can name change IDs that belong to
+other Assignment previews; that is association metadata, not a dangling
+device-configuration reference. The device's own configuration never includes
+another device's items.
+
 ## Per-device preview
 
 ```json
@@ -244,6 +250,14 @@ of the phase-wide execution block.
 | `platform-default` | No explicit intent and no policy value; device platform default. |
 | `not-in-plan` | The current revision expresses no intent for this field (cleanup). |
 
+When a physical interface or Port-Channel is removed from the plan, CIS-02A emits
+only a `presence` change for that target. The preview applies that removal change
+to the target's baseline-only items, so `diff.changed` is `true`,
+`diff.transition` is `interface-removed` or `port-channel-removed`, and
+`diff.change_id` points at the presence change. A planned removal is never
+reported as "unchanged", and the display text says it has no current planning
+intent.
+
 `baseline.state` is `planning-baseline`, `planning-baseline-unavailable` (no
 previous saved revision) or `not-in-baseline` (field absent in the previous
 revision). An item present only in the baseline reports
@@ -269,10 +283,12 @@ Identity gate codes include `pid-missing`, `pid-not-verified`, `software-image-m
 `stack-member-pid-missing:<n>`, `stack-member-not-ready:<n>:<state>`,
 `serial-not-verified`.
 
-The aggregate evidence gate is propagated to every item's `evidence_gate`, so an
-UNKNOWN/UNSUPPORTED capability or an incomplete identity never leaves an item
-looking deployable. `deployable` remains `false` in every case; there is no
-setting, query parameter or request body that can change that in CIS-02B1.
+The device-level `evidence_gate` summarizes the whole device and is independent
+of each item's gate; an item computes its own gate from its own capability and
+the device identity/intent state. For example, a device whose vendor evidence is
+UNKNOWN can still show `pass` on a shutdown item that needs no feature evidence,
+while every item keeps `deployable: false`. No gate, query parameter or request
+body can make an item deployable in CIS-02B1.
 
 `risk.level` adds review severity that does not change the evidence gate:
 `none`, `field-verification`, `unknown`, `unsupported`, `identity-incomplete`,
@@ -349,9 +365,9 @@ models and assert the schema constants.
 
 ## Model examples
 
-Examples use one access port (`Gi1/0/1`, VLAN 20) and one trunk port
-(`Gi1/0/2`, native 10, allowed 10/20), exact PID/image/License from the reviewed
-catalog:
+Examples use one access port (`Gi1/0/1`, VLAN 20, description "Players desk")
+and one trunk port (`Gi1/0/2`, native 10, allowed 10/20), exact PID/image/License
+from the reviewed catalog. The description is one of the 14 configuration items:
 
 | Model | PID | Image / License | `vendor_documentation` | Device `evidence_gate` | Deployable items |
 | --- | --- | --- | --- | --- | --- |
@@ -418,7 +434,8 @@ A representative item for the 9300L:
 The same item on the 2960X reports `capability.verdict: "unknown"`,
 `reason_code: "feature-evidence-missing"`, `evidence_gate: "unknown"` and stays
 non-deployable. On a host whose exact PID is not verified it reports
-`identity_gate.codes: ["pid-not-verified"]`, `evidence_gate:
+`identity_gate.codes: ["pid-not-verified", "pid-missing",
+"serial-not-verified"]`, `evidence_gate:
 "identity-incomplete"` and `deployable: false`.
 
 Human-readable excerpt (9300L, first revision):
