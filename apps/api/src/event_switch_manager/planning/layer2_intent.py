@@ -80,6 +80,7 @@ class ChangeTarget(StrEnum):
     DEVICE = "device"
     INTERFACE = "interface"
     PORT_CHANNEL = "port-channel"
+    VLAN = "vlan"
 
 
 class DependencyKind(StrEnum):
@@ -91,6 +92,8 @@ class DependencyKind(StrEnum):
     ROUTED_BOUNDARY = "routed-boundary"
     UNUSED_PORT_POLICY = "unused-port-policy"
     STACK_MEMBER_BINDING = "stack-member-binding"
+    PHYSICAL_DEVICE_BINDING = "physical-device-binding"
+    PORT_CHANNEL_REMOVAL = "port-channel-removal"
 
 
 class DocumentationVerdict(StrEnum):
@@ -165,6 +168,8 @@ class UnusedPortPolicy(Record):
     shutdown: bool
     source: Literal["reviewed-default-policy"]
     scope: str
+    semantics: Literal["no-links-port-channels-isps-or-transit"]
+    requires_field_verification: Literal[True]
 
 
 class PortChannelSettingsIntent(Record):
@@ -172,6 +177,7 @@ class PortChannelSettingsIntent(Record):
     access_vlan: int | None
     native_vlan: int | None
     allowed_vlans: tuple[int, ...]
+    routed_address: str | None
     description: str | None
     admin_state: Literal["up", "down"] | None
     portfast: Literal["edge", "edge-trunk", "disabled"] | None
@@ -181,6 +187,7 @@ class PortChannelSettingsIntent(Record):
 class PhysicalPortIntent(Record):
     interface_id: UUID
     name: str
+    physical_device_id: UUID | None
     stack_member: int | None
     mode: Literal["access", "trunk", "routed"]
     switchport: bool
@@ -191,6 +198,7 @@ class PhysicalPortIntent(Record):
     description: str | None
     admin_state: Literal["up", "down"] | None
     shutdown_intent: Literal["shutdown", "no-shutdown", "platform-default"]
+    shutdown_intent_source: Literal["event-plan", "reviewed-default-policy"] | None
     speed: int | Literal["auto"] | None
     duplex: Literal["auto", "full", "half"] | None
     poe_mode: Literal["auto", "static", "never"] | None
@@ -292,6 +300,9 @@ class Layer2Intent(Record):
     device_state: Literal["unknown"] = "unknown"
     before_state_evidence: Literal["planning-baseline", "planning-baseline-unavailable"]
     default_policy_id: Literal["cis-02a-reviewed-defaults-v1"] = "cis-02a-reviewed-defaults-v1"
+    vlans: tuple[VlanIntent, ...]
+    vlan_changes: tuple[PlannedChange, ...]
+    vlan_dependencies: tuple[IntentDependency, ...]
     devices: tuple[DeviceLayer2Intent, ...]
     conflicts: tuple[IntentConflict, ...]
     validation_findings: tuple[PlanIssue, ...]
@@ -441,12 +452,38 @@ def _shutdown_intent(
     return "platform-default"
 
 
+def _shutdown_intent_source(
+    settings: PortSettings, unused: bool,
+) -> Literal["event-plan", "reviewed-default-policy"] | None:
+    if settings.admin_state is not None:
+        return "event-plan"
+    if unused:
+        return "reviewed-default-policy"
+    return None
+
+
+def _event_vlan_intents(plan: EventPlan) -> tuple[VlanIntent, ...]:
+    """Event-wide VLAN declarations, including declared-but-not-yet-used VLANs."""
+    intents = [
+        VlanIntent(vlan_id=vlan.id, name=vlan.name, source="event-plan")
+        for vlan in sorted(plan.vlans, key=lambda vlan: vlan.id)
+    ]
+    if plan.management_vlan not in {vlan.vlan_id for vlan in intents}:
+        intents.append(VlanIntent(
+            vlan_id=plan.management_vlan, name=None, source="management-vlan",
+        ))
+    return tuple(sorted(intents, key=lambda vlan: vlan.vlan_id))
+
+
 def _channel_settings(settings: PortSettings) -> PortChannelSettingsIntent:
     return PortChannelSettingsIntent(
         mode=settings.mode,
         access_vlan=settings.access_vlan,
         native_vlan=settings.native_vlan,
         allowed_vlans=settings.allowed_vlans,
+        routed_address=(
+            str(settings.address) if settings.address is not None else None
+        ),
         description=settings.description,
         admin_state=settings.admin_state,
         portfast=settings.portfast,
@@ -468,6 +505,7 @@ def _desired_device(
         PhysicalPortIntent(
             interface_id=port.id,
             name=port.name,
+            physical_device_id=port.physical_device_id,
             stack_member=port.stack_member,
             mode=port.settings.mode,
             switchport=port.settings.mode != "routed",
@@ -480,6 +518,9 @@ def _desired_device(
             description=port.settings.description,
             admin_state=port.settings.admin_state,
             shutdown_intent=_shutdown_intent(port.settings, port.id not in referenced),
+            shutdown_intent_source=_shutdown_intent_source(
+                port.settings, port.id not in referenced,
+            ),
             speed=port.settings.speed,
             duplex=port.settings.duplex,
             poe_mode=port.settings.poe_mode,
@@ -521,6 +562,8 @@ def _desired_device(
             shutdown=True,
             source=REVIEWED_DEFAULT_POLICY,
             scope="ports-not-referenced-by-links-port-channels-isps-or-transit",
+            semantics="no-links-port-channels-isps-or-transit",
+            requires_field_verification=True,
         ),
         physical_ports=physical_ports,
         port_channels=port_channels,
@@ -753,17 +796,51 @@ def _conflicts(
                 target=channel.name or str(channel.interface_id),
                 severity="ERROR",
             ))
-    stack_numbers: list[int] = [
-        port.stack_member for port in desired.physical_ports
-        if port.stack_member is not None
-    ]
-    for number in sorted({value for value in stack_numbers if stack_numbers.count(value) > 1}):
-        conflicts.append(IntentConflict(
-            code="stack-member-conflict",
-            message=f"Stack member {number} owns more than one interface",
-            target=str(number),
-            severity="WARNING",
-        ))
+    stack_members = {
+        member.number: member for member in _stack_members(plan, assignment)
+    }
+    if len(stack_members) != len(_stack_members(plan, assignment)):
+        for number in sorted({
+            member.number for member in _stack_members(plan, assignment)
+            if sum(
+                other.number == member.number
+                for other in _stack_members(plan, assignment)
+            ) > 1
+        }):
+            conflicts.append(IntentConflict(
+                code="duplicate-stack-member-number",
+                message=f"Stack member number {number} is declared more than once",
+                target=assignment.hostname,
+                severity="ERROR",
+            ))
+    for port in desired.physical_ports:
+        if port.stack_member is None:
+            continue
+        member = stack_members.get(port.stack_member)
+        if not stack_members:
+            conflicts.append(IntentConflict(
+                code="stack-member-without-stack",
+                message="A physical interface declares Stack membership but no Stack exists",
+                target=port.name,
+                severity="ERROR",
+            ))
+        elif member is None:
+            conflicts.append(IntentConflict(
+                code="stack-member-not-in-stack",
+                message="A physical interface points at a Stack member that is not declared",
+                target=port.name,
+                severity="ERROR",
+            ))
+        elif port.physical_device_id != member.physical_device_id:
+            conflicts.append(IntentConflict(
+                code="stack-interface-ownership-mismatch",
+                message=(
+                    "A physical interface belongs to a different chassis than its "
+                    "declared Stack member; field inventory must be corrected"
+                ),
+                target=port.name,
+                severity="ERROR",
+            ))
     for port in desired.physical_ports:
         settings = next(
             item.settings for item in plan.physical_interfaces if item.id == port.interface_id
@@ -807,6 +884,22 @@ def _conflicts(
                 message=(
                     "An unused port is explicitly enabled; "
                     "review the unused-port shutdown policy"
+                ),
+                target=port.name,
+                severity="WARNING",
+            ))
+        if port.unused and (
+            settings.access_vlan is not None
+            or settings.native_vlan is not None
+            or bool(settings.allowed_vlans)
+        ):
+            conflicts.append(IntentConflict(
+                code="unused-port-policy-inference",
+                message=(
+                    "The reviewed unused-port shutdown policy treats this port as "
+                    "unused because it has no topology link, even though business "
+                    "VLAN intent is present; field confirmation is required before "
+                    "deployment."
                 ),
                 target=port.name,
                 severity="WARNING",
@@ -911,6 +1004,7 @@ def _channel_change(
     after: JsonValue | None,
     *,
     transition: str | None = None,
+    cleanup: tuple[str, ...] = (),
 ) -> PlannedChange:
     return PlannedChange(
         change_id=_change_id(
@@ -926,7 +1020,7 @@ def _channel_change(
         before_source=context.before_source,
         after_source=EVENT_PLAN_SOURCE,
         dependencies=(),
-        cleanup=(),
+        cleanup=cleanup,
     )
 
 
@@ -986,7 +1080,11 @@ def _mode_cleanup(before: str, after: str) -> tuple[str, ...]:
 
 def _port_fields(port: PhysicalPortIntent) -> dict[str, JsonValue | None]:
     return {
+        "name": port.name,
         "mode": port.mode,
+        "physical_device_id": (
+            str(port.physical_device_id) if port.physical_device_id is not None else None
+        ),
         "switchport": port.switchport,
         "access_vlan": port.access_vlan,
         "native_vlan": port.native_vlan,
@@ -1054,6 +1152,10 @@ def _physical_changes(
             transition = "speed-change"
         elif field == "duplex":
             transition = "duplex-change"
+        elif field == "physical_device_id":
+            transition = "physical-device-change"
+        elif field == "access_vlan":
+            transition = "access-vlan-change"
         elif field == "native_vlan":
             transition = "native-vlan-change"
         elif field == "allowed_vlans":
@@ -1062,6 +1164,8 @@ def _physical_changes(
             transition = "routed-boundary-change"
         elif field == "stack_member":
             transition = "stack-member-change"
+        elif field == "name":
+            transition = "interface-name-change"
         changes.append(_interface_change(
             context, port, field, before_value, after_value,
             transition=transition,
@@ -1076,7 +1180,31 @@ def _physical_changes(
 def _port_value(port: PhysicalPortIntent, field: str) -> JsonValue | None:
     if field == "allowed_vlans":
         return _json(list(port.allowed_vlans))
+    if field == "physical_device_id":
+        return _json(
+            str(port.physical_device_id) if port.physical_device_id is not None else None
+        )
     return _json(getattr(port, field))
+
+
+def _channel_fields(channel: PortChannelIntent) -> dict[str, JsonValue | None]:
+    return {
+        "mode": channel.settings.mode,
+        "access_vlan": channel.settings.access_vlan,
+        "native_vlan": channel.settings.native_vlan,
+        "allowed_vlans": _json(list(channel.settings.allowed_vlans)),
+        "routed_address": channel.settings.routed_address,
+        "description": channel.settings.description,
+        "admin_state": channel.settings.admin_state,
+        "portfast": channel.settings.portfast,
+        "bpdu_guard": channel.settings.bpdu_guard,
+    }
+
+
+def _channel_field_value(channel: PortChannelIntent, field: str) -> JsonValue | None:
+    if field == "allowed_vlans":
+        return _json(list(channel.settings.allowed_vlans))
+    return _json(getattr(channel.settings, field))
 
 
 def _channel_changes(
@@ -1091,21 +1219,13 @@ def _channel_changes(
             changes.append(_channel_change(
                 context, channel, field, None, _channel_value(channel, field),
             ))
-        for field, value in (
-            ("mode", channel.settings.mode),
-            ("access_vlan", channel.settings.access_vlan),
-            ("native_vlan", channel.settings.native_vlan),
-            ("description", channel.settings.description),
-            ("admin_state", channel.settings.admin_state),
-            ("portfast", channel.settings.portfast),
-            ("bpdu_guard", channel.settings.bpdu_guard),
-        ):
-            if value is not None:
-                changes.append(_channel_change(context, channel, field, None, _json(value)))
-        if channel.settings.allowed_vlans:
+        for field, value in _channel_fields(channel).items():
+            if value is None or value == "platform-default":
+                continue
+            if field == "allowed_vlans" and not value:
+                continue
             changes.append(_channel_change(
-                context, channel, "allowed_vlans", None,
-                _json(list(channel.settings.allowed_vlans)),
+                context, channel, field, None, value, transition="initial-plan",
             ))
         return changes
     for field in ("number", "lacp", "member_ids"):
@@ -1113,29 +1233,43 @@ def _channel_changes(
         after_value = _channel_value(channel, field)
         if before_value == after_value:
             continue
-        transition = None
+        base_transition = None
         if field == "lacp":
-            transition = f"lacp-{before.lacp}-to-{channel.lacp}"
+            base_transition = f"lacp-{before.lacp}-to-{channel.lacp}"
         elif field == "member_ids":
-            transition = "port-channel-members-change"
+            base_transition = "port-channel-members-change"
         changes.append(_channel_change(
-            context, channel, field, before_value, after_value, transition=transition,
+            context, channel, field, before_value, after_value,
+            transition=base_transition,
         ))
-    for field, before_setting, after_setting in (
-        ("mode", before.settings.mode, channel.settings.mode),
-        ("access_vlan", before.settings.access_vlan, channel.settings.access_vlan),
-        ("native_vlan", before.settings.native_vlan, channel.settings.native_vlan),
-        ("allowed_vlans", list(before.settings.allowed_vlans),
-         list(channel.settings.allowed_vlans)),
-        ("description", before.settings.description, channel.settings.description),
-        ("admin_state", before.settings.admin_state, channel.settings.admin_state),
-        ("portfast", before.settings.portfast, channel.settings.portfast),
-        ("bpdu_guard", before.settings.bpdu_guard, channel.settings.bpdu_guard),
-    ):
-        if before_setting == after_setting:
+    for field, after_value in _channel_fields(channel).items():
+        before_value = _channel_field_value(before, field)
+        if before_value == after_value:
             continue
+        transition: str | None = None
+        cleanup: tuple[str, ...] = ()
+        if field == "mode":
+            transition = _mode_transition(before.settings.mode, channel.settings.mode)
+            cleanup = _mode_cleanup(before.settings.mode, channel.settings.mode)
+        elif field == "access_vlan":
+            transition = "access-vlan-change"
+        elif field == "native_vlan":
+            transition = "native-vlan-change"
+        elif field == "allowed_vlans":
+            transition = "allowed-vlans-change"
+        elif field == "routed_address":
+            transition = "routed-boundary-change"
+        elif field == "portfast":
+            transition = "spanning-tree-edge-change"
+        elif field == "bpdu_guard":
+            transition = "bpdu-guard-change"
+        elif field == "description":
+            transition = "description-change"
+        elif field == "admin_state":
+            transition = "admin-state-change"
         changes.append(_channel_change(
-            context, channel, field, _json(before_setting), _json(after_setting),
+            context, channel, field, before_value, after_value,
+            transition=transition, cleanup=cleanup,
         ))
     return changes
 
@@ -1150,8 +1284,9 @@ def _dependencies(
     changes: Iterable[PlannedChange],
     desired: DeviceDesiredState,
 ) -> tuple[IntentDependency, ...]:
+    change_list = tuple(changes)
     required: dict[tuple[DependencyKind, str], set[str]] = {}
-    for change in changes:
+    for change in change_list:
         if change.transition is None:
             continue
         if change.transition in {
@@ -1190,6 +1325,18 @@ def _dependencies(
             required.setdefault(
                 (DependencyKind.ROUTED_BOUNDARY, change.target_name), set(),
             ).add(change.change_id)
+        if change.field == "physical_device_id":
+            required.setdefault(
+                (DependencyKind.PHYSICAL_DEVICE_BINDING, change.target_name), set(),
+            ).add(change.change_id)
+        if change.field == "physical-device-id":
+            required.setdefault(
+                (DependencyKind.PHYSICAL_DEVICE_BINDING, change.target_name), set(),
+            ).add(change.change_id)
+        if change.field == "stack-identity" or change.field.startswith("stack-member:"):
+            required.setdefault(
+                (DependencyKind.STACK_MEMBER_BINDING, change.target_name), set(),
+            ).add(change.change_id)
         if change.field == "stack_member":
             required.setdefault(
                 (DependencyKind.STACK_MEMBER_BINDING, change.target_name), set(),
@@ -1202,14 +1349,22 @@ def _dependencies(
             required.setdefault(
                 (DependencyKind.UNUSED_PORT_POLICY, change.target_name), set(),
             ).add(change.change_id)
-        if change.target_kind == ChangeTarget.DEVICE and change.field == "vlans":
-            after = change.after if isinstance(change.after, list) else []
-            before = change.before if isinstance(change.before, list) else []
-            for vlan_id in after:
-                if vlan_id not in before:
-                    required.setdefault(
-                        (DependencyKind.VLAN_DEFINITION, f"vlan:{vlan_id}"), set(),
-                    ).add(change.change_id)
+    removals = [
+        change for change in change_list
+        if change.transition == "port-channel-removed"
+    ]
+    detaches = [
+        change for change in change_list
+        if change.transition == "port-channel-member-to-independent"
+    ]
+    for removal in removals:
+        required.setdefault(
+            (DependencyKind.PORT_CHANNEL_REMOVAL, removal.target_name), set(),
+        ).add(removal.change_id)
+        for detach in detaches:
+            required[(DependencyKind.PORT_CHANNEL_REMOVAL, removal.target_name)].add(
+                detach.change_id
+            )
     dependencies = [
         IntentDependency(
             dependency_id=_dependency_id(kind, target),
@@ -1317,6 +1472,104 @@ def _baseline_info(baseline: PlanRevision | None) -> BaselineInfo:
     )
 
 
+
+
+def _identity_changes(
+    context: _ChangeContext,
+    before: DeviceIdentity | None,
+    after: DeviceIdentity,
+) -> tuple[tuple[PlannedChange, ...], tuple[IntentConflict, ...]]:
+    """Record planning chassis/Stack identity changes without claiming field state."""
+    if before is None:
+        return (), ()
+    changes: list[PlannedChange] = []
+    conflicts: list[IntentConflict] = []
+    before_physical = (
+        str(before.physical_device_id) if before.physical_device_id is not None else None
+    )
+    after_physical = (
+        str(after.physical_device_id) if after.physical_device_id is not None else None
+    )
+    if before_physical != after_physical:
+        changes.append(_device_change(
+            context, "physical-device-id", _json(before_physical), _json(after_physical),
+            transition="assignment-physical-device-change",
+            after_source=EVENT_PLAN_SOURCE,
+        ))
+        conflicts.append(IntentConflict(
+            code="device-identity-change-requires-field-verification",
+            message=(
+                "The planning assignment is bound to a different physical device in "
+                "this revision; field confirmation is required and no hardware "
+                "identity is assumed."
+            ),
+            target=after.hostname,
+            severity="WARNING",
+        ))
+    if before.stack_identity != after.stack_identity:
+        changes.append(_device_change(
+            context, "stack-identity",
+            _json(before.stack_identity), _json(after.stack_identity),
+            transition="stack-identity-change", after_source=EVENT_PLAN_SOURCE,
+        ))
+    before_members = {member.number: member for member in before.stack_members}
+    after_members = {member.number: member for member in after.stack_members}
+    for number in sorted(set(before_members) | set(after_members)):
+        previous = before_members.get(number)
+        current = after_members.get(number)
+        if previous is None and current is not None:
+            changes.append(_device_change(
+                context, f"stack-member:{number}:definition", None,
+                _json({
+                    "number": number,
+                    "physical_device_id": str(current.physical_device_id),
+                    "pid": current.pid,
+                }),
+                transition="stack-member-added", after_source=EVENT_PLAN_SOURCE,
+            ))
+        elif previous is not None and current is None:
+            changes.append(_device_change(
+                context, f"stack-member:{number}:definition",
+                _json({
+                    "number": number,
+                    "physical_device_id": str(previous.physical_device_id),
+                    "pid": previous.pid,
+                }),
+                None, transition="stack-member-removed", after_source=EVENT_PLAN_SOURCE,
+            ))
+        elif previous is not None and current is not None:
+            if previous.physical_device_id != current.physical_device_id:
+                changes.append(_device_change(
+                    context, f"stack-member:{number}:physical-device-id",
+                    _json(str(previous.physical_device_id)),
+                    _json(str(current.physical_device_id)),
+                    transition="stack-member-device-change",
+                    after_source=EVENT_PLAN_SOURCE,
+                ))
+            if previous.pid != current.pid:
+                changes.append(_device_change(
+                    context, f"stack-member:{number}:pid",
+                    _json(previous.pid), _json(current.pid),
+                    transition="stack-member-pid-change",
+                    after_source=EVENT_PLAN_SOURCE,
+                ))
+    if any(
+        change.field == "stack-identity" or change.field.startswith("stack-member:")
+        for change in changes
+    ):
+        conflicts.append(IntentConflict(
+            code="stack-identity-change-requires-field-verification",
+            message=(
+                "The planning Stack member/chassis map changed; this is not proof "
+                "that a real Stack replacement, merge, split or renumbering happened. "
+                "Field verification and capability evidence collection are required."
+            ),
+            target=after.hostname,
+            severity="WARNING",
+        ))
+    return tuple(changes), tuple(conflicts)
+
+
 def _build_device_intent(
     revision: PlanRevision,
     plan: EventPlan,
@@ -1349,7 +1602,15 @@ def _build_device_intent(
             baseline_revision.content_hash if baseline_revision is not None else None
         ),
     )
-    changes = _device_changes(before_state, desired, context)
+    before_identity = (
+        _identity(baseline_plan, baseline_assignment)
+        if baseline_plan is not None and baseline_assignment is not None
+        else None
+    )
+    identity_changes, identity_conflicts = _identity_changes(
+        context, before_identity, _identity(plan, assignment),
+    )
+    changes = (*_device_changes(before_state, desired, context), *identity_changes)
     dependencies = _dependencies(changes, desired)
     dependency_ids: dict[str, list[str]] = {}
     for dependency in dependencies:
@@ -1361,7 +1622,25 @@ def _build_device_intent(
         })
         for change in changes
     )
-    conflicts = _conflicts(plan, assignment, desired)
+    ownership_conflicts = [
+        IntentConflict(
+            code="interface-ownership-change-requires-field-verification",
+            message=(
+                "A physical interface is mapped to a different chassis in this "
+                "revision; field inventory confirmation is required."
+            ),
+            target=change.target_name,
+            severity="WARNING",
+        )
+        for change in changes
+        if change.target_kind == ChangeTarget.INTERFACE
+        and change.field == "physical_device_id"
+    ]
+    conflicts = (
+        *_conflicts(plan, assignment, desired),
+        *identity_conflicts,
+        *ownership_conflicts,
+    )
     checks = _capability_checks(revision, plan, assignment, desired)
     structured_valid = plan_valid and not any(
         conflict.severity == "ERROR" for conflict in conflicts
@@ -1382,6 +1661,131 @@ def _build_device_intent(
         capability_checks=checks,
         readiness=_readiness(checks, structured_valid),
     )
+
+
+
+
+def _vlan_change(
+    context: _ChangeContext,
+    vlan_id: int,
+    field: str,
+    before: JsonValue | None,
+    after: JsonValue | None,
+    transition: str,
+) -> PlannedChange:
+    return PlannedChange(
+        change_id=_change_id(
+            context.device_id, ChangeTarget.VLAN, str(vlan_id), field,
+        ),
+        target_kind=ChangeTarget.VLAN,
+        target_id=str(vlan_id),
+        target_name=f"VLAN {vlan_id}",
+        field=field,
+        before=before,
+        after=after,
+        transition=transition,
+        before_source=context.before_source,
+        after_source=EVENT_PLAN_SOURCE,
+        dependencies=(),
+        cleanup=(),
+    )
+
+
+def _vlan_state(vlan: VlanIntent) -> JsonValue:
+    return _json({
+        "vlan_id": vlan.vlan_id,
+        "name": vlan.name,
+        "source": vlan.source,
+    })
+
+
+def _event_vlan_changes(
+    before_vlans: tuple[VlanIntent, ...] | None,
+    after_vlans: tuple[VlanIntent, ...],
+    context: _ChangeContext,
+) -> tuple[PlannedChange, ...]:
+    changes: list[PlannedChange] = []
+    if before_vlans is None:
+        for vlan in after_vlans:
+            changes.append(_vlan_change(
+                context, vlan.vlan_id, "definition", None, _vlan_state(vlan),
+                "initial-plan",
+            ))
+        return tuple(changes)
+    before_map = {vlan.vlan_id: vlan for vlan in before_vlans}
+    after_map = {vlan.vlan_id: vlan for vlan in after_vlans}
+    for vlan_id in sorted(set(before_map) | set(after_map)):
+        previous = before_map.get(vlan_id)
+        current = after_map.get(vlan_id)
+        if previous is None and current is not None:
+            changes.append(_vlan_change(
+                context, vlan_id, "definition", None, _vlan_state(current),
+                "vlan-created",
+            ))
+        elif previous is not None and current is None:
+            changes.append(_vlan_change(
+                context, vlan_id, "definition", _vlan_state(previous), None,
+                "vlan-removed",
+            ))
+        elif previous is not None and current is not None and (
+            previous.name != current.name
+        ):
+            changes.append(_vlan_change(
+                context, vlan_id, "name", _json(previous.name), _json(current.name),
+                "vlan-renamed",
+            ))
+    return tuple(changes)
+
+
+def _vlan_references(value: JsonValue | None) -> frozenset[int]:
+    references: set[int] = set()
+    if isinstance(value, int) and not isinstance(value, bool):
+        references.add(value)
+    if isinstance(value, list):
+        references.update(
+            item for item in value
+            if isinstance(item, int) and not isinstance(item, bool)
+        )
+    return frozenset(references)
+
+
+def _change_vlan_references(
+    change: PlannedChange, *, before: bool = False,
+) -> frozenset[int]:
+    if change.field in {"access_vlan", "native_vlan"}:
+        return _vlan_references(change.before if before else change.after)
+    if change.field in {"allowed_vlans", "vlans"}:
+        return _vlan_references(change.before if before else change.after)
+    return frozenset()
+
+
+def _vlan_dependencies(
+    vlan_changes: Iterable[PlannedChange],
+    device_changes: Iterable[PlannedChange],
+) -> tuple[IntentDependency, ...]:
+    required: dict[int, set[str]] = {}
+    for change in vlan_changes:
+        if change.transition in {"vlan-created", "vlan-renamed", "vlan-removed"}:
+            required.setdefault(int(change.target_id), set()).add(change.change_id)
+    if not required:
+        return ()
+    for change in device_changes:
+        references = _change_vlan_references(change)
+        previous_references = _change_vlan_references(change, before=True)
+        for vlan_id in required.keys() & (references | previous_references):
+            required[vlan_id].add(change.change_id)
+    dependencies = [
+        IntentDependency(
+            dependency_id=_dependency_id(
+                DependencyKind.VLAN_DEFINITION, f"vlan:{vlan_id}",
+            ),
+            kind=DependencyKind.VLAN_DEFINITION,
+            target=f"vlan:{vlan_id}",
+            required_by=tuple(sorted(change_ids)),
+        )
+        for vlan_id, change_ids in sorted(required.items())
+    ]
+    return tuple(dependencies)
 
 
 def _cross_device_conflicts(plan: EventPlan) -> tuple[IntentConflict, ...]:
@@ -1440,6 +1844,14 @@ def _blockers(
         blockers.append("plan-invalid")
     if any(conflict.severity == "ERROR" for conflict in conflicts):
         blockers.append("structured-intent-invalid")
+    conflict_codes = {conflict.code for conflict in conflicts}
+    if (
+        "device-identity-change-requires-field-verification" in conflict_codes
+        or "interface-ownership-change-requires-field-verification" in conflict_codes
+    ):
+        blockers.append("field-verification-required:device-identity")
+    if "stack-identity-change-requires-field-verification" in conflict_codes:
+        blockers.append("field-verification-required:stack-identity")
     for check in checks:
         identifier = f"{check.capability.value}:{check.subject}"
         if check.verdict == Support.UNSUPPORTED:
@@ -1457,6 +1869,21 @@ def build_layer2_intent(
     baseline_info = _baseline_info(baseline)
     baseline_plan = baseline.plan if baseline is not None else None
     plan_valid = revision.validation_status != "INVALID"
+    baseline_vlans = (
+        _event_vlan_intents(baseline_plan) if baseline_plan is not None else None
+    )
+    event_vlans = _event_vlan_intents(plan)
+    event_context = _ChangeContext(
+        device_id="event-vlan-database",
+        device_name="Event VLAN database",
+        before_source=(
+            BeforeSource.PLANNING_BASELINE if baseline_plan is not None
+            else BeforeSource.PLANNING_BASELINE_UNAVAILABLE
+        ),
+        baseline_revision_id=baseline.id if baseline is not None else None,
+        baseline_revision_hash=baseline.content_hash if baseline is not None else None,
+    )
+    vlan_changes = _event_vlan_changes(baseline_vlans, event_vlans, event_context)
     devices = tuple(
         _build_device_intent(
             revision, plan, baseline_plan, assignment, baseline, plan_valid,
@@ -1468,6 +1895,8 @@ def build_layer2_intent(
         *(conflict for device in devices for conflict in device.conflicts),
     )
     checks = tuple(check for device in devices for check in device.capability_checks)
+    device_changes = tuple(change for device in devices for change in device.changes)
+    vlan_dependencies = _vlan_dependencies(vlan_changes, device_changes)
     structured_valid = plan_valid and not any(
         conflict.severity == "ERROR" for conflict in conflicts
     )
@@ -1480,6 +1909,9 @@ def build_layer2_intent(
         before_state_evidence=(
             PLANNING_BASELINE if baseline is not None else PLANNING_BASELINE_UNAVAILABLE
         ),
+        vlans=event_vlans,
+        vlan_changes=vlan_changes,
+        vlan_dependencies=vlan_dependencies,
         devices=devices,
         conflicts=conflicts,
         validation_findings=(

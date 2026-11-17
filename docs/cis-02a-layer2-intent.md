@@ -32,6 +32,9 @@ Top-level response:
   "device_state": "unknown",
   "before_state_evidence": "planning-baseline",
   "default_policy_id": "cis-02a-reviewed-defaults-v1",
+  "vlans": [ … ],
+  "vlan_changes": [ … ],
+  "vlan_dependencies": [ … ],
   "devices": [ … ],
   "conflicts": [ … ],
   "validation_findings": [ … ],
@@ -55,6 +58,19 @@ Top-level response:
 `planning-baseline-unavailable`. The device running-config was not read: all
 Before state is explicitly `device_state: "unknown"` and is the previous saved
 planning revision, never a claim about the actual device.
+
+### VLAN definition scope
+
+`vlans` at the top level is the event-wide VLAN definition intent. It contains
+all VLANs explicitly declared in the EventPlan plus the management VLAN when it
+is not declared, each with its planning source. This closes the gap where a
+declared-but-not-yet-referenced VLAN was invisible to the intent.
+
+Per-device `desired.vlans` intentionally stays scoped to VLANs referenced by
+that device's physical ports and Port-Channels. The engine does not invent
+per-device deployment intent for a declared VLAN until the plan references it
+from that device. Both scopes are explicit and tested; no VLAN, interface or
+Port-Channel outside the EventPlan is created.
 
 ## Four separate readiness conclusions
 
@@ -81,8 +97,10 @@ Per assignment/device the engine returns:
 - exact identity binding: assignment, hostname, role, family, physical device,
   exact verified PID (or model-only/missing evidence), software image, License,
   Stack identity and Stack member list;
-- desired VLAN intents by ID and name, sourced from the EventPlan (management
-  VLAN is marked with its source);
+- device VLAN intents by ID and name for the VLANs used by this device,
+  sourced from the EventPlan (management VLAN is marked with its source);
+- event-wide VLAN definitions in the top-level `vlans` field, including declared
+  VLANs that are not referenced by interfaces yet;
 - Reviewed global defaults, each with `source: "reviewed-default-policy"` and
   the versioned `default_policy_id`:
   - Rapid PVST+ mode `rapid-pvst`;
@@ -90,13 +108,21 @@ Per assignment/device the engine returns:
   - root priority from the reviewed role policy: `core=4096`,
     `external-distribution=8192`, `access=32768` (`role-priority-v1`);
   - unused-port shutdown policy: ports not referenced by links, Port-Channels,
-    ISPs or Transit are intended `shutdown`;
-- physical ports: switchport/routed boundary, mode, access/native/allowed VLAN,
-  routed address, description, admin state and shutdown intent, speed, duplex,
-  PoE, PortFast, BPDU Guard, Port-Channel membership, Stack member ownership and
+    ISPs or Transit are intended `shutdown`. The reviewed policy semantics are
+    unchanged; the policy now carries explicit
+    `semantics="no-links-port-channels-isps-or-transit"` and
+    `requires_field_verification=true`, and each port exposes
+    `shutdown_intent_source` (`event-plan` when admin state is explicit,
+    `reviewed-default-policy` when the unused-port policy supplied it);
+- port intent includes `physical_device_id` so Stack chassis/interface
+  ownership is visible and diffable;
+- physical ports: interface name, switchport/routed boundary, mode,
+  access/native/allowed VLAN, routed address, description, admin state and
+  shutdown intent/source, speed, duplex, PoE, PortFast, BPDU Guard,
+  Port-Channel membership, physical device and Stack member ownership and
   unused flag;
 - Port-Channels: logical interface, number, members, LACP mode
-  (`active`/`passive`/`static`), L2 settings.
+  (`active`/`passive`/`static`), L2 settings including `routed_address`.
 
 The engine never creates a VLAN, interface or Port-Channel beyond what the
 EventPlan contains; it only derives intent and diagnostics from the plan.
@@ -107,7 +133,8 @@ Every non-equal target field between the planning baseline and the desired state
 produces a `PlannedChange`:
 
 - deterministic `change_id`;
-- target kind (`device` / `interface` / `port-channel`), target ID and name;
+- target kind (`device` / `interface` / `port-channel` / `vlan`), target ID and
+  name;
 - field, before value, after value;
 - `before_source` (`planning-baseline`, `planning-baseline-unavailable` or
   `not-in-baseline`) and `after_source` (`event-plan` or
@@ -118,15 +145,59 @@ produces a `PlannedChange`:
   `port-channel-member-to-independent`, `lacp-active-to-passive`,
   `native-vlan-change`, `allowed-vlans-change`, `spanning-tree-edge-change`,
   `bpdu-guard-change`, `poe-mode-change`, `speed-change`, `duplex-change`,
-  `shutdown-intent-change`, `stack-member-change`;
+  `shutdown-intent-change`, `stack-member-change`, `physical-device-change`,
+  `interface-name-change`, `access-vlan-change`,
+  `assignment-physical-device-change`, `stack-identity-change`,
+  `stack-member-added`, `stack-member-removed`,
+  `stack-member-device-change`, `stack-member-pid-change`,
+  `vlan-created`, `vlan-removed`, `vlan-renamed`,
+  `port-channel-removed`;
 - cleanup intent for old settings that must not survive a transition;
-- dependency IDs (the same IDs appear in the device `IntentDependency`
-  `required_by` lists).
+- dependency IDs (the same IDs appear in the `IntentDependency` `required_by`
+  lists).
+
+VLAN definition changes are structurally distinct:
+
+| Planning change | Change target | Field | Transition |
+| --- | --- | --- | --- |
+| VLAN added to the plan | `vlan` | `definition` | `vlan-created` |
+| VLAN removed from the plan | `vlan` | `definition` | `vlan-removed` |
+| VLAN ID kept, name changed | `vlan` | `name` | `vlan-renamed` |
+| First revision without a baseline | `vlan` | `definition` | `initial-plan` |
+
+A rename is not a delete/create pair: the VLAN ID and interface references are
+preserved, only the name field changes. VLAN definition dependencies
+(top-level `vlan_dependencies`) reference both the definition change and the
+interface/Port-Channel changes that reference or detach the VLAN, so a rename
+cannot be mistaken for a recreate and a removal can be ordered after detaching
+references.
+
+Stack identities are separately diffable: assignment physical-device binding
+(`physical-device-id`), Stack identity state (`stack-identity`), member
+add/remove (`stack-member:<n>:definition`), member chassis replacement
+(`stack-member:<n>:physical-device-id`) and member PID change
+(`stack-member:<n>:pid`). A physical port also reports its own
+`physical_device_id` change. These are planning differences only and add
+`device-identity-change-requires-field-verification` /
+`stack-identity-change-requires-field-verification` warnings plus
+`field-verification-required:…` blockers; the engine never claims a real Stack
+replacement/merge/split/renumbering happened.
+
+Port-Channel mode changes reuse the physical-port transition/cleanup logic:
+`access-to-trunk`, `trunk-to-access`, `switchport-to-routed`,
+`routed-to-switchport`, `mode-change`, with cleanup of old Access/Native/Allowed
+VLAN and routed-address fields. Deleting a Port-Channel emits
+`port-channel-removed` plus member-detach changes and a
+`port-channel-removal` dependency whose `required_by` contains the removal and
+all detach change IDs.
 
 `IntentDependency` entries model ordering intent without commands:
 `vlan-definition`, `port-channel-interface`, `port-channel-membership`,
 `member-detach`, `mode-cleanup`, `routed-boundary`, `unused-port-policy`,
-`stack-member-binding`, each with the change IDs that require it.
+`stack-member-binding`, `physical-device-binding`, `port-channel-removal`, each
+with the change IDs that require it. Dependency metadata is planning
+information only; a future Renderer must not treat it as an already-verified
+execution order.
 
 ## Conflicts and validation findings
 
@@ -134,8 +205,28 @@ produces a `PlannedChange`:
 CIS-01A capability checks. Examples: a member in two Port-Channels, duplicate
 Port-Channel numbers, members outside the plan or assignment, duplicate members,
 Port-Channel without a logical interface, access/trunk/routed VLAN-shape
-conflicts, Spanning Tree on a routed port, unknown VLAN references, Stack
-interface ownership conflicts, and an unused port explicitly enabled.
+conflicts, Spanning Tree on a routed port, unknown VLAN references, and an
+unused port explicitly enabled.
+
+Stack ownership checks are per interface, not per member number: a Stack member
+may legitimately own many interfaces. A normal multi-port member produces no
+warning. The engine reports `stack-interface-ownership-mismatch` when an
+interface's `physical_device_id` differs from its declared member's chassis,
+`stack-member-not-in-stack` for an undeclared member number,
+`stack-member-without-stack` when a non-Stack assignment declares membership,
+and `duplicate-stack-member-number` for an ambiguous layout. Standalone
+assignments never produce Stack warnings.
+
+### Unused-port policy boundary
+
+The reviewed policy still treats ports without links, Port-Channels, ISP or
+Transit references as unused and intends `shutdown`. That policy was not
+silently changed. To avoid presenting this as observed field state, the policy
+declares `requires_field_verification=true`, ports expose
+`shutdown_intent_source`, and a port that has business VLAN intent but no
+topology link receives an `unused-port-policy-inference` WARNING. This makes the
+inference auditable and requires field confirmation; it does not assert the port
+is physically unused.
 
 `validation_findings` are the saved revision's existing plan validation errors
 and warnings. They do not replace capability evidence or hardware verification.
@@ -170,6 +261,13 @@ evidence fails closed at the documentation-readiness level.
 - deterministic repeated generation and stable intent fingerprint;
 - structural conflicts separate from capability evidence;
 - invalid revision diagnostics;
+- change-set completeness regressions in
+  `apps/api/tests/test_layer2_intent_changeset.py`: VLAN create/rename/delete,
+  declared-but-unreferenced VLAN scope, Stack chassis replacement/addition/
+  removal/renumbering, assignment and interface physical-device changes,
+  Port-Channel four-mode transitions with cleanup/dependencies, Port-Channel
+  removal/member detach, legal multi-port Stack membership, inconsistent Stack
+  ownership, and unused-port policy/source boundaries;
 - no CLI output and no device write path (`cli=null`, `executable=false`,
   `device_writes_enabled=false`).
 
