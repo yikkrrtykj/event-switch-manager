@@ -806,6 +806,8 @@ def _risk(
     capability: CapabilityAssessment,
     change: PlannedChange | None,
     conflicts: tuple[IntentConflict, ...],
+    *,
+    implicit_transition: str | None = None,
 ) -> PreviewRisk:
     level: RiskLevel = "none"
     codes: list[str] = ["execution-not-generated"]
@@ -817,12 +819,15 @@ def _risk(
             level = _raised(level, "field-verification")
             codes.append(f"{code_prefix}-field-verification")
         codes.extend(planned.risk_codes)
-    if change is not None:
+    if change is not None or implicit_transition is not None:
         codes.append("planned-difference")
+    if change is not None:
         if change.transition is not None:
             codes.append(f"transition:{change.transition}")
         if change.cleanup:
             codes.append("planned-cleanup")
+    elif implicit_transition is not None:
+        codes.append(f"transition:{implicit_transition}")
     if baseline is not None and planned is None:
         codes.append("no-current-plan-intent")
     if capability.verdict == "unknown":
@@ -938,6 +943,31 @@ def _matching_change(
     return change
 
 
+def _vlan_reference_difference(
+    context: _DeviceContext,
+    draft: _Draft,
+    planned: _Draft | None,
+    baseline: _Draft | None,
+    change: PlannedChange | None,
+) -> tuple[str, PlannedChange | None] | None:
+    """Detect a device VLAN reference add/remove when no definition change exists.
+
+    Only an Assignment that already existed in the previous planning baseline can
+    gain or lose a reference. A new Assignment's initial VLAN intent is not a
+    ``vlan-referenced`` difference.
+    """
+    if change is not None or draft.target_kind != "vlan":
+        return None
+    if context.device.before.state is None:
+        return None
+    if (planned is None) == (baseline is None):
+        return None
+    assignment_id = str(context.device.identity.assignment_id)
+    set_change = context.changes.get(("device", assignment_id, "vlans"))
+    transition = "vlan-referenced" if planned is not None else "vlan-unreferenced"
+    return transition, set_change
+
+
 def _config_item(
     context: _DeviceContext,
     planned: _Draft | None,
@@ -947,15 +977,21 @@ def _config_item(
     assert draft is not None
     capability = _assess_capability(context, planned)
     change = _matching_change(context, draft, planned)
-    conflicts = _matching_conflicts(context.device.conflicts, draft)
-    risk = _risk(context, planned, baseline, capability, change, conflicts)
-    gate = _gate_from_risk(risk)
-    # A VLAN can stop being referenced without any event-level definition change;
-    # the CIS-02A device VLAN-set change still records the planning difference.
-    changed_without_change_row = (
-        change is None and planned is None and baseline is not None
-        and draft.target_kind == "vlan"
+    reference_difference = _vlan_reference_difference(
+        context, draft, planned, baseline, change,
     )
+    reference_transition = (
+        reference_difference[0] if reference_difference is not None else None
+    )
+    reference_change = (
+        reference_difference[1] if reference_difference is not None else None
+    )
+    conflicts = _matching_conflicts(context.device.conflicts, draft)
+    risk = _risk(
+        context, planned, baseline, capability, change, conflicts,
+        implicit_transition=reference_transition,
+    )
+    gate = _gate_from_risk(risk)
     return ConfigItem(
         item_id=_item_id(
             context.device.identity.assignment_id, draft.category,
@@ -973,17 +1009,30 @@ def _config_item(
         ),
         baseline=_baseline_value(context, baseline),
         diff=DiffState(
-            changed=change is not None or changed_without_change_row,
-            transition=change.transition if change is not None else (
-                "vlan-unreferenced" if changed_without_change_row else None
+            changed=change is not None or reference_difference is not None,
+            transition=(
+                change.transition if change is not None else reference_transition
             ),
             cleanup=change.cleanup if change is not None else (),
-            change_id=change.change_id if change is not None else None,
+            change_id=(
+                change.change_id if change is not None else (
+                    reference_change.change_id
+                    if reference_change is not None else None
+                )
+            ),
             before_source=(
                 cast(BaselineState, change.before_source.value)
-                if change is not None else None
+                if change is not None else (
+                    cast(BaselineState, reference_change.before_source.value)
+                    if reference_change is not None else None
+                )
             ),
-            after_source=change.after_source if change is not None else None,
+            after_source=(
+                change.after_source if change is not None else (
+                    reference_change.after_source
+                    if reference_change is not None else None
+                )
+            ),
         ),
         capability=capability,
         risk=risk,
@@ -1120,7 +1169,21 @@ def _human_readable(
                 )
     for item in items:
         if item.category is PreviewCategory.VLAN and item.diff.changed:
-            if item.planned.present:
+            if item.diff.transition == "vlan-referenced":
+                value = item.planned.value
+                vlan_name = (
+                    value.get("name") if isinstance(value, dict) else None
+                )
+                label = (
+                    f"VLAN {item.target_id} ({vlan_name})"
+                    if vlan_name else f"VLAN {item.target_id}"
+                )
+                statements.append(
+                    f"{label}: vlan-referenced, the device newly references the "
+                    f"existing definition; the previous planning baseline did not "
+                    f"reference it."
+                )
+            elif item.planned.present:
                 statements.append(
                     f"VLAN {item.target_id}: "
                     f"{item.diff.transition or 'planned change'}, planned name "

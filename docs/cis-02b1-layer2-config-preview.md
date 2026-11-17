@@ -147,6 +147,32 @@ other Assignment previews; that is association metadata, not a dangling
 device-configuration reference. The device's own configuration never includes
 another device's items.
 
+### VLAN definition vs device reference differences
+
+A VLAN definition change and a device reference change are different planning
+facts and use different evidence:
+
+| Case | Item `diff.transition` | Change evidence |
+| --- | --- | --- |
+| Event creates VLAN 40, optionally referenced in the same revision | `vlan-created` | Event `vlan_changes` definition row |
+| Event removes VLAN 40, optionally unreferenced in the same revision | `vlan-removed` | Event `vlan_changes` definition row |
+| VLAN ID kept, name changed, references unchanged | `vlan-renamed` | Event `vlan_changes` name row |
+| First saved revision (no planning baseline) | `initial-plan` | Event `vlan_changes` initial row |
+| Existing Assignment newly references an already-declared VLAN | `vlan-referenced` | Device `vlans` set ChangeSet row |
+| Existing Assignment stops referencing a still-declared VLAN | `vlan-unreferenced` | Device `vlans` set ChangeSet row |
+| New Assignment added in a later revision | no reference change | Device `vlans` initial-plan row, not a reference difference |
+| Definition and reference set unchanged | `changed: false` | none |
+
+`vlan-referenced` and `vlan-unreferenced` are emitted only when the Assignment
+existed in the previous planning baseline and the device VLAN reference set
+changed while no Event-level definition change applies. Their `change_id` is the
+real CIS-02A device-level `vlans` set change, never an invented ID and never an
+Event definition change. When an Event definition change and a reference change
+happen in the same revision, the item keeps the definition transition
+(`vlan-created` / `vlan-removed` / `vlan-renamed`). A newly added Assignment's
+initial intent is not misreported as `vlan-referenced`; its initial plan is
+visible as the device `vlans` initial-plan row in `planned_diff`.
+
 ## Per-device preview
 
 ```json
@@ -341,6 +367,14 @@ saved revision (id, number, hash)
 
 Repeated generation of the same revision returns byte-identical JSON and the
 same fingerprints; a later revision never changes an earlier preview.
+
+Fingerprint stability is per contract implementation, not across semantic
+corrections. Fixing the VLAN reference-difference semantics changes the
+recomputed preview content and therefore `preview_fingerprint` for an affected
+already-saved revision. The Saved Revision UUID, canonical revision hash and
+ETag remain unchanged, and no stored revision is rewritten. A recomputation
+after a code upgrade reflects the corrected semantics; this is not a violation
+of determinism.
 Cross-assignment isolation is structural: each device preview is built from one
 device intent, item IDs include the Assignment UUID, and a same-named interface
 on another Assignment can never be merged into it.
@@ -502,6 +536,12 @@ The preview suite covers:
 - independent interface↔Port-Channel, LACP `active`/`passive`/`static`, and
   direct member migration between two channels;
 - VLAN create/rename/delete, declared-but-unreferenced VLAN scope;
+- VLAN definition vs device reference boundaries: existing Assignment adds and
+  removes a reference to an already-declared VLAN, Event create+reference,
+  Event remove+unreference, rename only, first revision without a baseline, a
+  new Assignment in a later revision, two Assignments where only one adds the
+  reference, a second interface adding an already-referenced VLAN with an
+  unchanged device VLAN set, and repeated GET/fingerprint determinism;
 - unused-port shutdown, explicit admin state and default-policy provenance;
 - cross-Assignment same-named interfaces and per-device fingerprint isolation;
 - unknown/UNSUPPORTED synthetic capabilities via the CIS-01A resolver;
