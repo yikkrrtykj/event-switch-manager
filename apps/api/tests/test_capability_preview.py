@@ -83,6 +83,41 @@ def draft_plan(
     return data
 
 
+def channel_plan(
+    event_id: str, *, lacp: str = "active", member_ids: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    trunk = {"mode": "trunk", "native_vlan": 10, "allowed_vlans": [10, 20]}
+    members = member_ids or (uid(10), uid(11))
+    return {
+        "schema_version": 1, "event_id": event_id, "management_vlan": 10,
+        "vlans": [{"id": 10, "name": "Management", "purpose": "management"},
+                  {"id": 20, "name": "Players"}],
+        "physical_devices": [{
+            "id": uid(1), "vendor": "cisco", "model": "C9300L-24P-4X",
+            "verified_serial": "SYN-CHANNEL-01",
+        }],
+        "assignments": [{
+            "id": uid(2), "hostname": "channel-access", "role": "access",
+            "family": "catalyst-9300", "physical_device_id": uid(1),
+            "software": {"image": "17.12.4", "license": "Network Advantage"},
+        }],
+        "physical_interfaces": [
+            {"id": uid(10), "assignment_id": uid(2), "physical_device_id": uid(1),
+             "name": "Gi1/0/1", "settings": trunk},
+            {"id": uid(11), "assignment_id": uid(2), "physical_device_id": uid(1),
+             "name": "Gi1/0/2", "settings": trunk},
+        ],
+        "logical_interfaces": [{
+            "id": uid(12), "assignment_id": uid(2), "name": "Port-channel1",
+            "kind": "port-channel",
+        }],
+        "port_channels": [{
+            "interface_id": uid(12), "number": 1, "member_ids": list(members),
+            "settings": trunk, "lacp": lacp,
+        }],
+    }
+
+
 def preview(
     client: TestClient, event_id: str, plan: dict[str, Any],
     capabilities: tuple[str, ...] = ("poe",), **options: Any,
@@ -327,6 +362,33 @@ def test_draft_rejects_cross_event_identity_and_mismatched_event(client: TestCli
     )
     assert wrong_event.status_code == 422
     assert wrong_event.json()["detail"][0]["code"] == "event_mismatch"
+
+
+def test_draft_channel_changes_are_in_fingerprints_without_persisting(client: TestClient) -> None:
+    event_id = event(client)
+    capabilities = ("lacp", "port-channel", "access")
+    active = preview(
+        client, event_id, channel_plan(event_id), capabilities, interface_id=uid(10),
+    )
+    passive = preview(
+        client, event_id, channel_plan(event_id, lacp="passive"), capabilities,
+        interface_id=uid(10),
+    )
+    one_member = preview(
+        client, event_id, channel_plan(event_id, member_ids=(uid(10),)), capabilities,
+        interface_id=uid(10),
+    )
+    assert active["draft_fingerprint"] != passive["draft_fingerprint"]
+    assert active["input_fingerprint"] != passive["input_fingerprint"]
+    assert passive["draft_fingerprint"] != one_member["draft_fingerprint"]
+    assert passive["input_fingerprint"] != one_member["input_fingerprint"]
+    for result in (active, passive, one_member):
+        assert len(result["decisions"]) == 3
+        assert result["decisions"][0]["verdict"] == "supported"
+        assert result["decisions"][0]["affected"]["interface_id"] == uid(10)
+        assert result["decisions"][0]["affected"]["interface_name"] == "Gi1/0/1"
+        assert "revision_id" not in result["decisions"][0]["affected"]
+    assert client.get(f"{API}/events/{event_id}/plan-revisions").json() == []
 
 
 def test_draft_imported_claims_cannot_promote_evidence(client: TestClient) -> None:

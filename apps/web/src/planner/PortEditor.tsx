@@ -50,13 +50,14 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
   const changed = creating || proposed.some((item) => item.changed)
   const hasCleanup = proposed.some(({ changes }) => changes.some((change) => change.operation === 'clearOnModeChange'))
   const currentValues = new Map(controls.map((field) => [field.key, commonPortValue(field, targets)]))
+  const proposedRecord = proposed[0]?.next ?? record
   const previewPlan = aggregate
-    ? applyProposedChannel(plan, record)
+    ? applyProposedChannel(plan, proposedRecord)
     : applyProposedPorts(plan, proposed.map(({ index, next }) => ({ index, next })))
   const capabilityTargets: CapabilityTarget[] = (() => {
     if (aggregate) {
       const physical = records(plan, 'physical_interfaces')
-      const members = Array.isArray(record.member_ids) ? record.member_ids : []
+      const members = Array.isArray(proposedRecord.member_ids) ? proposedRecord.member_ids : []
       return members.flatMap((id) => {
         if (typeof id !== 'string') return []
         const member = physical.find((item) => item.id === id)
@@ -67,7 +68,7 @@ export function PortEditor({ title, targets, fields, plan, path, issues, focus, 
           key: targetKey(member.assignment_id, member.id, stackMember),
           assignmentId: member.assignment_id, interfaceId: member.id, stackMember,
           device: target.device, member: target.member, name: target.name,
-          item: member, channel: record,
+          item: member, channel: proposedRecord,
         }]
       })
     }

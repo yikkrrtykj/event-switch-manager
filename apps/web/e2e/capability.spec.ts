@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { expect, test } from '@playwright/test'
 import type { APIRequestContext, Page } from '@playwright/test'
-import type { Plan, Revision } from '../src/planner/model'
+import type { Plan, RecordValue, Revision } from '../src/planner/model'
 
 const api = '/api/v1/events'
 const headers = { Origin: 'http://127.0.0.1:8765' }
@@ -55,6 +55,46 @@ function capabilityPlan(
       { id: randomUUID(), assignment_id: assignmentB, physical_device_id: deviceB,
         name: 'Gi1/0/2', settings: { mode: 'access', access_vlan: 20 } },
     ],
+  }
+}
+
+function channelPlan(eventId: string, options: { mode?: 'access' | 'trunk' } = {}): Plan {
+  const device = randomUUID()
+  const assignment = randomUUID()
+  const first = randomUUID()
+  const second = randomUUID()
+  const third = randomUUID()
+  const aggregate = randomUUID()
+  const settings: RecordValue = options.mode === 'access'
+    ? { mode: 'access', access_vlan: 20 }
+    : { mode: 'trunk', native_vlan: 10, allowed_vlans: [10, 20] }
+  return {
+    schema_version: 1, event_id: eventId, management_vlan: 10,
+    vlans: [{ id: 10, name: 'Management', purpose: 'management' }, { id: 20, name: 'Players' }],
+    physical_devices: [{
+      id: device, vendor: 'cisco', model: 'C9300L-24P-4X',
+      verified_serial: 'SYN-CH-' + device.slice(0, 8),
+    }],
+    assignments: [{
+      id: assignment, hostname: 'Cap-Channel', role: 'access', family: 'catalyst-9300',
+      physical_device_id: device,
+      software: { image: '17.12.4', license: 'Network Advantage' },
+    }],
+    physical_interfaces: [
+      { id: first, assignment_id: assignment, physical_device_id: device,
+        name: 'Gi1/0/1', settings },
+      { id: second, assignment_id: assignment, physical_device_id: device,
+        name: 'Gi1/0/2', settings },
+      { id: third, assignment_id: assignment, physical_device_id: device,
+        name: 'Gi1/0/3', settings },
+    ],
+    logical_interfaces: [{
+      id: aggregate, assignment_id: assignment, name: 'Port-channel1', kind: 'port-channel',
+    }],
+    port_channels: [{
+      interface_id: aggregate, number: 1, member_ids: [first, second], settings,
+      lacp: 'active',
+    }],
   }
 }
 
@@ -144,6 +184,233 @@ test('renders ROMMON software capability as UNKNOWN while hardware stays documen
   await expect(panel.getByText('SUPPORTED', { exact: true }).first()).toBeVisible()
   await expect(panel.getByText('UNKNOWN', { exact: true }).first()).toBeVisible()
   await expect(panel.getByText('NOT VERIFIED', { exact: true }).first()).toBeVisible()
+})
+
+test('port-channel preview uses the proposed channel record', async ({ page, request }) => {
+  test.setTimeout(60_000)
+  const id = await createEvent(request, 'Synthetic channel capability')
+  const saved = await planRecord(request, channelPlan(id))
+  const exportUrl = revisions(id) + '/' + saved.id + '/export'
+  const historical = await request.get(exportUrl)
+  const historicalBody = await historical.body()
+  const previewBodies: { plan: Plan }[] = []
+  const previewResponses: { draft_fingerprint: string; input_fingerprint: string }[] = []
+  page.on('request', (entry) => {
+    if (entry.url().includes('/plan/capability-preview')) {
+      previewBodies.push(entry.postDataJSON() as { plan: Plan })
+    }
+  })
+  page.on('response', async (response) => {
+    if (response.url().includes('/plan/capability-preview')) {
+      previewResponses.push(await response.json() as {
+        draft_fingerprint: string; input_fingerprint: string
+      })
+    }
+  })
+  await openWorkspace(page, id)
+  await page.getByRole('button', { name: 'Edit Port-Channel 1', exact: true }).click()
+  const modal = page.getByRole('dialog', { name: 'Edit Port-Channel', exact: true })
+  const operation = modal.getByLabel('LACP mode operation', { exact: true })
+  const mode = modal.getByLabel('LACP mode', { exact: true })
+  const panel = modal.getByRole('region', { name: 'Cisco capability evidence' })
+  await expect(operation).toHaveValue('keep')
+  await expect(mode).toHaveValue('active')
+  await expect.poll(() => previewBodies.length).toBeGreaterThanOrEqual(2)
+  const initialCount = previewBodies.length
+  const initialResponseCount = previewResponses.length
+  const initial = previewBodies.at(-1)!
+  const initialResponse = previewResponses.at(-1)!
+  const initialChannel = (initial.plan.port_channels as Record<string, unknown>[])[0]!
+  expect(initialChannel.lacp).toBe('active')
+  expect(initialChannel.member_ids).toHaveLength(2)
+
+  await page.route('**/api/v1/events/*/plan/capability-preview', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    await route.continue()
+  })
+  await operation.selectOption('set')
+  await mode.selectOption('passive')
+  await expect(modal.getByText('Stale', { exact: true }).first()).toBeVisible()
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  const row = modal.getByRole('table', { name: 'Port changes' }).getByRole('row', { name: / LACP mode / })
+  await expect(row.getByRole('cell').nth(3)).toHaveText('active')
+  await expect(row.getByRole('cell').nth(4)).toHaveText('passive')
+  await modal.getByRole('button', { name: 'Back to edit', exact: true }).click()
+  await expect.poll(() => previewBodies.length, { timeout: 10_000 }).toBe(initialCount + 2)
+  await expect.poll(() => previewResponses.length, { timeout: 10_000 }).toBe(initialResponseCount + 2)
+  const latest = previewBodies.at(-1)!
+  const latestResponse = previewResponses.at(-1)!
+  const latestChannel = (latest.plan.port_channels as Record<string, unknown>[])[0]!
+  expect(latestChannel.lacp).toBe('passive')
+  expect(latestChannel.member_ids).toEqual(initialChannel.member_ids)
+  expect(latestChannel.settings).toMatchObject({ mode: 'trunk', native_vlan: 10, allowed_vlans: [10, 20] })
+  expect(latestResponse.draft_fingerprint).not.toBe(initialResponse.draft_fingerprint)
+  expect(latestResponse.input_fingerprint).not.toBe(initialResponse.input_fingerprint)
+  await expect(modal.getByText('Stale', { exact: true })).toHaveCount(0)
+  await expect(panel.getByText('SUPPORTED', { exact: true }).first()).toBeVisible()
+  await page.unroute('**/api/v1/events/*/plan/capability-preview')
+
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  await modal.getByRole('button', { name: 'Apply to draft', exact: true }).click()
+  await page.getByRole('button', { name: 'View JSON', exact: true }).click()
+  const draft = JSON.parse(await page.getByRole('dialog').locator('pre').textContent() ?? '{}') as Plan
+  expect((draft.port_channels as Record<string, unknown>[])[0]).toMatchObject({
+    lacp: 'passive', member_ids: latestChannel.member_ids,
+  })
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
+  const unchanged = await request.get(exportUrl)
+  expect(await unchanged.body()).toEqual(historicalBody)
+  expect(unchanged.headers().etag).toBe(historical.headers().etag)
+})
+
+test('port-channel capability requests track LACP values, Keep and member changes', async ({ page, request }) => {
+  test.setTimeout(90_000)
+  const id = await createEvent(request, 'Synthetic channel edits')
+  const plan = channelPlan(id)
+  const thirdId = String((plan.physical_interfaces as Record<string, unknown>[])[2]!.id)
+  const saved = await planRecord(request, plan)
+  const savedMembers = ((saved.plan.port_channels as Record<string, unknown>[])[0]!
+    .member_ids as string[]).slice()
+  const previewBodies: { plan: Plan }[] = []
+  page.on('request', (entry) => {
+    if (entry.url().includes('/plan/capability-preview')) {
+      previewBodies.push(entry.postDataJSON() as { plan: Plan })
+    }
+  })
+  await openWorkspace(page, id)
+  await page.getByRole('button', { name: 'Edit Port-Channel 1', exact: true }).click()
+  const modal = page.getByRole('dialog', { name: 'Edit Port-Channel', exact: true })
+  const operation = modal.getByLabel('LACP mode operation', { exact: true })
+  const mode = modal.getByLabel('LACP mode', { exact: true })
+  const panel = modal.getByRole('region', { name: 'Cisco capability evidence' })
+  const channel = () => (previewBodies.at(-1)!.plan.port_channels as Record<string, unknown>[])[0]!
+  await expect.poll(() => previewBodies.length).toBe(2)
+  expect(channel().lacp).toBe('active')
+  expect((channel().member_ids as string[])).toHaveLength(2)
+
+  await operation.selectOption('set')
+  await mode.selectOption('passive')
+  await expect.poll(() => previewBodies.length).toBe(4)
+  expect(channel().lacp).toBe('passive')
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  const changes = () => modal.getByRole('table', { name: 'Port changes' }).getByRole('row', { name: / LACP mode / })
+  await expect(changes().getByRole('cell').nth(3)).toHaveText('active')
+  await expect(changes().getByRole('cell').nth(4)).toHaveText('passive')
+  await modal.getByRole('button', { name: 'Back to edit', exact: true }).click()
+
+  await mode.selectOption('static')
+  await expect.poll(() => previewBodies.length).toBe(6)
+  expect(channel().lacp).toBe('static')
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  await expect(changes().getByRole('cell').nth(3)).toHaveText('active')
+  await expect(changes().getByRole('cell').nth(4)).toHaveText('static')
+  await modal.getByRole('button', { name: 'Back to edit', exact: true }).click()
+
+  await operation.selectOption('keep')
+  await expect.poll(() => previewBodies.length).toBe(8)
+  expect(channel().lacp).toBe('active')
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  await modal.getByRole('checkbox', { name: 'Show kept fields', exact: true }).check()
+  await expect(changes().getByRole('cell').nth(3)).toHaveText('active')
+  await expect(changes().getByRole('cell').nth(4)).toHaveText('active')
+  await expect(changes().getByRole('cell').nth(5)).toHaveText('Keep')
+  await modal.getByRole('button', { name: 'Back to edit', exact: true }).click()
+
+  await operation.selectOption('set')
+  await mode.selectOption('passive')
+  await expect.poll(() => previewBodies.length).toBe(10)
+  expect(channel().lacp).toBe('passive')
+
+  await modal.getByText('Aggregate interface and members', { exact: true }).click()
+  await modal.getByRole('button', { name: 'Remove Member ports 2', exact: true }).click()
+  await expect.poll(() => previewBodies.length).toBe(11)
+  expect((channel().member_ids as string[])).toEqual([savedMembers[0]!])
+  await expect(panel.locator('.capability-target')).toHaveCount(1)
+
+  const memberPorts = modal.getByRole('group', { name: 'Member ports', exact: true })
+  await memberPorts.getByRole('button', { name: 'Add entry', exact: true }).click()
+  await memberPorts.getByLabel('Member ports 2', { exact: true }).selectOption(thirdId)
+  await expect.poll(() => previewBodies.length).toBe(13)
+  expect(channel().member_ids).toEqual([savedMembers[0]!, thirdId])
+  expect(channel().lacp).toBe('passive')
+  await expect(panel.locator('.capability-target')).toHaveCount(2)
+
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  await modal.getByRole('button', { name: 'Apply to draft', exact: true }).click()
+  await page.getByRole('button', { name: 'View JSON', exact: true }).click()
+  const draft = JSON.parse(await page.getByRole('dialog').locator('pre').textContent() ?? '{}') as Plan
+  expect((draft.port_channels as Record<string, unknown>[])[0]).toMatchObject({
+    lacp: 'passive', member_ids: [savedMembers[0]!, thirdId],
+  })
+  expect(await (await request.get(revisions(id))).json()).toHaveLength(1)
+})
+
+test('port-channel mode and STP preview uses the proposed channel settings', async ({ page, request }) => {
+  test.setTimeout(90_000)
+  const id = await createEvent(request, 'Synthetic channel mode STP')
+  const plan = channelPlan(id, { mode: 'access' })
+  await planRecord(request, plan)
+  const previewBodies: { plan: Plan }[] = []
+  const previewResponses: { decisions: { deployment_blockers: string[] }[] }[] = []
+  page.on('request', (entry) => {
+    if (entry.url().includes('/plan/capability-preview')) {
+      previewBodies.push(entry.postDataJSON() as { plan: Plan })
+    }
+  })
+  page.on('response', async (response) => {
+    if (response.url().includes('/plan/capability-preview')) {
+      previewResponses.push(await response.json() as {
+        decisions: { deployment_blockers: string[] }[]
+      })
+    }
+  })
+  await openWorkspace(page, id)
+  await page.getByRole('button', { name: 'Edit Port-Channel 1', exact: true }).click()
+  const modal = page.getByRole('dialog', { name: 'Edit Port-Channel', exact: true })
+  await expect.poll(() => previewBodies.length).toBe(2)
+  const channel = () => (previewBodies.at(-1)!.plan.port_channels as Record<string, unknown>[])[0]!
+  expect(channel().settings).toMatchObject({ mode: 'access', access_vlan: 20 })
+
+  await modal.getByLabel('PortFast operation', { exact: true }).selectOption('set')
+  await modal.getByLabel('PortFast', { exact: true }).selectOption('edge')
+  await modal.getByLabel('BPDU Guard operation', { exact: true }).selectOption('set')
+  await modal.getByLabel('BPDU Guard', { exact: true }).selectOption('enabled')
+  await expect.poll(() => previewBodies.some((body) => {
+    const settings = (body.plan.port_channels as Record<string, unknown>[])[0]!.settings as Record<string, unknown>
+    return settings.portfast === 'edge' && settings.bpdu_guard === 'enabled'
+  })).toBe(true)
+
+  await modal.getByLabel('Mode operation', { exact: true }).selectOption('set')
+  await modal.getByLabel('Mode', { exact: true }).selectOption('trunk')
+  await modal.getByLabel('PortFast', { exact: true }).selectOption('edge-trunk')
+  const allowed = modal.getByRole('group', { name: 'Allowed VLANs', exact: true })
+  await allowed.getByRole('button', { name: 'Add entry', exact: true }).click()
+  await allowed.getByLabel('Allowed VLANs 1', { exact: true }).selectOption('10')
+  await allowed.getByRole('button', { name: 'Add entry', exact: true }).click()
+  await allowed.getByLabel('Allowed VLANs 2', { exact: true }).selectOption('20')
+  await expect.poll(() => previewBodies.some((body) => {
+    const settings = (body.plan.port_channels as Record<string, unknown>[])[0]!.settings as Record<string, unknown>
+    const vlans = settings.allowed_vlans as number[]
+    return settings.mode === 'trunk' && settings.access_vlan == null && settings.bpdu_guard === 'enabled'
+      && settings.portfast === 'edge-trunk'
+      && Array.isArray(vlans) && vlans.includes(10) && vlans.includes(20)
+  })).toBe(true)
+  const trunkBody = previewBodies.find((body) => {
+    const settings = (body.plan.port_channels as Record<string, unknown>[])[0]!.settings as Record<string, unknown>
+    const vlans = settings.allowed_vlans as number[]
+    return settings.mode === 'trunk' && settings.access_vlan == null && settings.bpdu_guard === 'enabled'
+      && settings.portfast === 'edge-trunk'
+      && Array.isArray(vlans) && vlans.includes(10) && vlans.includes(20)
+  })!
+  expect((trunkBody.plan.port_channels as Record<string, unknown>[])[0]!.lacp).toBe('active')
+  await expect.poll(() => previewResponses.some((response) =>
+    response.decisions.some((decision) => decision.deployment_blockers.includes('plan-invalid')),
+  )).toBe(true)
+
+  await modal.getByRole('button', { name: 'Preview changes', exact: true }).click()
+  const row = modal.getByRole('table', { name: 'Port changes' }).getByRole('row', { name: /Mode/ })
+  await expect(row.getByRole('cell').nth(3)).toHaveText('access')
+  await expect(row.getByRole('cell').nth(4)).toHaveText('trunk')
 })
 
 test('evaluates mixed batch targets per interface and ignores an older response', async ({ page, request }, info) => {
