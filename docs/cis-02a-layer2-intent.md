@@ -158,12 +158,14 @@ produces a `PlannedChange`:
   name;
 - field, before value, after value;
 - `before_source` (`planning-baseline`, `planning-baseline-unavailable` or
-  `not-in-baseline`) and `after_source` (`event-plan` or
-  `reviewed-default-policy`);
+  `not-in-baseline`) and `after_source` (`event-plan`,
+  `reviewed-default-policy` or, for a shutdown field returning to no explicit
+  plan intent, `platform-default`);
 - transition code such as `access-to-trunk`, `trunk-to-access`,
   `switchport-to-routed`, `routed-to-switchport`,
   `independent-to-port-channel-member`,
-  `port-channel-member-to-independent`, `lacp-active-to-passive`,
+  `port-channel-member-to-independent`, `port-channel-member-migrate`,
+  `lacp-active-to-passive`,
   `native-vlan-change`, `allowed-vlans-change`, `spanning-tree-edge-change`,
   `bpdu-guard-change`, `poe-mode-change`, `speed-change`, `duplex-change`,
   `shutdown-intent-change`, `stack-member-change`, `physical-device-change`,
@@ -228,15 +230,23 @@ member never makes an incomplete Stack healthy.
 Port-Channel mode changes reuse the physical-port transition/cleanup logic:
 `access-to-trunk`, `trunk-to-access`, `switchport-to-routed`,
 `routed-to-switchport`, `mode-change`, with cleanup of old Access/Native/Allowed
-VLAN and routed-address fields. Deleting a Port-Channel emits
-`port-channel-removed` plus member-detach changes and a
-`port-channel-removal` dependency. Its `required_by` is scoped from the
+VLAN and routed-address fields. A physical member moving directly from one
+Port-Channel to another emits `port-channel-member-migrate`; the engine
+resolves the source and destination through the Baseline and Desired stable
+`interface_id`/`member_ids`, not through display names or list positions. The
+migration contributes member-detach intent, target Channel membership/interface
+dependencies, and, when the source Channel is removed in the same revision,
+the source `port-channel-removal` dependency. Two Channels swapping members and
+multiple simultaneous migrations are covered by the same stable-identity logic.
+
+Deleting a Port-Channel emits `port-channel-removed` plus member-detach changes
+and a `port-channel-removal` dependency. Its `required_by` is scoped from the
 Planning Baseline channel identity and member list: each removed Port-Channel
-links only its own removal change and the detach changes of the members that
-belonged to it in the baseline. Unrelated member detaches, including detaches
-from a retained or separately removed Port-Channel, are never attached by
-interface-name guessing. Multiple removed Port-Channels each get a separate
-dependency and `required_by` set.
+links only its own removal change and the member changes of interfaces that
+belonged to it in the baseline, including direct channel-to-channel migrations.
+Unrelated member detaches, including detaches from a retained or separately
+removed Port-Channel, are never attached by interface-name guessing. Multiple
+removed Port-Channels each get a separate dependency and `required_by` set.
 
 `IntentDependency` entries model ordering intent without commands:
 `vlan-definition`, `port-channel-interface`, `port-channel-membership`,
@@ -246,6 +256,18 @@ with the change IDs that require it. Device-level dependencies live in
 `device.dependencies`; VLAN definition dependencies live in the top-level
 `vlan_dependencies`. A change's `dependencies` field is the union of the
 device-level and VLAN-level dependency IDs that associate with that change.
+
+Device-level dependency IDs are hashed from the stable Assignment UUID, the
+dependency kind and a stable target identity (for example an interface or
+Port-Channel UUID), so two different Assignments with the same interface name
+never share a dependency ID. Top-level VLAN dependencies remain in the separate
+event-level namespace and are keyed by VLAN identity. Dependency IDs are
+therefore globally unique across one Event's device and VLAN graphs and every
+`required_by` points at the correct change. Because dependency IDs are part of
+the deterministic Intent output, their scoping change also changes the Intent
+fingerprint; saved Revision UUIDs, canonical plan hashes and ETags are
+unchanged.
+
 Dependency metadata is planning information only; a future Renderer must not
 treat it as an already-verified execution order.
 
@@ -266,6 +288,17 @@ interface's `physical_device_id` differs from its declared member's chassis,
 `stack-member-without-stack` when a non-Stack assignment declares membership,
 and `duplicate-stack-member-number` for an ambiguous layout. Standalone
 assignments never produce Stack warnings.
+
+### Shutdown intent provenance
+
+Each physical port exposes `shutdown_intent_source` (`event-plan`,
+`reviewed-default-policy` or null for platform default). The ChangeSet uses that
+provenance for `shutdown_intent` changes: explicit `admin_state` down/up actions
+are `event-plan` on both existing and first-revision ports; only a shutdown
+actually derived from the reviewed unused-port policy is
+`reviewed-default-policy` and receives the `unused-port-policy` dependency.
+Explicit admin-state changes do not acquire that policy dependency, while
+referenced-to-unreferenced default-policy changes retain it.
 
 ### Unused-port policy boundary
 
@@ -342,6 +375,11 @@ evidence fails closed at the documentation-readiness level.
 - static Port-Channel LACP omission, mixed static+active behavior, ROMMON and
   unknown-License UNKNOWN preservation, and synthetic UNSUPPORTED/UNKNOWN
   capability branches;
+- final review-fix regressions in
+  `apps/api/tests/test_layer2_intent_review_fixes.py`: cross-Assignment
+  dependency-ID uniqueness, direct and multi-Channel member migration,
+  Channel-member swapping, and explicit vs reviewed-default shutdown
+  provenance;
 - no CLI output and no device write path (`cli=null`, `executable=false`,
   `device_writes_enabled=false`).
 

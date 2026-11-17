@@ -48,6 +48,8 @@ PLANNING_BASELINE_UNAVAILABLE: Literal["planning-baseline-unavailable"] = (
 )
 NOT_IN_BASELINE = "not-in-baseline"
 
+ChangeSource = Literal["event-plan", "reviewed-default-policy", "platform-default"]
+
 ROOT_PRIORITY_BY_ROLE: Mapping[DeviceRole, int] = {
     DeviceRole.CORE: 4096,
     DeviceRole.EXTERNAL_DISTRIBUTION: 8192,
@@ -263,7 +265,7 @@ class PlannedChange(Record):
     after: JsonValue | None
     transition: str | None
     before_source: BeforeSource
-    after_source: Literal["event-plan", "reviewed-default-policy"]
+    after_source: ChangeSource
     dependencies: tuple[str, ...]
     cleanup: tuple[str, ...]
 
@@ -350,8 +352,10 @@ def _change_id(device_id: str, target_kind: ChangeTarget, target_id: str, field:
     return "chg-" + digest[:12]
 
 
-def _dependency_id(kind: DependencyKind, target: str) -> str:
-    digest = hashlib.sha256(f"{kind.value}|{target}".encode()).hexdigest()
+def _dependency_id(kind: DependencyKind, namespace: str, identity: str) -> str:
+    digest = hashlib.sha256(
+        f"{namespace}|{kind.value}|{identity}".encode()
+    ).hexdigest()
     return "dep-" + digest[:12]
 
 
@@ -1025,7 +1029,7 @@ def _interface_change(
     after: JsonValue | None,
     *,
     transition: str | None = None,
-    after_source: Literal["event-plan", "reviewed-default-policy"] = EVENT_PLAN_SOURCE,
+    after_source: ChangeSource = EVENT_PLAN_SOURCE,
     cleanup: tuple[str, ...] = (),
 ) -> PlannedChange:
     return PlannedChange(
@@ -1081,7 +1085,7 @@ def _device_change(
     after: JsonValue | None,
     *,
     transition: str | None = None,
-    after_source: Literal["event-plan", "reviewed-default-policy"] = REVIEWED_DEFAULT_POLICY,
+    after_source: ChangeSource = REVIEWED_DEFAULT_POLICY,
 ) -> PlannedChange:
     return PlannedChange(
         change_id=_change_id(context.device_id, ChangeTarget.DEVICE, context.device_id, field),
@@ -1153,6 +1157,12 @@ def _port_fields(port: PhysicalPortIntent) -> dict[str, JsonValue | None]:
     }
 
 
+def _port_after_source(port: PhysicalPortIntent, field: str) -> ChangeSource:
+    if field == "shutdown_intent":
+        return port.shutdown_intent_source or "platform-default"
+    return EVENT_PLAN_SOURCE
+
+
 def _physical_changes(
     context: _ChangeContext, port: PhysicalPortIntent, before: PhysicalPortIntent | None,
 ) -> list[PlannedChange]:
@@ -1167,10 +1177,7 @@ def _physical_changes(
                 continue
             initial_changes.append(_interface_change(
                 context, port, field, None, value, transition="initial-plan",
-                after_source=(
-                    REVIEWED_DEFAULT_POLICY
-                    if field == "shutdown_intent" else EVENT_PLAN_SOURCE
-                ),
+                after_source=_port_after_source(port, field),
             ))
         return initial_changes
     changes: list[PlannedChange] = []
@@ -1189,7 +1196,7 @@ def _physical_changes(
             elif before.port_channel is not None and port.port_channel is None:
                 transition = "port-channel-member-to-independent"
             else:
-                transition = "port-channel-member-change"
+                transition = "port-channel-member-migrate"
         elif field == "shutdown_intent":
             transition = "shutdown-intent-change"
         elif field == "portfast":
@@ -1219,10 +1226,7 @@ def _physical_changes(
         changes.append(_interface_change(
             context, port, field, before_value, after_value,
             transition=transition,
-            after_source=(
-                REVIEWED_DEFAULT_POLICY
-                if field == "shutdown_intent" else EVENT_PLAN_SOURCE
-            ),
+            after_source=_port_after_source(port, field),
             cleanup=cleanup,
         ))
     return changes
@@ -1334,9 +1338,48 @@ def _dependencies(
     changes: Iterable[PlannedChange],
     desired: DeviceDesiredState,
     before: DeviceDesiredState | None,
+    assignment_id: UUID,
 ) -> tuple[IntentDependency, ...]:
     change_list = tuple(changes)
+    before_channels = (
+        {str(channel.interface_id): channel for channel in before.port_channels}
+        if before is not None else {}
+    )
+    before_member_channel = {
+        str(member_id): channel
+        for channel in (before.port_channels if before is not None else ())
+        for member_id in channel.member_ids
+    }
+    desired_member_channel = {
+        str(member_id): channel
+        for channel in desired.port_channels
+        for member_id in channel.member_ids
+    }
     required: dict[tuple[DependencyKind, str], set[str]] = {}
+    displays: dict[tuple[DependencyKind, str], str] = {}
+
+    def require(
+        kind: DependencyKind, identity: str, display: str, change_id: str,
+    ) -> None:
+        key = (kind, identity)
+        required.setdefault(key, set()).add(change_id)
+        displays.setdefault(key, display)
+
+    def channel_for_member(
+        mapping: dict[str, PortChannelIntent], member_id: str,
+        fallback_number: JsonValue | None,
+    ) -> PortChannelIntent | None:
+        channel = mapping.get(member_id)
+        if channel is not None:
+            return channel
+        if isinstance(fallback_number, int):
+            return next(
+                (item for item in desired.port_channels
+                 if item.number == fallback_number),
+                None,
+            )
+        return None
+
     for change in change_list:
         if change.transition is None:
             continue
@@ -1344,95 +1387,126 @@ def _dependencies(
             "access-to-trunk", "trunk-to-access", "switchport-to-routed",
             "routed-to-switchport", "mode-change",
         } and change.cleanup:
-            required.setdefault(
-                (DependencyKind.MODE_CLEANUP, change.target_name), set(),
-            ).add(change.change_id)
-        if change.transition == "independent-to-port-channel-member":
-            channel = next(
-                (channel for channel in desired.port_channels
-                 if channel.number == change.after),
-                None,
+            require(
+                DependencyKind.MODE_CLEANUP, change.target_id,
+                change.target_name, change.change_id,
             )
-            target = channel.name if channel is not None and channel.name else "Port-Channel"
-            required.setdefault(
-                (DependencyKind.PORT_CHANNEL_INTERFACE, target), set(),
-            ).add(change.change_id)
-            required.setdefault(
-                (DependencyKind.PORT_CHANNEL_MEMBERSHIP, target), set(),
-            ).add(change.change_id)
+        if change.transition in {
+            "independent-to-port-channel-member", "port-channel-member-migrate",
+        }:
+            target_channel = channel_for_member(
+                desired_member_channel, change.target_id, change.after,
+            )
+            if target_channel is not None:
+                target = (
+                    target_channel.name
+                    if target_channel.name is not None
+                    else str(target_channel.interface_id)
+                )
+                require(
+                    DependencyKind.PORT_CHANNEL_INTERFACE,
+                    str(target_channel.interface_id), target, change.change_id,
+                )
+                require(
+                    DependencyKind.PORT_CHANNEL_MEMBERSHIP,
+                    str(target_channel.interface_id), target, change.change_id,
+                )
+            if change.transition == "port-channel-member-migrate":
+                require(
+                    DependencyKind.MEMBER_DETACH, change.target_id,
+                    change.target_name, change.change_id,
+                )
         if change.transition == "port-channel-member-to-independent":
-            required.setdefault(
-                (DependencyKind.MEMBER_DETACH, change.target_name), set(),
-            ).add(change.change_id)
+            require(
+                DependencyKind.MEMBER_DETACH, change.target_id,
+                change.target_name, change.change_id,
+            )
         if change.transition == "port-channel-members-change":
-            required.setdefault(
-                (DependencyKind.PORT_CHANNEL_MEMBERSHIP, change.target_name), set(),
-            ).add(change.change_id)
+            require(
+                DependencyKind.PORT_CHANNEL_MEMBERSHIP, change.target_id,
+                change.target_name, change.change_id,
+            )
         if change.target_kind == ChangeTarget.PORT_CHANNEL and change.field == "lacp":
-            required.setdefault(
-                (DependencyKind.PORT_CHANNEL_MEMBERSHIP, change.target_name), set(),
-            ).add(change.change_id)
+            require(
+                DependencyKind.PORT_CHANNEL_MEMBERSHIP, change.target_id,
+                change.target_name, change.change_id,
+            )
         if change.field == "routed_address" or change.transition == "routed-boundary-change":
-            required.setdefault(
-                (DependencyKind.ROUTED_BOUNDARY, change.target_name), set(),
-            ).add(change.change_id)
-        if change.field == "physical_device_id":
-            required.setdefault(
-                (DependencyKind.PHYSICAL_DEVICE_BINDING, change.target_name), set(),
-            ).add(change.change_id)
-        if change.field == "physical-device-id":
-            required.setdefault(
-                (DependencyKind.PHYSICAL_DEVICE_BINDING, change.target_name), set(),
-            ).add(change.change_id)
+            require(
+                DependencyKind.ROUTED_BOUNDARY, change.target_id,
+                change.target_name, change.change_id,
+            )
+        if change.field in {"physical_device_id", "physical-device-id"}:
+            require(
+                DependencyKind.PHYSICAL_DEVICE_BINDING, change.target_id,
+                change.target_name, change.change_id,
+            )
         if change.field == "stack-identity" or change.field.startswith("stack-member:"):
-            required.setdefault(
-                (DependencyKind.STACK_MEMBER_BINDING, change.target_name), set(),
-            ).add(change.change_id)
+            require(
+                DependencyKind.STACK_MEMBER_BINDING, change.target_id,
+                change.target_name, change.change_id,
+            )
         if change.field == "stack_member":
-            required.setdefault(
-                (DependencyKind.STACK_MEMBER_BINDING, change.target_name), set(),
-            ).add(change.change_id)
+            require(
+                DependencyKind.STACK_MEMBER_BINDING, change.target_id,
+                change.target_name, change.change_id,
+            )
         if (
             change.field == "shutdown_intent"
             and change.before_source is BeforeSource.PLANNING_BASELINE
             and change.after_source == REVIEWED_DEFAULT_POLICY
         ):
-            required.setdefault(
-                (DependencyKind.UNUSED_PORT_POLICY, change.target_name), set(),
-            ).add(change.change_id)
-    before_channels = (
-        {str(channel.interface_id): channel for channel in before.port_channels}
-        if before is not None else {}
-    )
+            require(
+                DependencyKind.UNUSED_PORT_POLICY, change.target_id,
+                change.target_name, change.change_id,
+            )
     removals = [
         change for change in change_list
         if change.transition == "port-channel-removed"
     ]
     for removal in removals:
-        required.setdefault(
-            (DependencyKind.PORT_CHANNEL_REMOVAL, removal.target_name), set(),
-        ).add(removal.change_id)
+        require(
+            DependencyKind.PORT_CHANNEL_REMOVAL, removal.target_id,
+            removal.target_name, removal.change_id,
+        )
         previous = before_channels.get(removal.target_id)
         if previous is None:
             continue
         removed_members = {str(member) for member in previous.member_ids}
-        for detach in change_list:
+        for member_change in change_list:
             if (
-                detach.transition == "port-channel-member-to-independent"
-                and detach.target_id in removed_members
+                member_change.target_kind != ChangeTarget.INTERFACE
+                or member_change.field != "port_channel"
+                or member_change.target_id not in removed_members
+                or member_change.before is None
+                or member_change.before == member_change.after
             ):
-                required[
-                    (DependencyKind.PORT_CHANNEL_REMOVAL, removal.target_name)
-                ].add(detach.change_id)
+                continue
+            old_channel = before_member_channel.get(member_change.target_id)
+            if (
+                old_channel is not None
+                and str(old_channel.interface_id) == removal.target_id
+            ):
+                require(
+                    DependencyKind.PORT_CHANNEL_REMOVAL, removal.target_id,
+                    removal.target_name, member_change.change_id,
+                )
     dependencies = [
         IntentDependency(
-            dependency_id=_dependency_id(kind, target),
+            dependency_id=_dependency_id(
+                kind, str(assignment_id), identity,
+            ),
             kind=kind,
-            target=target,
+            target=displays[(kind, identity)],
             required_by=tuple(sorted(change_ids)),
         )
-        for (kind, target), change_ids in sorted(
-            required.items(), key=lambda item: (item[0][0].value, item[0][1]),
+        for (kind, identity), change_ids in sorted(
+            required.items(),
+            key=lambda item: (
+                item[0][0].value,
+                displays[item[0]],
+                item[0][1],
+            ),
         )
     ]
     return tuple(dependencies)
@@ -1691,7 +1765,9 @@ def _build_device_intent(
         context, before_identity, _identity(plan, assignment),
     )
     changes = (*_device_changes(before_state, desired, context), *identity_changes)
-    dependencies = _dependencies(changes, desired, before_state)
+    dependencies = _dependencies(
+        changes, desired, before_state, assignment.id,
+    )
     dependency_ids: dict[str, list[str]] = {}
     for dependency in dependencies:
         for change_id in dependency.required_by:
@@ -1877,7 +1953,9 @@ def _vlan_dependencies(
     dependencies = [
         IntentDependency(
             dependency_id=_dependency_id(
-                DependencyKind.VLAN_DEFINITION, f"vlan:{vlan_id}",
+                DependencyKind.VLAN_DEFINITION,
+                "event-vlan-database",
+                f"vlan:{vlan_id}",
             ),
             kind=DependencyKind.VLAN_DEFINITION,
             target=f"vlan:{vlan_id}",
