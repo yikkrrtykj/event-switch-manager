@@ -1283,6 +1283,7 @@ def _channel_value(channel: PortChannelIntent, field: str) -> JsonValue | None:
 def _dependencies(
     changes: Iterable[PlannedChange],
     desired: DeviceDesiredState,
+    before: DeviceDesiredState | None,
 ) -> tuple[IntentDependency, ...]:
     change_list = tuple(changes)
     required: dict[tuple[DependencyKind, str], set[str]] = {}
@@ -1349,22 +1350,30 @@ def _dependencies(
             required.setdefault(
                 (DependencyKind.UNUSED_PORT_POLICY, change.target_name), set(),
             ).add(change.change_id)
+    before_channels = (
+        {str(channel.interface_id): channel for channel in before.port_channels}
+        if before is not None else {}
+    )
     removals = [
         change for change in change_list
         if change.transition == "port-channel-removed"
-    ]
-    detaches = [
-        change for change in change_list
-        if change.transition == "port-channel-member-to-independent"
     ]
     for removal in removals:
         required.setdefault(
             (DependencyKind.PORT_CHANNEL_REMOVAL, removal.target_name), set(),
         ).add(removal.change_id)
-        for detach in detaches:
-            required[(DependencyKind.PORT_CHANNEL_REMOVAL, removal.target_name)].add(
-                detach.change_id
-            )
+        previous = before_channels.get(removal.target_id)
+        if previous is None:
+            continue
+        removed_members = {str(member) for member in previous.member_ids}
+        for detach in change_list:
+            if (
+                detach.transition == "port-channel-member-to-independent"
+                and detach.target_id in removed_members
+            ):
+                required[
+                    (DependencyKind.PORT_CHANNEL_REMOVAL, removal.target_name)
+                ].add(detach.change_id)
     dependencies = [
         IntentDependency(
             dependency_id=_dependency_id(kind, target),
@@ -1611,7 +1620,7 @@ def _build_device_intent(
         context, before_identity, _identity(plan, assignment),
     )
     changes = (*_device_changes(before_state, desired, context), *identity_changes)
-    dependencies = _dependencies(changes, desired)
+    dependencies = _dependencies(changes, desired, before_state)
     dependency_ids: dict[str, list[str]] = {}
     for dependency in dependencies:
         for change_id in dependency.required_by:
@@ -1759,6 +1768,26 @@ def _change_vlan_references(
     return frozenset()
 
 
+def _attach_dependency_backrefs(
+    changes: Iterable[PlannedChange],
+    dependencies: Iterable[IntentDependency],
+) -> tuple[PlannedChange, ...]:
+    dependency_ids: dict[str, set[str]] = {}
+    for dependency in dependencies:
+        for change_id in dependency.required_by:
+            dependency_ids.setdefault(change_id, set()).add(
+                dependency.dependency_id
+            )
+    return tuple(
+        change.model_copy(update={
+            "dependencies": tuple(sorted(
+                set(change.dependencies) | dependency_ids.get(change.change_id, set())
+            )),
+        })
+        for change in changes
+    )
+
+
 def _vlan_dependencies(
     vlan_changes: Iterable[PlannedChange],
     device_changes: Iterable[PlannedChange],
@@ -1897,6 +1926,15 @@ def build_layer2_intent(
     checks = tuple(check for device in devices for check in device.capability_checks)
     device_changes = tuple(change for device in devices for change in device.changes)
     vlan_dependencies = _vlan_dependencies(vlan_changes, device_changes)
+    vlan_changes = _attach_dependency_backrefs(vlan_changes, vlan_dependencies)
+    devices = tuple(
+        device.model_copy(update={
+            "changes": _attach_dependency_backrefs(
+                device.changes, vlan_dependencies,
+            ),
+        })
+        for device in devices
+    )
     structured_valid = plan_valid and not any(
         conflict.severity == "ERROR" for conflict in conflicts
     )

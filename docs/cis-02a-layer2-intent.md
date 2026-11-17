@@ -167,10 +167,19 @@ VLAN definition changes are structurally distinct:
 
 A rename is not a delete/create pair: the VLAN ID and interface references are
 preserved, only the name field changes. VLAN definition dependencies
-(top-level `vlan_dependencies`) reference both the definition change and the
-interface/Port-Channel changes that reference or detach the VLAN, so a rename
-cannot be mistaken for a recreate and a removal can be ordered after detaching
-references.
+(top-level `vlan_dependencies`) reference the definition change and every
+associated interface/Port-Channel/device VLAN-set change that references or
+detaches the VLAN: a created/referenced VLAN links its creation and referencing
+changes, a removal links the removal and changes that detach the reference, and
+an unreferenced declaration links its own definition change. Every associated
+`PlannedChange.dependencies` contains the same top-level dependency ID, so the
+relation is bidirectional: no dangling dependency IDs, no duplicates, and no
+change ID is ever mistaken for a dependency ID.
+
+The relation is an association/ordering-intent record, not proof of an
+executable order. Dependency IDs are not change IDs and `required_by` is not a
+command sequence; a future renderer must not treat dependency metadata as a
+verified execution plan. No self-edge or cycle is created between changes.
 
 Stack identities are separately diffable: assignment physical-device binding
 (`physical-device-id`), Stack identity state (`stack-identity`), member
@@ -188,16 +197,24 @@ Port-Channel mode changes reuse the physical-port transition/cleanup logic:
 `routed-to-switchport`, `mode-change`, with cleanup of old Access/Native/Allowed
 VLAN and routed-address fields. Deleting a Port-Channel emits
 `port-channel-removed` plus member-detach changes and a
-`port-channel-removal` dependency whose `required_by` contains the removal and
-all detach change IDs.
+`port-channel-removal` dependency. Its `required_by` is scoped from the
+Planning Baseline channel identity and member list: each removed Port-Channel
+links only its own removal change and the detach changes of the members that
+belonged to it in the baseline. Unrelated member detaches, including detaches
+from a retained or separately removed Port-Channel, are never attached by
+interface-name guessing. Multiple removed Port-Channels each get a separate
+dependency and `required_by` set.
 
 `IntentDependency` entries model ordering intent without commands:
 `vlan-definition`, `port-channel-interface`, `port-channel-membership`,
 `member-detach`, `mode-cleanup`, `routed-boundary`, `unused-port-policy`,
 `stack-member-binding`, `physical-device-binding`, `port-channel-removal`, each
-with the change IDs that require it. Dependency metadata is planning
-information only; a future Renderer must not treat it as an already-verified
-execution order.
+with the change IDs that require it. Device-level dependencies live in
+`device.dependencies`; VLAN definition dependencies live in the top-level
+`vlan_dependencies`. A change's `dependencies` field is the union of the
+device-level and VLAN-level dependency IDs that associate with that change.
+Dependency metadata is planning information only; a future Renderer must not
+treat it as an already-verified execution order.
 
 ## Conflicts and validation findings
 
@@ -268,8 +285,29 @@ evidence fails closed at the documentation-readiness level.
   Port-Channel four-mode transitions with cleanup/dependencies, Port-Channel
   removal/member detach, legal multi-port Stack membership, inconsistent Stack
   ownership, and unused-port policy/source boundaries;
+- Port-Channel removal dependency scoping per baseline channel and member list,
+  including multiple removals in one revision;
+- VLAN dependency backlinks on created, renamed, removed and unreferenced VLAN
+  changes, with no duplicate/dangling dependency IDs and no change/dependency ID
+  confusion;
 - no CLI output and no device write path (`cli=null`, `executable=false`,
   `device_writes_enabled=false`).
+
+### Known boundary observations (not expanded in this change-set fix)
+
+The following are recorded for a future review, not silently expanded here:
+
+- Removing an entire Assignment between revisions currently drops it from
+  `devices` without a top-level removed-device ChangeSet record.
+- A Stack member `state` change (for example `ready` to `missing`) is visible in
+  the desired Stack identity but is not emitted as a `PlannedChange` field.
+- Static Port-Channels still receive an LACP capability check because LACP is
+  added for every Port-Channel; only PORT-CHANNEL is strictly required for a
+  static aggregate. On the reviewed families LACP evidence is supported, so
+  this is diagnostic hygiene rather than a current deployment blocker.
+
+They are intentionally not mixed into this dependency remediation; evidence is
+kept for a separate scoped fix.
 
 ## Out of scope
 
