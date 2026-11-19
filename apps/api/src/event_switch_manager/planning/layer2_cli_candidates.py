@@ -43,7 +43,6 @@ from .command_evidence import (
     CommandEvidenceRegistry,
     CommandMode,
     CommandTopic,
-    EvidenceReviewState,
     ParameterRule,
     RequirementKind,
     evidence_reference,
@@ -56,6 +55,7 @@ from .layer2_config_preview import (
 )
 from .layer2_intent import (
     CapabilityCheck,
+    DeviceDesiredState,
     DeviceIdentity,
     DeviceLayer2Intent,
     IntentConflict,
@@ -617,11 +617,25 @@ CheckKey = tuple[str, str, str]
 
 
 @dataclass(frozen=True, slots=True)
-class _Membership:
-    """Current and previous channel membership, keyed by physical interface UUID."""
+class _ChannelRef:
+    """Identity of the aggregate a member belongs to in one revision."""
 
-    current: Mapping[str, int]
-    previous: Mapping[str, int]
+    number: int
+    interface_id: str
+    lacp: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Membership:
+    """Current and previous channel membership, keyed by physical interface UUID.
+
+    A channel number alone never proves object identity: the logical-interface
+    UUID and the aggregation protocol are tracked with it so a replaced object or
+    a static/LACP protocol switch cannot look like an unchanged membership.
+    """
+
+    current: Mapping[str, _ChannelRef]
+    previous: Mapping[str, _ChannelRef]
     current_sets: Mapping[int, tuple[str, ...]]
 
     def transition(self, member_id: str) -> str:
@@ -629,27 +643,48 @@ class _Membership:
         previous = self.previous.get(member_id)
         if current is not None and previous is None:
             return "added"
-        if current is not None and previous == current:
-            return "unchanged"
         if current is not None and previous is not None:
-            return "migrated"
+            if current.number != previous.number:
+                return "migrated"
+            if current.interface_id != previous.interface_id:
+                return "replaced"
+            return "unchanged"
         if current is None and previous is not None:
             return "removed"
         return "unknown"
 
+    def protocol_transition(self, member_id: str) -> str:
+        current = self.current.get(member_id)
+        previous = self.previous.get(member_id)
+        if current is None or previous is None:
+            return "not-comparable"
+        if current.number != previous.number or (
+            current.interface_id != previous.interface_id
+        ):
+            return "not-comparable"
+        if current.lacp == previous.lacp:
+            return "unchanged"
+        if "static" in {current.lacp, previous.lacp}:
+            return "protocol-switch"
+        return "lacp-mode-change"
+
+
+def _channel_refs(state: DeviceDesiredState | None) -> Mapping[str, _ChannelRef]:
+    refs: dict[str, _ChannelRef] = {}
+    for channel in (state.port_channels if state is not None else ()):
+        ref = _ChannelRef(
+            number=channel.number,
+            interface_id=str(channel.interface_id),
+            lacp=channel.lacp,
+        )
+        for member in channel.member_ids:
+            refs[str(member)] = ref
+    return refs
+
 
 def _build_membership(device_intent: DeviceLayer2Intent) -> _Membership:
-    current = {
-        str(port.interface_id): port.port_channel
-        for port in device_intent.desired.physical_ports
-        if port.port_channel is not None
-    }
-    before = device_intent.before.state
-    previous = {
-        str(port.interface_id): port.port_channel
-        for port in (before.physical_ports if before is not None else ())
-        if port.port_channel is not None
-    }
+    current = _channel_refs(device_intent.desired)
+    previous = _channel_refs(device_intent.before.state)
     current_sets = {
         channel.number: tuple(str(member) for member in channel.member_ids)
         for channel in device_intent.desired.port_channels
@@ -727,6 +762,9 @@ class _Context:
     def member_transition(self, member_id: str) -> str:
         return self.membership.transition(member_id)
 
+    def member_protocol_transition(self, member_id: str) -> str:
+        return self.membership.protocol_transition(member_id)
+
     def mode_transition(self, target: TargetKind, stable_id: str) -> str | None:
         return self.mode_transitions.get((target.value, stable_id))
 
@@ -781,7 +819,12 @@ class _Context:
     def evidence(
         self, topic: CommandTopic,
     ) -> tuple[CommandEvidence | None, tuple[str, ...]]:
-        """Return the single reviewed row for this exact scope, or blocker codes."""
+        """Return the single reviewed row for this exact scope, or blocker codes.
+
+        The diagnosis distinguishes missing, unreviewed, rejected and
+        content-mismatched evidence by delegating to the registry blocker, so a
+        stale review digest can never be reported as merely "not reviewed".
+        """
         if self.family is None or self.release is None:
             return None, ("syntax-evidence-scope-unknown",)
         rows = self.registry.applicable(
@@ -790,17 +833,13 @@ class _Context:
         reviewed = tuple(row for row in rows if row.renderable)
         if len(reviewed) == 1:
             return reviewed[0], ()
+        if len(reviewed) > 1:
+            return None, (f"syntax-evidence-ambiguous:{topic.value}",)
         if not rows:
             return None, (f"syntax-evidence-missing:{topic.value}",)
-        if not reviewed:
-            rejected = any(
-                row.review.state is EvidenceReviewState.REJECTED for row in rows
-            )
-            code = "syntax-evidence-rejected" if rejected else "syntax-evidence-not-reviewed"
-            if rejected:
-                return None, (f"{code}:{topic.value}",)
-            return None, (f"{code}:{topic.value}",)
-        return None, (f"syntax-evidence-ambiguous:{topic.value}",)
+        return None, (self.registry.blocker(
+            self.family, self.pid, self.release, self.license, topic,
+        ),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -867,7 +906,8 @@ def _require_channel_membership(
         if not members:
             return ((f"channel-membership-empty:{spec.target_name}", RiskClass.R5),)
         for member in members:
-            if context.membership.current.get(member) != number:
+            ref = context.membership.current.get(member)
+            if ref is None or ref.number != number:
                 return ((
                     f"channel-membership-inconsistent:{spec.target_name}",
                     RiskClass.R5,
@@ -875,7 +915,8 @@ def _require_channel_membership(
         return ()
     transition = context.member_transition(spec.target_id)
     if transition in {"added", "unchanged"}:
-        if number is None or context.membership.current.get(spec.target_id) != number:
+        ref = context.membership.current.get(spec.target_id)
+        if number is None or ref is None or ref.number != number:
             return ((
                 f"channel-membership-inconsistent:{spec.target_name}",
                 RiskClass.R5,
@@ -964,6 +1005,58 @@ def _require_portfast_mode(
     return ()
 
 
+def _edge_role_findings(
+    context: _Context, spec: _Spec, prefix: str,
+) -> tuple[_RequirementFinding, ...]:
+    """Block a known or unverifiable non-edge role for PortFast and BPDU Guard.
+
+    A planning link, ISP/transit port, aggregate member, Port-Channel or a
+    core-role device is a known topology conflict: it may not be presented as an
+    ordinary edge candidate. Only an unreferenced physical port keeps the ordinary
+    candidate, and even then the field notes keep the real device state unverified.
+    """
+    if spec.target_kind is TargetKind.PORT_CHANNEL:
+        return ((
+            f"{prefix}-aggregate-role-unverified:{spec.target_name}",
+            RiskClass.R3,
+        ),)
+    roles = context.port_roles(spec.target_name)
+    known = roles & {"link", "isp", "transit"}
+    if known:
+        role = sorted(known)[0]
+        return ((
+            f"{prefix}-non-edge-topology:{role}:{spec.target_name}",
+            RiskClass.R5,
+        ),)
+    if "channel-member" in roles:
+        return ((
+            f"{prefix}-aggregate-member-role-unverified:{spec.target_name}",
+            RiskClass.R3,
+        ),)
+    if context.identity.role in {"core", "external-distribution"}:
+        return ((
+            f"{prefix}-core-role-unverified:{spec.target_name}",
+            RiskClass.R5,
+        ),)
+    if roles == frozenset({"unreferenced"}):
+        # No planned topology says this is an edge port; the field note keeps the
+        # candidate honest instead of claiming the real device was verified.
+        return ()
+    return ((f"{prefix}-role-unverified:{spec.target_name}", RiskClass.R5),)
+
+
+def _require_portfast_edge_role(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    return _edge_role_findings(context, spec, "portfast")
+
+
+def _require_bpdu_guard_edge_role(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    return _edge_role_findings(context, spec, "bpdu-guard")
+
+
 def _require_topology_wide(
     context: _Context, spec: _Spec, row: CommandEvidence | None,
 ) -> tuple[_RequirementFinding, ...]:
@@ -1035,6 +1128,8 @@ _REQUIREMENT_EVALUATORS: Mapping[
     "poe-static-budget": _require_poe_static,
     "copper-port-required": _require_copper_port,
     "portfast-mode-match": _require_portfast_mode,
+    "portfast-edge-role": _require_portfast_edge_role,
+    "bpdu-guard-edge-role": _require_bpdu_guard_edge_role,
     "topology-wide-evidence": _require_topology_wide,
     "mode-transition-consistency": _require_mode_transition,
     "admin-state-topology": _require_admin_state,
@@ -1427,8 +1522,10 @@ def _channel_group_spec(
 ) -> _Spec:
     number = channel.number
     transition = context.member_transition(target_id)
+    protocol = context.member_protocol_transition(target_id)
     membership_block: tuple[str, ...] = ()
     membership_risk: RiskClass | None = None
+    prerequisites: tuple[str, ...] = ()
     if transition == "migrated":
         membership_block = (
             f"channel-migration-requires-source-channel-evidence:{target_name}",
@@ -1439,12 +1536,38 @@ def _channel_group_spec(
             f"channel-member-detach-requires-field-evidence:{target_name}",
         )
         membership_risk = RiskClass.R4
+    elif transition == "replaced":
+        # The same channel number can name a different logical object.
+        membership_block = (
+            f"channel-object-identity-changed:{target_name}:{number}",
+            "cleanup-requires-field-verification",
+        )
+        membership_risk = RiskClass.R4
     elif transition == "unknown":
         membership_block = (f"channel-membership-unresolved:{target_name}",)
         membership_risk = RiskClass.R5
-    elif context.membership.current.get(target_id) != number:
-        membership_block = (f"channel-membership-inconsistent:{target_name}",)
-        membership_risk = RiskClass.R5
+    else:
+        ref = context.membership.current.get(target_id)
+        if ref is None or ref.number != number:
+            membership_block = (f"channel-membership-inconsistent:{target_name}",)
+            membership_risk = RiskClass.R5
+    if protocol == "protocol-switch":
+        # static and LACP are different aggregation protocols: switching between
+        # them needs the old configuration cleaned up, peer compatibility and
+        # field evidence, so no channel-group candidate is rendered.
+        membership_block = (
+            *membership_block,
+            f"aggregation-protocol-change-requires-field-evidence:{target_name}",
+            "cleanup-requires-field-verification",
+        )
+        membership_risk = _raise_risk(
+            membership_risk or RiskClass.R3, RiskClass.R4,
+        )
+    elif protocol == "lacp-mode-change":
+        # active <-> passive is not a protocol switch, but it changes negotiation
+        # behavior and needs the peer precondition confirmed; it is never claimed
+        # to be safe without field evidence.
+        prerequisites = ("lacp-negotiation-change-requires-peer-evidence",)
     if channel.lacp == "static":
         return _Spec(
             category=CandidateCategory.PORT_CHANNEL,
@@ -1456,6 +1579,7 @@ def _channel_group_spec(
             parameters={"port-channel-number": number, "mode": "on"},
             compose=lambda: f"channel-group {number} mode on",
             capability_ids=(CiscoCapability.PORT_CHANNEL.value,),
+            prerequisites=prerequisites,
             force_block=membership_block,
             risk_floor=membership_risk,
         )
@@ -1470,6 +1594,7 @@ def _channel_group_spec(
         parameters={"port-channel-number": number, "mode": mode},
         compose=lambda: f"channel-group {number} mode {mode}",
         capability_ids=(CiscoCapability.PORT_CHANNEL.value, Capability.LACP.value),
+        prerequisites=prerequisites,
         force_block=membership_block,
         risk_floor=membership_risk,
     )
@@ -1964,19 +2089,73 @@ def _blocked_conflicts(item: ConfigItem, conflicts: tuple[IntentConflict, ...]) 
     )
 
 
-def _target_reason(context: _Context, spec: _Spec) -> str | None:
-    """Revalidate the rendered target name against the exact platform layout."""
+def _port_channel_number_maximum(context: _Context) -> int | None:
+    """Reviewed Port-Channel number bound for this exact scope, if available."""
+    if context.family is None or context.release is None:
+        return None
+    rows = context.registry.applicable(
+        context.family, context.pid, context.release, context.license,
+        CommandTopic.PORT_CHANNEL_INTERFACE,
+    )
+    for row in rows:
+        for rule in row.parameters:
+            if rule.name == "port-channel-number" and rule.maximum is not None:
+                return rule.maximum
+    return None
+
+
+def _vlan_target_reasons(vlan_id: int) -> tuple[str, ...]:
+    if vlan_id in {1002, 1003, 1004, 1005}:
+        return (f"target-invalid:vlan-reserved:{vlan_id}",)
+    if vlan_id == 1:
+        # VLAN 1 exists by default; creating or renaming it is a change to the
+        # default VLAN and stays blocked rather than being silently allowed.
+        return ("target-invalid:vlan-default:1",)
+    if not 1 <= vlan_id <= 4094:
+        return (f"target-invalid:vlan-range:{vlan_id}",)
+    return ()
+
+
+def _target_reasons(context: _Context, spec: _Spec) -> tuple[str, ...]:
+    """Validate the configuration target itself, not only the command line.
+
+    A command that enters a VLAN or Port-Channel configuration mode is only
+    legitimate when that target object is legitimate, so every candidate for the
+    same target inherits the same target-level block.
+    """
+    reasons: list[str] = []
     if spec.target_kind is TargetKind.INTERFACE:
         port = context.port(spec.target_name)
-        return interface_name_reason(
+        name_reason = interface_name_reason(
             spec.target_name, context.profile, port.stack_member if port else None,
         )
-    if spec.target_kind is TargetKind.PORT_CHANNEL:
+        if name_reason is not None:
+            reasons.append(name_reason)
+    elif spec.target_kind is TargetKind.PORT_CHANNEL:
         channel = context.channel_for_interface(spec.target_id)
         if channel is None:
-            return "port-channel-record-missing"
-        return port_channel_name_reason(spec.target_name, channel.number)
-    return None
+            reasons.append("target-invalid:port-channel-record-missing")
+        else:
+            name_reason = port_channel_name_reason(spec.target_name, channel.number)
+            if name_reason is not None:
+                reasons.append(name_reason)
+            maximum = _port_channel_number_maximum(context)
+            if maximum is None:
+                reasons.append(
+                    f"target-invalid:port-channel-range-unknown:{channel.number}"
+                )
+            elif not 1 <= channel.number <= maximum:
+                reasons.append(
+                    f"target-invalid:port-channel-number:{channel.number}:{maximum}"
+                )
+    elif spec.target_kind is TargetKind.VLAN:
+        raw = spec.target_id
+        vlan_id = int(raw) if isinstance(raw, str) and raw.isdigit() else None
+        if vlan_id is None:
+            reasons.append(f"target-invalid:vlan-id:{spec.target_id}")
+        else:
+            reasons.extend(_vlan_target_reasons(vlan_id))
+    return tuple(dict.fromkeys(reasons))
 
 
 def _build_candidate(
@@ -2043,11 +2222,11 @@ def _build_candidate(
     reasons.extend(_blocked_conflicts(item, context.preview.device.conflicts))
     reasons.extend(reason for reason, _floor in requirement_findings)
 
-    target_reason = _target_reason(context, spec) if spec.topic is not None else None
-    if target_reason is not None:
+    target_reasons = _target_reasons(context, spec) if spec.topic is not None else ()
+    if target_reasons:
         if status is CandidateStatus.CANDIDATE:
             status = CandidateStatus.BLOCKED
-        reasons.append(target_reason)
+        reasons.extend(target_reasons)
         reasons.append(f"unsafe-target:{spec.field}:{spec.target_name}")
 
     parameters = dict(spec.parameters or {})
@@ -2083,6 +2262,7 @@ def _build_candidate(
         or bool(requirement_findings)
         or bool(field_notes)
         or "field-topology-evidence-required" in spec.prerequisites
+        or "lacp-negotiation-change-requires-peer-evidence" in spec.prerequisites
     )
     draft = Candidate(
         candidate_id=_candidate_id(

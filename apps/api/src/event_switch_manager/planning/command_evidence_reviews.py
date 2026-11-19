@@ -630,23 +630,22 @@ REVIEWED_RECORDS: dict[str, dict[str, object]] = {
     'l1-catalyst-9200-bpdu-guard-v1': {
         "reviewer": 'independent-review-agent-rev-9200',
         "reviewed_at": '2026-11-20',
-        "content_digest": '58f62ed7970834ee19ee0dd8eb0b7efa3782b3570e8c289ec471772820fe8c1d',
+        "content_digest": '613deb981b74cb0f44cc08ffd2d387b46d2841e3ea7bf899830e3a0a36e101b1',
         "findings": (
         (
-            "The optional spanning-tree guide still prints 'You also can use the spanning-tree"
-            'bpduguard enable interface configuration command to enable BPDU guard on any port'
-            "without also enabling the PortFast feature', matching the row's enable-only"
-            'grammar and interface mode.'
+            'Re-fetched the cited 17.12 Catalyst 9200 optional spanning-tree guide (HTTP 200):'
+            "the '(Optional) Enabling Bridge Protocol Data Unit Guard' section still prints"
+            "'spanning-tree bpduguard enable' as an interface configuration command ('You also"
+            'can use the spanning-tree bpduguard enable interface configuration command to'
+            'enable BPDU guard on any port without also enabling the PortFast feature. When'
         ),
         (
-            "The BPDU guard description states a port receiving a BPDU 'is put in the"
-            "error-disabled state', matching the row's err-disable limit and its disclosure"
-            'that only the enable form is printed.'
-        ),
-        (
-            'bpdu-guard-topology-note is correctly a non-blocking field-note covering'
-            'err-disable recovery and edge-role prerequisites, with no vendor CLI claim that'
-            'the page would need to print.'
+            'bpdu-guard-edge-role is correctly classified as a SAFETY gate about missing'
+            'planning/field evidence rather than a new vendor claim: the err-disable'
+            'service-loss risk is the already-supported vendor behaviour applied to a planned'
+            'link/ISP/transit target, an aggregate member or Port-Channel target, a core-role'
+            'device or an unresolved-role target (bpdu-guard-non-edge-topology:*,'
+            'bpdu-guard-aggregate-'
         ),
         ),
     },
@@ -783,24 +782,22 @@ REVIEWED_RECORDS: dict[str, dict[str, object]] = {
     'l1-catalyst-9200-portfast-v1': {
         "reviewer": 'independent-review-agent-rev-9200',
         "reviewed_at": '2026-11-20',
-        "content_digest": '51d515baa86d6012b6f847bd11062666bf5f611d04416d55a82817f5a3d21f8a',
+        "content_digest": '2abf0bb32512e211da73624aece1a21bcfed54ca89fb6be75d3125125ab428ce',
         "findings": (
         (
-            "The '(Optional) Enabling PortFast' procedure still prints 'spanning-tree portfast"
-            "[trunk]' in interface configuration mode with example 'spanning-tree portfast"
-            "trunk', matching the row's grammar and mode."
+            'Re-fetched the cited 17.12 Catalyst 9200 optional spanning-tree guide (HTTP 200,'
+            "updated July 28, 2023): the '(Optional) Enabling PortFast' procedure still prints"
+            "'spanning-tree portfast [trunk]' in interface configuration mode with example"
+            "'spanning-tree portfast trunk', and its note still states 'To enable PortFast on"
+            'trunk ports, you must use the spanning-tree portfast trunk interface configura'
         ),
         (
-            "The note states 'To enable PortFast on trunk ports, you must use the spanning-tree"
-            'portfast trunk interface configuration command. The spanning-tree portfast command'
-            "will not work on trunk ports', which directly supports requirement"
-            "portfast-mode-match ('plain portfast does not work on a trunk port') - correctly"
-            'classified as a platform gate and truthful.'
-        ),
-        (
-            "portfast-topology-note is correctly a non-blocking field-note ('PortFast on a port"
-            "that is not a verified edge port is a topology risk'), consistent with the page's"
-            'warning to use PortFast only toward end stations.'
+            'portfast-edge-role is correctly classified as a SAFETY gate about missing'
+            'planning/field evidence rather than a vendor claim: it is a blocking renderer'
+            'precondition that rejects a planned link/ISP/transit target, an aggregate member'
+            'or Port-Channel target, a core-role device and an unresolved-role target'
+            '(portfast-non-edge-topology:*, portfast-aggregate-member-role-unverified,'
+            'portfast-aggregate-r'
         ),
         ),
     },
@@ -1038,24 +1035,22 @@ REVIEWED_RECORDS: dict[str, dict[str, object]] = {
     'l1-catalyst-9300-bpdu-guard-v1': {
         "reviewer": 'independent-review-agent-rev-9300',
         "reviewed_at": '2026-11-20',
-        "content_digest": '897ca310d0307480c7b6d17528fda4b1ab426731e8476f246f1b213c8219b2c8',
+        "content_digest": 'adbe13633a6066dfd2111037e43eaacaf9c9a1384d9ae2b73c909a69bfd47136',
         "findings": (
         (
-            "The cited optional-STP guide prints only the enable form ('you also can use the"
-            "spanning-tree bpduguard enable interface configuration command'), plus the global"
-            "'spanning-tree portfast bpduguard default', and states a BPDU-receiving port is"
-            "put in the error-disabled state, matching the row's err-disable limit."
+            "The cited BPDU Guard section prints the interface-level 'spanning-tree bpduguard"
+            "enable' form and states that a port receiving a BPDU is put in the error-disabled"
+            "state, while the same-release Layer 2/3 Command Reference documents 'spanning-tree"
+            "bpduguard { enable | disable }' in interface configuration mode, so the"
+            'enable/disable eligibility and err-disable behaviour are unchanged and still suppo'
         ),
         (
-            "The 17.12.4 Layer 2/3 Command Reference prints 'spanning-tree bpduguard { enable |"
-            "disable }', describes both keywords, and lists the command under 'Interface"
-            "configuration (config-if)', confirming the row's enable/disable parameter for this"
-            'release.'
-        ),
-        (
-            'Requirement bpdu-guard-topology-note is correctly a non-blocking field-note'
-            'covering err-disable recovery policy and the edge role of the port; it asserts no'
-            'vendor CLI claim requiring page support.'
+            'The added bpdu-guard-edge-role requirement is correctly a blocking SAFETY gate'
+            'about missing field evidence: its BPDU/err-disable premise is printed on the cited'
+            'page, the renderer blocks planned link/ISP/transit, aggregate/channel-member,'
+            'core-role and role-unverified targets because they could lose service to an'
+            'unexpected err-disable, and the existing bpdu-guard-topology-note remains a'
+            'non-bloc'
         ),
         ),
     },
@@ -1202,19 +1197,21 @@ REVIEWED_RECORDS: dict[str, dict[str, object]] = {
     'l1-catalyst-9300-portfast-v1': {
         "reviewer": 'independent-review-agent-rev-9300',
         "reviewed_at": '2026-11-20',
-        "content_digest": '611bce26c60f3a3f9248cb044d58d0c3f4d7a5a7daedfca018aaf21989e2679e',
+        "content_digest": 'af334e3b61a5e1af319c08adc8a40ab63f932e35c4be2883792f4d1678122580',
         "findings": (
         (
-            "The optional-STP guide's '(Optional) Enabling PortFast' Step 4 prints"
-            "'spanning-tree portfast [trunk]' in interface configuration mode and notes 'To"
-            'enable PortFast on trunk ports, you must use the spanning-tree portfast trunk'
-            'interface configuration command. The spanning-tree portfast command will not work'
-            "on trunk ports.'"
+            "The cited '(Optional) Enabling PortFast' procedure prints 'spanning-tree portfast"
+            "[trunk]' in interface configuration mode and its step note states 'The"
+            "spanning-tree portfast command will not work on trunk ports', so the grammar and"
+            'the trunk-only rule are unchanged and still supported.'
         ),
         (
-            'Requirement portfast-mode-match is a truthful platform gate (plain portfast is'
-            'rejected on a trunk; the renderer maps edge to access and edge-trunk to trunk);'
-            'portfast-topology-note is correctly a non-blocking field-note.'
+            'The added portfast-edge-role requirement is correctly a blocking SAFETY gate about'
+            'missing field evidence: the renderer blocks planned link/ISP/transit,'
+            'aggregate/channel-member, core-role and role-unverified targets instead of'
+            'presenting them as ordinary edge candidates, and the unreferenced-port case still'
+            'carries requires_field_verification plus the non-blocking portfast-topology-note,'
+            'so no re'
         ),
         ),
     },

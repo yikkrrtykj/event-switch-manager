@@ -105,11 +105,12 @@ def harness_registry(rows: HarnessRows = ROWS) -> CommandEvidenceRegistry:
 
 def base_plan(
     event_id: str, ports: list[dict[str, Any]], *, pid: str = "C9300L-24P-4X",
+    vlans: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     device_id, assignment_id = new_id(), new_id()
     return {
         "schema_version": 1, "event_id": event_id, "management_vlan": 10,
-        "vlans": [
+        "vlans": vlans if vlans is not None else [
             {"id": 10, "name": "Management", "purpose": "management"},
             {"id": 20, "name": "Players", "purpose": "ordinary"},
             {"id": 30, "name": "Guest", "purpose": "guest"},
@@ -276,12 +277,15 @@ def test_same_revision_lacp_and_membership_change_blocks_migrating_member() -> N
     add_channel(first, 1, [0], {"mode": "access", "access_vlan": 20})
     add_channel(first, 2, [1, 2], {"mode": "access", "access_vlan": 20})
     second = copy.deepcopy(first)
-    second["port_channels"] = []
-    second["logical_interfaces"] = []
-    add_channel(second, 1, [1], {"mode": "access", "access_vlan": 20}, lacp="passive")
-    add_channel(second, 2, [0, 2], {"mode": "access", "access_vlan": 20})
+    members = [item["id"] for item in first["physical_interfaces"]]
+    # Mutate the existing channel records so the logical-interface UUIDs stay
+    # stable; only the membership and the LACP mode change.
+    second["port_channels"][0]["member_ids"] = [members[1]]
+    second["port_channels"][0]["lacp"] = "passive"
+    second["port_channels"][1]["member_ids"] = [members[0], members[2]]
     document = render([first, second])
     migrated = of(document, "Gi1/0/2", CHANNEL_CATEGORIES)
+    assert migrated
     assert all(candidate.status is CandidateStatus.BLOCKED for candidate in migrated)
     unchanged = [
         candidate for candidate in of(document, "Gi1/0/3", CHANNEL_CATEGORIES)

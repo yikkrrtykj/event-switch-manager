@@ -1211,11 +1211,23 @@ _DEFAULT_REQUIREMENTS: Mapping[CommandTopic, tuple[Requirement, ...]] = {
             "a trunk target needs edge-trunk.",
         ),
         _requirement(
+            RequirementKind.SAFETY, "portfast-edge-role",
+            "PortFast is only safe on a confirmed edge port. A planned link, ISP, transit "
+            "or aggregate target, a core-role device, and any unverified role cannot be "
+            "presented as an ordinary edge candidate.",
+        ),
+        _requirement(
             RequirementKind.FIELD_NOTE, "portfast-topology-note",
             "PortFast on a port that is not a verified edge port is a topology risk.",
         ),
     ),
     CommandTopic.BPDU_GUARD: (
+        _requirement(
+            RequirementKind.SAFETY, "bpdu-guard-edge-role",
+            "BPDU Guard err-disables a port that receives a BPDU. A planned link, ISP, "
+            "transit or aggregate target, a core-role device, and any unverified role can "
+            "lose service through an unexpected err-disable.",
+        ),
         _requirement(
             RequirementKind.FIELD_NOTE, "bpdu-guard-topology-note",
             "Err-disable recovery policy and the edge role of the port remain field "
