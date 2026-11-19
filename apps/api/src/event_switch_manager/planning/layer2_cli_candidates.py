@@ -32,10 +32,11 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ..cisco_capabilities import ETHERNET
-from ..cisco_catalog import PROFILES, CiscoCapability, Profile
+from ..cisco_catalog import PROFILES, CiscoCapability, Medium, PortGroup, Profile
 from ..domain import DeviceFamily
 from ..integrations import Capability
 from .command_evidence import (
+    BLOCKING_REQUIREMENT_CODES,
     DEFAULT_REGISTRY,
     EVIDENCE_REGISTRY_ID,
     CommandEvidence,
@@ -44,6 +45,7 @@ from .command_evidence import (
     CommandTopic,
     EvidenceReviewState,
     ParameterRule,
+    RequirementKind,
     evidence_reference,
 )
 from .layer2_config_preview import (
@@ -84,6 +86,17 @@ RENDER_BASE_BLOCKERS: tuple[str, ...] = (
     "no-execution-order-produced",
 )
 MAX_TRUNK_VLAN_IDS = 64
+#: Renderer safety subset: the per-platform EtherChannel member limit is not
+#: independently bound for every reviewed release, so no channel above this
+#: planned member count may render. This is a renderer restriction, not a vendor
+#: claim.
+MAX_CHANNEL_MEMBERS = 8
+#: Mode transitions whose associated VLAN configuration must not render on its own.
+BLOCKED_MODE_TRANSITIONS = frozenset({
+    "access-to-trunk", "trunk-to-access", "routed-to-switchport",
+    "switchport-to-routed",
+})
+
 _ASCII = "ascii"
 
 VLAN_NAME_PATTERN = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
@@ -133,6 +146,17 @@ class CandidateCategory(StrEnum):
     DESCRIPTION = "description"
     ADMIN_SHUTDOWN = "admin-shutdown"
     UNUSED_SHUTDOWN = "unused-shutdown"
+
+
+#: R1 operations that can still interrupt a live link, so their connectivity
+#: impact must never be advertised as absent.
+CONNECTIVITY_RISK_CATEGORIES = frozenset({
+    CandidateCategory.ADMIN_SHUTDOWN,
+    CandidateCategory.UNUSED_SHUTDOWN,
+    CandidateCategory.SPEED,
+    CandidateCategory.DUPLEX,
+    CandidateCategory.POE_MODE,
+})
 
 
 class CandidateStatus(StrEnum):
@@ -379,6 +403,9 @@ class CandidateProvenance(RenderRecord):
     baseline_state: str
     diff_changed: bool
     cleanup: tuple[str, ...]
+    #: Further B1 items that produced the exact same candidate. Safety is merged
+    #: conservatively across all of them; this list keeps every source visible.
+    additional_preview_item_ids: tuple[str, ...] = ()
 
 
 class CapabilityEvidence(RenderRecord):
@@ -590,6 +617,57 @@ CheckKey = tuple[str, str, str]
 
 
 @dataclass(frozen=True, slots=True)
+class _Membership:
+    """Current and previous channel membership, keyed by physical interface UUID."""
+
+    current: Mapping[str, int]
+    previous: Mapping[str, int]
+    current_sets: Mapping[int, tuple[str, ...]]
+
+    def transition(self, member_id: str) -> str:
+        current = self.current.get(member_id)
+        previous = self.previous.get(member_id)
+        if current is not None and previous is None:
+            return "added"
+        if current is not None and previous == current:
+            return "unchanged"
+        if current is not None and previous is not None:
+            return "migrated"
+        if current is None and previous is not None:
+            return "removed"
+        return "unknown"
+
+
+def _build_membership(device_intent: DeviceLayer2Intent) -> _Membership:
+    current = {
+        str(port.interface_id): port.port_channel
+        for port in device_intent.desired.physical_ports
+        if port.port_channel is not None
+    }
+    before = device_intent.before.state
+    previous = {
+        str(port.interface_id): port.port_channel
+        for port in (before.physical_ports if before is not None else ())
+        if port.port_channel is not None
+    }
+    current_sets = {
+        channel.number: tuple(str(member) for member in channel.member_ids)
+        for channel in device_intent.desired.port_channels
+    }
+    return _Membership(current, previous, current_sets)
+
+
+def _build_mode_transitions(
+    device_intent: DeviceLayer2Intent,
+) -> Mapping[tuple[str, str], str]:
+    transitions: dict[tuple[str, str], str] = {}
+    for change in device_intent.changes:
+        if change.field == "mode" and change.transition is not None:
+            transitions[(change.target_kind.value, change.target_id)] = change.transition
+    return transitions
+
+
+@dataclass(frozen=True, slots=True)
 class _Context:
     revision: PlanRevision
     intent: Layer2Intent
@@ -603,6 +681,8 @@ class _Context:
     checks: Mapping[CheckKey, CapabilityCheck]
     vlan_scope: frozenset[int]
     hard_block: tuple[str, ...]
+    membership: _Membership
+    mode_transitions: Mapping[tuple[str, str], str]
 
     @property
     def identity(self) -> DeviceIdentity:
@@ -643,6 +723,60 @@ class _Context:
 
     def device_check(self, capability: str) -> CapabilityCheck | None:
         return self.checks.get(("device", self.hostname, capability))
+
+    def member_transition(self, member_id: str) -> str:
+        return self.membership.transition(member_id)
+
+    def mode_transition(self, target: TargetKind, stable_id: str) -> str | None:
+        return self.mode_transitions.get((target.value, stable_id))
+
+    def target_mode(
+        self, target: TargetKind, stable_id: str, name: str,
+    ) -> str | None:
+        if target is TargetKind.INTERFACE:
+            port = self.port(name)
+            return port.mode if port is not None else None
+        if target is TargetKind.PORT_CHANNEL:
+            channel = self.channel_for_interface(stable_id)
+            return channel.settings.mode if channel is not None else None
+        return None
+
+    def port_group(self, name: str) -> PortGroup | None:
+        if self.profile is None:
+            return None
+        match = ETHERNET.fullmatch(name)
+        if match is None:
+            return None
+        module, port = int(match[3]), int(match[4])
+        prefix = match[1].casefold()
+        return next(
+            (group for group in self.profile.ports
+             if prefix.startswith(group.prefix) and module == group.slot
+             and group.first <= port < group.first + group.count),
+            None,
+        )
+
+    def port_roles(self, name: str) -> frozenset[str]:
+        port = self.port(name)
+        if port is None:
+            return frozenset({"unknown"})
+        roles: set[str] = set()
+        interface_id = port.interface_id
+        if any(interface_id in link.endpoints for link in self.revision.plan.links):
+            roles.add("link")
+        if interface_id in {
+            member for channel in self.device_intent.desired.port_channels
+            for member in channel.member_ids
+        }:
+            roles.add("channel-member")
+        if any(isp.interface_id == interface_id for isp in self.revision.plan.isps):
+            roles.add("isp")
+        transit = self.revision.plan.transit
+        if transit is not None and interface_id in {
+            transit.core_port_id, transit.hillstone_port_id,
+        }:
+            roles.add("transit")
+        return frozenset(roles) if roles else frozenset({"unreferenced"})
 
     def evidence(
         self, topic: CommandTopic,
@@ -686,6 +820,7 @@ class _Spec:
     force_block: tuple[str, ...] = ()
     force_unsupported: tuple[str, ...] = ()
     capability_ids: tuple[str, ...] = ()
+    risk_floor: RiskClass | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,6 +829,251 @@ class _Entry:
     capabilities: tuple[CapabilityAssessment, ...]
     extra_block: tuple[str, ...] = ()
     extra_unsupported: tuple[str, ...] = ()
+
+
+_RequirementFinding = tuple[str, RiskClass]
+
+
+def _no_requirement(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    return ()
+
+
+def _require_channel_membership(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    number = _as_int((spec.parameters or {}).get("port-channel-number"))
+    if spec.target_kind is TargetKind.PORT_CHANNEL:
+        if number is None:
+            return ((f"channel-number-unresolved:{spec.target_name}", RiskClass.R5),)
+        # Channel count, channel number and member count are three independent
+        # constraints. The reviewed number maximum is a conservative count bound
+        # because every Port-Channel has a unique number inside that range.
+        reviewed_maximum = next(
+            (
+                rule.maximum for rule in (row.parameters if row is not None else ())
+                if rule.name == "port-channel-number" and rule.maximum is not None
+            ),
+            None,
+        )
+        channel_count = len(context.membership.current_sets)
+        if reviewed_maximum is not None and channel_count > reviewed_maximum:
+            return ((
+                f"channel-count-exceeds-reviewed-limit:{channel_count}",
+                RiskClass.R3,
+            ),)
+        members = context.membership.current_sets.get(number, ())
+        if not members:
+            return ((f"channel-membership-empty:{spec.target_name}", RiskClass.R5),)
+        for member in members:
+            if context.membership.current.get(member) != number:
+                return ((
+                    f"channel-membership-inconsistent:{spec.target_name}",
+                    RiskClass.R5,
+                ),)
+        return ()
+    transition = context.member_transition(spec.target_id)
+    if transition in {"added", "unchanged"}:
+        if number is None or context.membership.current.get(spec.target_id) != number:
+            return ((
+                f"channel-membership-inconsistent:{spec.target_name}",
+                RiskClass.R5,
+            ),)
+        return ()
+    if transition == "migrated":
+        return ((
+            f"channel-migration-requires-source-channel-evidence:{spec.target_name}",
+            RiskClass.R4,
+        ),)
+    if transition == "removed":
+        return ((
+            f"channel-member-detach-requires-field-evidence:{spec.target_name}",
+            RiskClass.R4,
+        ),)
+    return ((f"channel-membership-unresolved:{spec.target_name}", RiskClass.R5),)
+
+
+def _require_channel_member_count(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    number = _as_int((spec.parameters or {}).get("port-channel-number"))
+    if number is None:
+        return ((f"channel-number-unresolved:{spec.target_name}", RiskClass.R5),)
+    members = context.membership.current_sets.get(number, ())
+    if not members:
+        return ((f"channel-membership-empty:{spec.target_name}", RiskClass.R5),)
+    if len(members) > MAX_CHANNEL_MEMBERS:
+        return ((
+            f"channel-member-count-exceeds-renderer-limit:{len(members)}",
+            RiskClass.R3,
+        ),)
+    return ()
+
+
+def _require_poe_capable(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    group = context.port_group(spec.target_name)
+    if group is None or not group.poe_plus:
+        return ((
+            f"platform-unsupported:poe-capable-port:{spec.target_name}",
+            RiskClass.R1,
+        ),)
+    return ()
+
+
+def _require_poe_static(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    if (spec.parameters or {}).get("poe-mode") == "static":
+        return ((
+            "safety-precondition-unknown:poe-static-budget",
+            RiskClass.R1,
+        ),)
+    return ()
+
+
+def _require_copper_port(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    group = context.port_group(spec.target_name)
+    if group is None or group.medium is not Medium.COPPER:
+        return ((
+            f"safety-precondition-unknown:copper-port-required:{spec.target_name}",
+            RiskClass.R1,
+        ),)
+    return ()
+
+
+def _require_portfast_mode(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    value = (spec.parameters or {}).get("portfast")
+    mode = context.target_mode(spec.target_kind, spec.target_id, spec.target_name)
+    if value == "edge" and mode != "access":
+        return ((
+            f"platform-unsupported:portfast-mode-match:{spec.target_name}",
+            RiskClass.R2,
+        ),)
+    if value == "edge-trunk" and mode != "trunk":
+        return ((
+            f"platform-unsupported:portfast-mode-match:{spec.target_name}",
+            RiskClass.R2,
+        ),)
+    return ()
+
+
+def _require_topology_wide(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    return (("safety-precondition-unknown:topology-wide-evidence", RiskClass.R5),)
+
+
+def _require_mode_transition(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    transition = context.mode_transition(spec.target_kind, spec.target_id)
+    if transition not in BLOCKED_MODE_TRANSITIONS:
+        return ()
+    risk = (
+        RiskClass.R5
+        if transition in {"trunk-to-access", "routed-to-switchport",
+                          "switchport-to-routed"}
+        else RiskClass.R4
+    )
+    return ((
+        f"mode-transition-inherited:{transition}:{spec.target_name}",
+        risk,
+    ),)
+
+
+def _require_admin_state(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    value = (spec.parameters or {}).get("admin-state")
+    if value not in {"up", "down"}:
+        return ()
+    if spec.target_kind is TargetKind.PORT_CHANNEL:
+        reason = (
+            "port-channel-shutdown-requires-topology-evidence"
+            if value == "down"
+            else "port-channel-no-shutdown-requires-topology-evidence"
+        )
+        return ((reason, RiskClass.R5), ("aggregate-member-impact-unverified", RiskClass.R5))
+    roles = context.port_roles(spec.target_name)
+    if "channel-member" in roles:
+        return ((
+            f"channel-member-admin-state-requires-topology-evidence:{spec.target_name}",
+            RiskClass.R5,
+        ),)
+    if value == "down":
+        if roles & {"isp", "transit"}:
+            return ((
+                f"wan-or-transit-port-shutdown-requires-topology-evidence:"
+                f"{spec.target_name}",
+                RiskClass.R5,
+            ),)
+        if "link" in roles:
+            return ((
+                f"link-uplink-port-shutdown-requires-topology-evidence:"
+                f"{spec.target_name}",
+                RiskClass.R5,
+            ),)
+    return ()
+
+
+_REQUIREMENT_EVALUATORS: Mapping[
+    str, Callable[[_Context, _Spec, CommandEvidence | None], tuple[_RequirementFinding, ...]]
+] = {
+    "vlan-id-platform-range": _no_requirement,
+    "vlan-name-platform-policy": _no_requirement,
+    "channel-number-platform-range": _no_requirement,
+    "channel-membership-consistent": _require_channel_membership,
+    "channel-member-count-limit": _require_channel_member_count,
+    "poe-capable-port": _require_poe_capable,
+    "poe-static-budget": _require_poe_static,
+    "copper-port-required": _require_copper_port,
+    "portfast-mode-match": _require_portfast_mode,
+    "topology-wide-evidence": _require_topology_wide,
+    "mode-transition-consistency": _require_mode_transition,
+    "admin-state-topology": _require_admin_state,
+}
+
+
+def _requirement_findings(
+    context: _Context, spec: _Spec, row: CommandEvidence | None,
+) -> tuple[_RequirementFinding, ...]:
+    """Evaluate every blocking requirement the gate contract attaches to a topic."""
+    topic = spec.topic
+    if topic is None:
+        return ()
+    expected = BLOCKING_REQUIREMENT_CODES.get(topic, ())
+    findings: list[_RequirementFinding] = []
+    if row is not None:
+        actual = tuple(
+            requirement.code for requirement in row.requirements
+            if requirement.kind is not RequirementKind.FIELD_NOTE
+        )
+        if actual != expected:
+            findings.append((f"requirement-contract-mismatch:{topic.value}", RiskClass.R5))
+    for code in expected:
+        evaluator = _REQUIREMENT_EVALUATORS.get(code)
+        if evaluator is None:
+            findings.append((f"requirement-evaluator-missing:{code}", RiskClass.R5))
+            continue
+        findings.extend(evaluator(context, spec, row))
+    return tuple(findings)
+
+
+def _field_note_prerequisites(row: CommandEvidence | None) -> tuple[str, ...]:
+    if row is None:
+        return ()
+    return tuple(
+        f"field-note:{requirement.code}"
+        for requirement in row.requirements
+        if requirement.kind is RequirementKind.FIELD_NOTE
+    )
 
 
 def _mode_for(target: TargetKind) -> CommandMode:
@@ -832,8 +1212,10 @@ def _vlan_id_guard(
     return ()
 
 
-def _mode_transition_block(item: ConfigItem) -> tuple[str, ...]:
-    transition = item.diff.transition
+def _mode_transition_block(
+    context: _Context, target: TargetKind, stable_id: str, item: ConfigItem,
+) -> tuple[str, ...]:
+    transition = context.mode_transition(target, stable_id) or item.diff.transition
     if transition == "access-to-trunk":
         return ("topology-role-unverified:access-to-trunk",)
     if transition == "trunk-to-access":
@@ -851,6 +1233,8 @@ def _access_trunk_item(
     field = item.field
     name = item.target_name
     target_id = item.target_id
+    transition_block = _mode_transition_block(context, target, target_id, item)
+    transition_risk = RiskClass.R4 if transition_block else None
     if field == "mode":
         mode = item.planned.value
         if target is TargetKind.INTERFACE and mode == "access":
@@ -862,7 +1246,7 @@ def _access_trunk_item(
                 base_risk=RiskClass.R2,
                 mode=_mode_for(target),
                 compose=lambda: "switchport mode access",
-                force_block=_mode_transition_block(item),
+                force_block=transition_block,
             ), (item.capability,)),)
         if target is TargetKind.INTERFACE and mode == "trunk":
             return (_Entry(_Spec(
@@ -873,7 +1257,7 @@ def _access_trunk_item(
                 base_risk=RiskClass.R2,
                 mode=_mode_for(target),
                 compose=lambda: "switchport mode trunk",
-                force_block=_mode_transition_block(item),
+                force_block=transition_block,
             ), (item.capability,)),)
         if mode == "access":
             return (_Entry(_Spec(
@@ -884,7 +1268,7 @@ def _access_trunk_item(
                 base_risk=RiskClass.R2,
                 mode=CommandMode.PORT_CHANNEL,
                 compose=lambda: "switchport mode access",
-                force_block=_mode_transition_block(item),
+                force_block=transition_block,
             ), (item.capability,)),)
         return (_Entry(_Spec(
             category=CandidateCategory.TRUNK_MODE,
@@ -894,7 +1278,7 @@ def _access_trunk_item(
             base_risk=RiskClass.R2,
             mode=CommandMode.PORT_CHANNEL,
             compose=lambda: "switchport mode trunk",
-            force_block=_mode_transition_block(item),
+            force_block=transition_block,
         ), (item.capability,)),)
     if field == "access_vlan":
         value = item.planned.value
@@ -909,7 +1293,11 @@ def _access_trunk_item(
             mode=_mode_for(target),
             parameters={"vlan-id": value},
             compose=lambda: f"switchport access vlan {value}",
-            force_block=_vlan_id_guard(context, value, allow_one=False),
+            force_block=(
+                *transition_block,
+                *_vlan_id_guard(context, value, allow_one=False),
+            ),
+            risk_floor=transition_risk,
         ), (item.capability,)),)
     if field == "native_vlan":
         value = item.planned.value
@@ -929,6 +1317,7 @@ def _access_trunk_item(
                 "management-or-uplink-role-unverified",
             ),
             force_block=(
+                *transition_block,
                 "r5-requires-field-topology-evidence",
                 *_vlan_id_guard(context, value, allow_one=True),
             ),
@@ -954,9 +1343,10 @@ def _access_trunk_item(
             field="allowed_vlans",
             base_risk=RiskClass.R2,
             mode=_mode_for(target),
-            parameters={"vlan-list": values},
+            parameters={"vlan-list": values, "operation": "replace"},
             compose=lambda: f"switchport trunk allowed vlan {joined}",
-            force_block=missing,
+            force_block=(*transition_block, *missing),
+            risk_floor=transition_risk,
         ), (item.capability,)),)
     return ()
 
@@ -1000,21 +1390,24 @@ def _port_channel_item(context: _Context, item: ConfigItem) -> tuple[_Entry, ...
 
 
 def _member_item(context: _Context, item: ConfigItem) -> tuple[_Entry, ...]:
-    transition = item.diff.transition
-    if transition in {"port-channel-member-to-independent", "port-channel-member-migrate"}:
+    number = _as_int(item.planned.value)
+    if number is None:
+        transition = context.member_transition(item.target_id)
+        reason = (
+            f"channel-member-detach-requires-field-evidence:{item.target_name}"
+            if transition == "removed"
+            else f"channel-membership-unresolved:{item.target_name}"
+        )
         return (_Entry(_Spec(
             category=CandidateCategory.PORT_CHANNEL, topic=None,
             target_kind=TargetKind.INTERFACE, target_id=item.target_id,
-            target_name=item.target_name, field="member-migration",
+            target_name=item.target_name, field="member",
             base_risk=RiskClass.R4, compose=lambda: "",
             force_block=(
-                "channel-migration-requires-source-channel-evidence",
+                reason,
                 "cleanup-requires-field-verification",
             ),
         ), (item.capability,)),)
-    number = item.planned.value
-    if not isinstance(number, int):
-        return ()
     channel = context.channel(number)
     if channel is None:
         return (_Entry(_Spec(
@@ -1033,6 +1426,25 @@ def _channel_group_spec(
     target_id: str, target_name: str,
 ) -> _Spec:
     number = channel.number
+    transition = context.member_transition(target_id)
+    membership_block: tuple[str, ...] = ()
+    membership_risk: RiskClass | None = None
+    if transition == "migrated":
+        membership_block = (
+            f"channel-migration-requires-source-channel-evidence:{target_name}",
+        )
+        membership_risk = RiskClass.R4
+    elif transition == "removed":
+        membership_block = (
+            f"channel-member-detach-requires-field-evidence:{target_name}",
+        )
+        membership_risk = RiskClass.R4
+    elif transition == "unknown":
+        membership_block = (f"channel-membership-unresolved:{target_name}",)
+        membership_risk = RiskClass.R5
+    elif context.membership.current.get(target_id) != number:
+        membership_block = (f"channel-membership-inconsistent:{target_name}",)
+        membership_risk = RiskClass.R5
     if channel.lacp == "static":
         return _Spec(
             category=CandidateCategory.PORT_CHANNEL,
@@ -1044,6 +1456,8 @@ def _channel_group_spec(
             parameters={"port-channel-number": number, "mode": "on"},
             compose=lambda: f"channel-group {number} mode on",
             capability_ids=(CiscoCapability.PORT_CHANNEL.value,),
+            force_block=membership_block,
+            risk_floor=membership_risk,
         )
     mode = channel.lacp
     return _Spec(
@@ -1056,6 +1470,8 @@ def _channel_group_spec(
         parameters={"port-channel-number": number, "mode": mode},
         compose=lambda: f"channel-group {number} mode {mode}",
         capability_ids=(CiscoCapability.PORT_CHANNEL.value, Capability.LACP.value),
+        force_block=membership_block,
+        risk_floor=membership_risk,
     )
 
 
@@ -1192,10 +1608,6 @@ def _interface_setting_item(
         value = item.planned.value
         if value not in {"up", "down"}:
             return ()
-        port = context.port(name)
-        block: tuple[str, ...] = ()
-        if value == "down" and port is not None and not port.unused:
-            block = ("shutdown-of-referenced-port-requires-topology-evidence",)
         admin_text = "shutdown" if value == "down" else "no shutdown"
         return (_Entry(_Spec(
             category=CandidateCategory.ADMIN_SHUTDOWN,
@@ -1206,7 +1618,6 @@ def _interface_setting_item(
             mode=CommandMode.INTERFACE,
             parameters={"admin-state": value},
             compose=lambda: admin_text,
-            force_block=block,
         ), (item.capability,)),)
     if field == "shutdown_intent":
         value = item.planned.value
@@ -1474,6 +1885,8 @@ def _raise_risk(current: RiskClass, candidate: RiskClass) -> RiskClass:
 
 def _risk_for(context: _Context, item: ConfigItem, spec: _Spec) -> RiskClass:
     risk = spec.base_risk
+    if spec.risk_floor is not None:
+        risk = _raise_risk(risk, spec.risk_floor)
     if item.diff.cleanup:
         risk = _raise_risk(risk, RiskClass.R4)
     if item.diff.transition in {
@@ -1584,6 +1997,9 @@ def _build_candidate(
     )
 
     risk = _risk_for(context, item, spec)
+    requirement_findings = _requirement_findings(context, spec, evidence)
+    for _reason, floor in requirement_findings:
+        risk = _raise_risk(risk, floor)
     reasons: list[str] = []
     unsupported: list[str] = list(entry.extra_unsupported)
     unsupported.extend(spec.force_unsupported)
@@ -1605,9 +2021,13 @@ def _build_candidate(
     elif verdict == "unknown":
         status = CandidateStatus.BLOCKED
         reasons = [f"capability-unknown:{capability_reason}:{spec.target_name}"]
-    elif spec.force_block or entry.extra_block:
+    elif spec.force_block or entry.extra_block or requirement_findings:
         status = CandidateStatus.BLOCKED
-        reasons = [*entry.extra_block, *spec.force_block]
+        reasons = [
+            *entry.extra_block,
+            *spec.force_block,
+            *(reason for reason, _floor in requirement_findings),
+        ]
     elif risk is RiskClass.R5:
         status = CandidateStatus.BLOCKED
         reasons = ["r5-requires-field-topology-evidence"]
@@ -1618,17 +2038,10 @@ def _build_candidate(
         status = CandidateStatus.BLOCKED
         reasons = list(evidence_blockers)
     else:
-        parameters = dict(spec.parameters or {})
-        violations = validate_parameters(evidence, parameters)
-        if violations:
-            status = CandidateStatus.BLOCKED
-            reasons = list(violations)
-            if any(value.startswith("unsafe-text-class:") for value in violations):
-                reasons.append(f"unsafe-text:{spec.field}:{spec.target_name}")
-        else:
-            status = CandidateStatus.CANDIDATE
+        status = CandidateStatus.CANDIDATE
 
     reasons.extend(_blocked_conflicts(item, context.preview.device.conflicts))
+    reasons.extend(reason for reason, _floor in requirement_findings)
 
     target_reason = _target_reason(context, spec) if spec.topic is not None else None
     if target_reason is not None:
@@ -1662,10 +2075,13 @@ def _build_candidate(
             reasons.append("unsafe-text-class:not-a-single-line")
             candidate_text = None
 
+    field_notes = _field_note_prerequisites(evidence)
     field_verification = (
         item.risk.requires_field_verification
         or bool(item.diff.cleanup)
         or risk in {RiskClass.R4, RiskClass.R5}
+        or bool(requirement_findings)
+        or bool(field_notes)
         or "field-topology-evidence-required" in spec.prerequisites
     )
     draft = Candidate(
@@ -1697,14 +2113,24 @@ def _build_candidate(
         syntax_evidence=(
             (_syntax_evidence(evidence),) if evidence is not None else ()
         ),
-        syntax_validation=SyntaxValidation(),
+        syntax_validation=SyntaxValidation(
+            level=(
+                SyntaxValidationLevel.DICTIONARY_ONLY
+                if status is CandidateStatus.CANDIDATE
+                else SyntaxValidationLevel.NOT_RUN
+            ),
+        ),
         risk_class=risk,
-        potential_connectivity_impact=risk in _CONNECTIVITY_RISK,
+        potential_connectivity_impact=(
+            risk in _CONNECTIVITY_RISK
+            or spec.category in CONNECTIVITY_RISK_CATEGORIES
+        ),
         requires_field_verification=field_verification,
         prerequisites=tuple(dict.fromkeys(
-            (*spec.prerequisites, *(
+            (*spec.prerequisites, *field_notes, *(
                 ("field-verification-required",)
-                if item.risk.requires_field_verification else ()
+                if item.risk.requires_field_verification or requirement_findings
+                else ()
             ), *(
                 ("cleanup-requires-field-verification",)
                 if item.diff.cleanup else ()
@@ -1805,6 +2231,8 @@ def _context(
         checks=checks,
         vlan_scope=vlan_scope,
         hard_block=tuple(dict.fromkeys(hard)),
+        membership=_build_membership(device_intent),
+        mode_transitions=_build_mode_transitions(device_intent),
     )
 
 
@@ -1901,6 +2329,100 @@ def _document(
     return document.model_copy(update={"render_fingerprint": render_fingerprint(document)})
 
 
+_STATUS_SEVERITY: Mapping[CandidateStatus, int] = {
+    CandidateStatus.CANDIDATE: 0,
+    CandidateStatus.BLOCKED: 1,
+    CandidateStatus.UNSUPPORTED: 2,
+}
+
+
+def _merge_group(group: list[Candidate]) -> Candidate:
+    """Conservatively merge candidates that share one deterministic candidate ID.
+
+    The merged record keeps every source item, takes the worst status and risk,
+    unions blockers and prerequisites, and fails closed when two sources disagree
+    about the target, the parameters or the command text. A blocked path can
+    therefore never be hidden behind a rendered one.
+    """
+    if len(group) == 1:
+        return group[0]
+    base = group[0]
+    status = max(
+        (candidate.status for candidate in group),
+        key=lambda value: _STATUS_SEVERITY[value],
+    )
+    risk = max((candidate.risk_class for candidate in group), key=lambda value: _RISK_RANK[value])
+    targets = {(item.target.kind, item.target.stable_id, item.target.name) for item in group}
+    parameter_sets = {
+        json.dumps(item.parameters, ensure_ascii=False, sort_keys=True) for item in group
+    }
+    texts = {item.candidate_text for item in group if item.candidate_text is not None}
+    conflicts: list[str] = []
+    if len(targets) > 1:
+        conflicts.append("merged-candidate-conflict:target")
+    if len(parameter_sets) > 1:
+        conflicts.append("merged-candidate-conflict:parameters")
+    if status is CandidateStatus.CANDIDATE and len(texts) > 1:
+        conflicts.append("merged-candidate-conflict:text")
+    if conflicts:
+        status = CandidateStatus.BLOCKED
+    candidate_text = (
+        next(iter(texts))
+        if status is CandidateStatus.CANDIDATE and len(texts) == 1
+        else None
+    )
+    reasons: list[str] = []
+    prerequisites: list[str] = []
+    syntax_evidence: dict[str, SyntaxEvidence] = {}
+    capability_evidence: dict[tuple[str | None, str, str], CapabilityEvidence] = {}
+    for candidate in group:
+        reasons.extend(candidate.blocking_reasons)
+        prerequisites.extend(candidate.prerequisites)
+        for evidence in candidate.syntax_evidence:
+            syntax_evidence.setdefault(evidence.evidence_id, evidence)
+        for capability in candidate.capability_evidence:
+            capability_evidence.setdefault(
+                (capability.capability, capability.verdict, capability.reason_code),
+                capability,
+            )
+    reasons.extend(conflicts)
+    merged = base.model_copy(update={
+        "status": status,
+        "candidate_text": candidate_text,
+        "risk_class": risk,
+        "blocking_reasons": tuple(dict.fromkeys(reasons)),
+        "prerequisites": tuple(dict.fromkeys(prerequisites)),
+        "potential_connectivity_impact": any(
+            candidate.potential_connectivity_impact for candidate in group
+        ),
+        "requires_field_verification": any(
+            candidate.requires_field_verification for candidate in group
+        ),
+        "syntax_evidence": tuple(syntax_evidence.values()),
+        "capability_evidence": tuple(capability_evidence.values()),
+        "syntax_validation": SyntaxValidation(
+            level=(
+                SyntaxValidationLevel.DICTIONARY_ONLY
+                if status is CandidateStatus.CANDIDATE
+                else SyntaxValidationLevel.NOT_RUN
+            ),
+        ),
+        "provenance": base.provenance.model_copy(update={
+            "additional_preview_item_ids": tuple(sorted(
+                item.provenance.preview_item_id for item in group[1:]
+            )),
+        }),
+    })
+    return merged.model_copy(update={"candidate_fingerprint": candidate_fingerprint(merged)})
+
+
+def _merge_candidates(candidates: Iterable[Candidate]) -> tuple[Candidate, ...]:
+    grouped: dict[str, list[Candidate]] = {}
+    for candidate in candidates:
+        grouped.setdefault(candidate.candidate_id, []).append(candidate)
+    return tuple(_merge_group(group) for group in grouped.values())
+
+
 def _filter_categories(
     candidates: Iterable[Candidate], categories: tuple[CandidateCategory, ...] | None,
 ) -> tuple[Candidate, ...]:
@@ -1927,10 +2449,10 @@ def build_l2_cli_candidates(
     for item in preview.device.config_items:
         for entry in _item_entries(context, item):
             candidates.append(_build_candidate(context, item, entry))
-    unique: dict[str, Candidate] = {}
-    for candidate in candidates:
-        unique.setdefault(candidate.candidate_id, candidate)
-    filtered = _filter_categories(unique.values(), categories)
+    # Merge before the category filter so a filter can never drop a blocker that
+    # another source contributed to the same candidate.
+    merged = _merge_candidates(candidates)
+    filtered = _filter_categories(merged, categories)
     return _document(context, filtered)
 
 

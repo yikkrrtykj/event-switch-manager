@@ -25,6 +25,8 @@ running-config and does not execute anything.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -77,26 +79,83 @@ class EvidenceReviewState(StrEnum):
     REJECTED = "independently-rejected"
 
 
+class RequirementKind(StrEnum):
+    """Why a structured requirement exists.
+
+    ``PLATFORM`` and ``SAFETY`` requirements are evaluated by the renderer and
+    block a candidate when they do not hold. ``FIELD_NOTE`` requirements are
+    human-review notes only and never replace field evidence.
+    """
+
+    PLATFORM = "platform"
+    SAFETY = "safety"
+    FIELD_NOTE = "field-note"
+
+
+@dataclass(frozen=True, slots=True)
+class Requirement:
+    """Structured statement that must hold before a command may be rendered."""
+
+    kind: RequirementKind
+    code: str
+    description: str
+    source: SourceRef | None = None
+
+    @property
+    def blocking(self) -> bool:
+        return self.kind is not RequirementKind.FIELD_NOTE
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "kind": self.kind.value,
+            "code": self.code,
+            "description": self.description,
+            "source_url": self.source.url if self.source else None,
+            "source_section": self.source.section if self.source else None,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceReview:
-    """Independent review attestation for exactly one evidence row."""
+    """Independent review attestation for exactly one evidence content digest."""
 
     state: EvidenceReviewState
     reviewer: str = ""
     reviewed_at: str = ""
     findings: tuple[str, ...] = ()
+    content_digest: str = ""
 
     def __post_init__(self) -> None:
         if self.state is EvidenceReviewState.REVIEWED and not (
-            self.reviewer and self.reviewed_at and self.findings
+            self.reviewer and self.reviewed_at and self.findings and self.content_digest
         ):
-            raise ValueError("A reviewed evidence row needs reviewer, date and findings")
+            raise ValueError(
+                "A reviewed evidence row needs reviewer, date, findings and the "
+                "content digest it attested"
+            )
+
+    @property
+    def review_digest(self) -> str:
+        return _digest({
+            "state": self.state.value,
+            "reviewer": self.reviewer,
+            "reviewed_at": self.reviewed_at,
+            "findings": list(self.findings),
+            "content_digest": self.content_digest,
+        })
 
 
 PENDING_REVIEW = EvidenceReview(EvidenceReviewState.PENDING)
 REJECTED_REVIEW = EvidenceReview(
     EvidenceReviewState.REJECTED, "", "", ("Not independently confirmed.",),
 )
+
+
+def _digest(payload: object) -> str:
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,12 +195,66 @@ class CommandEvidence:
     source_url: str
     source_section: str
     exclusions: tuple[str, ...]
+    requirements: tuple[Requirement, ...] = ()
     review: EvidenceReview = PENDING_REVIEW
     evidence_version: int = 1
 
+    def content_payload(self) -> dict[str, object]:
+        """Canonical content of this row, excluding the review attestation."""
+        return {
+            "evidence_id": self.evidence_id,
+            "evidence_version": self.evidence_version,
+            "family": self.family.value,
+            "pids": list(self.pids),
+            "releases": list(self.releases),
+            "licenses": list(self.licenses),
+            "topic": self.topic.value,
+            "command": self.command,
+            "grammar": self.grammar,
+            "command_mode": self.command_mode.value,
+            "parameters": [
+                {
+                    "name": rule.name,
+                    "kind": rule.kind,
+                    "minimum": rule.minimum,
+                    "maximum": rule.maximum,
+                    "step": rule.step,
+                    "values": list(rule.values),
+                    "pattern": rule.pattern,
+                    "reserved": list(rule.reserved),
+                    "note": rule.note,
+                }
+                for rule in self.parameters
+            ],
+            "limits": list(self.limits),
+            "source_url": self.source_url,
+            "source_section": self.source_section,
+            "exclusions": list(self.exclusions),
+            "requirements": [requirement.payload() for requirement in self.requirements],
+        }
+
+    @property
+    def content_digest(self) -> str:
+        return _digest(self.content_payload())
+
+    @property
+    def reviewed_content_digest(self) -> str | None:
+        if self.review.state is not EvidenceReviewState.REVIEWED:
+            return None
+        return self.review.content_digest
+
     @property
     def renderable(self) -> bool:
-        return self.review.state is EvidenceReviewState.REVIEWED
+        """Only a reviewed row whose attestation matches this exact content."""
+        return (
+            self.review.state is EvidenceReviewState.REVIEWED
+            and bool(self.review.content_digest)
+            and self.review.content_digest == self.content_digest
+        )
+
+    @property
+    def review_state(self) -> EvidenceReviewState:
+        return self.review.state
 
     @property
     def release_label(self) -> str:
@@ -998,6 +1111,163 @@ _DEFAULT_PARAMETERS: Mapping[CommandTopic, tuple[ParameterRule, ...]] = {
     CommandTopic.ADMIN_SHUTDOWN: (_enum("admin-state", ("up", "down")),),
 }
 
+def _requirement(
+    kind: RequirementKind, code: str, description: str,
+    source: SourceRef | None = None,
+) -> Requirement:
+    return Requirement(kind=kind, code=code, description=description, source=source)
+
+
+_TOPOLOGY_WIDE = _requirement(
+    RequirementKind.SAFETY, "topology-wide-evidence",
+    "Current device state, topology role and the affected paths must be confirmed "
+    "from the device before this topology-wide command is rendered.",
+)
+_MODE_TRANSITION = _requirement(
+    RequirementKind.SAFETY, "mode-transition-consistency",
+    "A VLAN membership change inherits any blocked access/trunk/routed transition on "
+    "the same interface or Port-Channel.",
+)
+_COPPER_PORT = _requirement(
+    RequirementKind.PLATFORM, "copper-port-required",
+    "Speed and duplex are reviewed for copper ports; an SFP/SFP+/SFP28 port needs "
+    "installed-optic evidence before either command is legal.",
+)
+_OPTIC_NOTE = _requirement(
+    RequirementKind.FIELD_NOTE, "optic-field-note",
+    "The installed transceiver, its negotiated speed and its duplex capability remain "
+    "field unknowns.",
+)
+
+_DEFAULT_REQUIREMENTS: Mapping[CommandTopic, tuple[Requirement, ...]] = {
+    CommandTopic.VLAN: (
+        _requirement(
+            RequirementKind.PLATFORM, "vlan-id-platform-range",
+            "vlan accepts VLAN ids 1-4094; 1002-1005 are the reserved default VLANs.",
+        ),
+    ),
+    CommandTopic.VLAN_NAME: (
+        _requirement(
+            RequirementKind.PLATFORM, "vlan-name-platform-policy",
+            "The name is a 1-32 character ASCII string; the renderer applies a narrower "
+            "safe character subset and never truncates or escapes.",
+        ),
+    ),
+    CommandTopic.ACCESS_MODE: (),
+    CommandTopic.TRUNK_MODE: (),
+    CommandTopic.ACCESS_VLAN: (_MODE_TRANSITION,),
+    CommandTopic.NATIVE_VLAN: (_MODE_TRANSITION, _TOPOLOGY_WIDE),
+    CommandTopic.ALLOWED_VLANS: (
+        _MODE_TRANSITION,
+        _requirement(
+            RequirementKind.FIELD_NOTE, "allowed-vlans-replacement-semantics",
+            "The command replaces the allowed list; the device's current list is not read "
+            "or claimed, so no old value may be assumed.",
+        ),
+    ),
+    CommandTopic.PORT_CHANNEL_INTERFACE: (
+        _requirement(
+            RequirementKind.PLATFORM, "channel-number-platform-range",
+            "The Port-Channel number must be inside the reviewed EtherChannel range for "
+            "this exact release.",
+        ),
+        _requirement(
+            RequirementKind.PLATFORM, "channel-membership-consistent",
+            "Every planned member must name this channel and no other channel in the "
+            "current revision.",
+        ),
+    ),
+    CommandTopic.CHANNEL_GROUP_STATIC: (
+        _requirement(
+            RequirementKind.PLATFORM, "channel-membership-consistent",
+            "The member must be added to this channel or unchanged in it; a migrating or "
+            "detached member can never receive a channel-group candidate.",
+        ),
+        _requirement(
+            RequirementKind.SAFETY, "channel-member-count-limit",
+            "The planned member count must stay inside the reviewed member limit; the "
+            "renderer refuses more than eight planned members per channel.",
+        ),
+    ),
+    CommandTopic.CHANNEL_GROUP_LACP: (
+        _requirement(
+            RequirementKind.PLATFORM, "channel-membership-consistent",
+            "The member must be added to this channel or unchanged in it; a migrating or "
+            "detached member can never receive a channel-group candidate.",
+        ),
+        _requirement(
+            RequirementKind.SAFETY, "channel-member-count-limit",
+            "The planned member count must stay inside the reviewed member limit; the "
+            "renderer refuses more than eight planned members per channel.",
+        ),
+    ),
+    CommandTopic.RAPID_PVST: (_TOPOLOGY_WIDE,),
+    CommandTopic.VTP_TRANSPARENT: (_TOPOLOGY_WIDE,),
+    CommandTopic.ROOT_PRIORITY: (_TOPOLOGY_WIDE,),
+    CommandTopic.PORTFAST: (
+        _requirement(
+            RequirementKind.PLATFORM, "portfast-mode-match",
+            "Plain portfast does not work on a trunk port: an access target needs edge, "
+            "a trunk target needs edge-trunk.",
+        ),
+        _requirement(
+            RequirementKind.FIELD_NOTE, "portfast-topology-note",
+            "PortFast on a port that is not a verified edge port is a topology risk.",
+        ),
+    ),
+    CommandTopic.BPDU_GUARD: (
+        _requirement(
+            RequirementKind.FIELD_NOTE, "bpdu-guard-topology-note",
+            "Err-disable recovery policy and the edge role of the port remain field "
+            "prerequisites.",
+        ),
+    ),
+    CommandTopic.POE_MODE: (
+        _requirement(
+            RequirementKind.PLATFORM, "poe-capable-port",
+            "power inline is supported only on a PoE-capable port of this exact PID and "
+            "image.",
+        ),
+        _requirement(
+            RequirementKind.SAFETY, "poe-static-budget",
+            "static mode reserves power before detection; budget, class and cabling "
+            "evidence is required before a static candidate is rendered.",
+        ),
+        _requirement(
+            RequirementKind.FIELD_NOTE, "poe-budget-field-note",
+            "Power budget, PoE class and cable state remain field unknowns.",
+        ),
+    ),
+    CommandTopic.SPEED: (_COPPER_PORT, _OPTIC_NOTE),
+    CommandTopic.DUPLEX: (_COPPER_PORT, _OPTIC_NOTE),
+    CommandTopic.DESCRIPTION: (),
+    CommandTopic.ADMIN_SHUTDOWN: (
+        _requirement(
+            RequirementKind.SAFETY, "admin-state-topology",
+            "Administrative state needs the management, uplink, WAN and aggregate role of "
+            "the target confirmed from the device; a planning baseline is not evidence.",
+        ),
+    ),
+}
+
+#: The exact blocking requirement codes every row for a topic must carry. The
+#: renderer evaluates these codes; the import-time check below refuses a row that
+#: silently drops or adds one, so an evidence edit can never bypass a gate.
+BLOCKING_REQUIREMENT_CODES: Mapping[CommandTopic, tuple[str, ...]] = {
+    topic: tuple(
+        requirement.code for requirement in requirements if requirement.blocking
+    )
+    for topic, requirements in _DEFAULT_REQUIREMENTS.items()
+}
+
+FIELD_NOTE_CODES: Mapping[CommandTopic, tuple[str, ...]] = {
+    topic: tuple(
+        requirement.code for requirement in requirements
+        if not requirement.blocking
+    )
+    for topic, requirements in _DEFAULT_REQUIREMENTS.items()
+}
+
 _TOPIC_EXCLUSIONS: Mapping[CommandTopic, tuple[str, ...]] = {
     CommandTopic.VLAN: ("VLAN deletion is never rendered.",),
     CommandTopic.VLAN_NAME: ("Exiting VLAN configuration is not a candidate.",),
@@ -1149,6 +1419,7 @@ def _rows_for(
             source_url=source.url,
             source_section=source.section,
             exclusions=(scope.exclusion, *_TOPIC_EXCLUSIONS[topic]),
+            requirements=_DEFAULT_REQUIREMENTS[topic],
         ))
     return tuple(rows)
 
@@ -1173,12 +1444,18 @@ def _attestation(
     findings = record.get("findings")
     if not isinstance(findings, tuple):
         raise TypeError("A review record needs a findings tuple")
-    return EvidenceReview(
+    if state is EvidenceReviewState.REVIEWED and not record.get("content_digest"):
+        # A legacy attestation that is not bound to content cannot authorise a
+        # render; it stays pending until the reviewer attests the digest.
+        return PENDING_REVIEW
+    review = EvidenceReview(
         state,
         str(record.get("reviewer", "")),
         str(record.get("reviewed_at", "")),
         tuple(str(finding) for finding in findings),
+        str(record.get("content_digest", "")),
     )
+    return review
 
 
 REVIEWS: dict[str, EvidenceReview] = {
@@ -1194,6 +1471,14 @@ REJECTIONS: dict[str, EvidenceReview] = {
 def _with_reviews() -> tuple[CommandEvidence, ...]:
     rows: list[CommandEvidence] = []
     for row in _DRAFT_ROWS:
+        blocking = tuple(
+            requirement.code for requirement in row.requirements
+            if requirement.blocking
+        )
+        if blocking != BLOCKING_REQUIREMENT_CODES[row.topic]:
+            raise ValueError(
+                f"{row.evidence_id}: requirement codes drift from the gate contract"
+            )
         review = REVIEWS.get(row.evidence_id) or REJECTIONS.get(row.evidence_id)
         rows.append(replace(row, review=review) if review is not None else row)
     ids = [row.evidence_id for row in rows]
@@ -1217,11 +1502,29 @@ class CommandEvidenceRegistry:
         return self._rows
 
     @property
-    def fingerprint_rows(self) -> tuple[tuple[str, str], ...]:
+    def fingerprint_rows(self) -> tuple[tuple[str, ...], ...]:
+        """Full evidence and review binding, independent of registry input order."""
         return tuple(
-            (row.evidence_id, row.review.state.value)
+            (
+                row.evidence_id,
+                row.content_digest,
+                row.review.state.value,
+                row.review.content_digest,
+                row.review.review_digest if row.review.state else "",
+                row.review.reviewer,
+                row.review.reviewed_at,
+                " | ".join(row.review.findings),
+            )
             for row in sorted(self._rows, key=lambda item: item.evidence_id)
         )
+
+    @property
+    def fingerprint(self) -> str:
+        return _digest({
+            "registry_id": EVIDENCE_REGISTRY_ID,
+            "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+            "rows": [list(item) for item in self.fingerprint_rows],
+        })
 
     def get(self, evidence_id: str) -> CommandEvidence | None:
         return self._by_id.get(evidence_id)
@@ -1277,6 +1580,10 @@ class CommandEvidenceRegistry:
             return f"syntax-evidence-missing:{topic.value}"
         if any(row.review.state is EvidenceReviewState.REJECTED for row in rows):
             return f"syntax-evidence-rejected:{topic.value}"
+        if any(
+            row.review.state is EvidenceReviewState.REVIEWED for row in rows
+        ):
+            return f"syntax-evidence-content-mismatch:{topic.value}"
         return f"syntax-evidence-not-reviewed:{topic.value}"
 
 
@@ -1288,13 +1595,20 @@ def evidence_reference(registry: CommandEvidenceRegistry) -> Mapping[str, object
     return {
         "registry_id": EVIDENCE_REGISTRY_ID,
         "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+        "registry_fingerprint": registry.fingerprint,
         "rows": len(registry.rows),
         "reviewed_rows": sum(1 for row in registry.rows if row.renderable),
         "row_versions": [list(item) for item in registry.fingerprint_rows],
     }
 
 
+def evidence_content_digest(row: CommandEvidence) -> str:
+    """Content digest a reviewer must attest for this evidence row."""
+    return row.content_digest
+
+
 __all__ = [
+    "BLOCKING_REQUIREMENT_CODES",
     "DEFAULT_REGISTRY",
     "EVIDENCE_REGISTRY_ID",
     "EVIDENCE_SCHEMA_VERSION",
@@ -1312,6 +1626,10 @@ __all__ = [
     "EvidenceReviewState",
     "ParameterRule",
     "PlatformScope",
+    "FIELD_NOTE_CODES",
+    "Requirement",
+    "RequirementKind",
     "SourceRef",
+    "evidence_content_digest",
     "evidence_reference",
 ]

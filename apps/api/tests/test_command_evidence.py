@@ -206,11 +206,33 @@ def test_review_attestations_are_complete_and_honest() -> None:
         assert row.review.reviewer
         assert row.review.reviewed_at
         assert row.review.findings
-    for row in ROWS:
-        if row.review.state is EvidenceReviewState.REJECTED:
-            assert not row.renderable
+        # A review must be bound to the exact content it attested.
+        assert row.review.content_digest == row.content_digest
+        assert row.renderable
+        assert len(row.review.review_digest) == 64
+    rejected = [row for row in ROWS if row.review.state is EvidenceReviewState.REJECTED]
+    for row in rejected:
+        assert row.review.content_digest == row.content_digest
+        assert not row.renderable
     with pytest.raises(ValueError):
         EvidenceReview(EvidenceReviewState.REVIEWED)
+
+
+def test_registry_fingerprint_covers_content_and_reviews() -> None:
+    reference = evidence_reference(DEFAULT_REGISTRY)
+    assert isinstance(reference["registry_fingerprint"], str)
+    row = ROWS[0]
+    entry = next(
+        item for item in DEFAULT_REGISTRY.fingerprint_rows
+        if item[0] == row.evidence_id
+    )
+    assert entry[1] == row.content_digest
+    assert entry[2] == row.review.state.value
+    assert entry[3] == row.review.content_digest
+    assert entry[4] == (row.review.review_digest if row.review.state else "")
+    assert entry[5] == row.review.reviewer
+    assert entry[6] == row.review.reviewed_at
+    assert entry[7] == " | ".join(row.review.findings)
 
 
 def test_pending_and_rejected_rows_can_never_render() -> None:

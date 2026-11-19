@@ -384,11 +384,11 @@ def test_candidate_objects_carry_every_contract_field(client: TestClient) -> Non
         assert provenance["b1_field"]
         assert provenance["b1_category"]
         validation = cast(dict[str, Any], candidate["syntax_validation"])
-        assert validation == {
-            "level": "dictionary-only",
-            "dictionary_id": DICTIONARY_ID,
-            "parser_verified": False,
-        }
+        assert validation["dictionary_id"] == DICTIONARY_ID
+        assert validation["parser_verified"] is False
+        assert validation["level"] == (
+            "dictionary-only" if candidate["status"] == "candidate" else "not-run"
+        )
         assert candidate["candidate_fingerprint"] == candidate_fingerprint_of(candidate)
 
 
@@ -887,7 +887,7 @@ def test_unused_port_policy_and_referenced_shutdown_stay_blocked(
         if candidate["target"]["name"] == "Gi1/0/1"
     ]
     assert blocked and blocked[0]["status"] == "blocked"
-    assert "shutdown-of-referenced-port-requires-topology-evidence" in cast(
+    assert "channel-member-admin-state-requires-topology-evidence:Gi1/0/2" in cast(
         list[str], blocked[0]["blocking_reasons"]
     )
     # An explicit admin_state=down on a port the plan does not reference is a
@@ -1405,6 +1405,7 @@ def test_render_fingerprint_binds_the_evidence_registry_version() -> None:
                 "second-reviewer",
                 "2026-11-20",
                 ("Re-reviewed for the fingerprint regression.",),
+                row.content_digest,
             ),
         )
         for row in ROWS
@@ -1662,7 +1663,9 @@ def test_no_candidate_is_claimed_as_parser_verified(client: TestClient) -> None:
     document, _plan, _revision = saved_document(client)
     for candidate in candidates(document):
         assert candidate["syntax_validation"]["parser_verified"] is False
-        assert candidate["syntax_validation"]["level"] == "dictionary-only"
+        assert candidate["syntax_validation"]["level"] == (
+            "dictionary-only" if candidate["status"] == "candidate" else "not-run"
+        )
     assert document["render_state"] != "deployed"
 
 
