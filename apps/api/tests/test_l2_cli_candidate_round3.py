@@ -238,7 +238,11 @@ def test_unknown_port_channel_range_fails_closed() -> None:
     ]
     assert description
     assert description[0].status is CandidateStatus.BLOCKED
-    assert "target-invalid:port-channel-range-unknown:1" in description[0].blocking_reasons
+    # With no reviewed parent row at all, round-4 resolution reports the exact
+    # missing-evidence diagnosis instead of a generic unknown-range code.
+    assert "syntax-evidence-missing:port-channel-interface" in (
+        description[0].blocking_reasons
+    )
 
 
 # --------------------------------------------------------------------------- #
