@@ -111,7 +111,11 @@ def add_channel(
     })
 
 
-def render(plans: list[dict[str, Any]]) -> Any:
+def render(
+    plans: list[dict[str, Any]],
+    *,
+    categories: tuple[CandidateCategory, ...] | None = None,
+) -> Any:
     built = [revision(item, index + 1) for index, item in enumerate(plans)]
     current = built[-1]
     baseline = built[-2] if len(built) > 1 else None
@@ -119,7 +123,7 @@ def render(plans: list[dict[str, Any]]) -> Any:
     preview = build_device_layer2_config_preview(
         current, intent, current.plan.assignments[0].id,
     )
-    return build_l2_cli_candidates(current, intent, preview)
+    return build_l2_cli_candidates(current, intent, preview, categories=categories)
 
 
 def by_category(document: Any, stable_id: str, category: CandidateCategory) -> list[Any]:
@@ -637,15 +641,37 @@ def test_mode_and_migration_keep_both_blockers() -> None:
     set_port(second, 0, dict(TRUNK))
     set_port(second, 1, dict(TRUNK))
     second["port_channels"][1]["member_ids"] = [first["physical_interfaces"][2]["id"]]
-    set_port(second, 2, dict(TRUNK))
     document = render([first, second])
     member = second["physical_interfaces"][1]["id"]
-    candidate = member_channel_group(document, {member})[0]
+    unrelated = second["physical_interfaces"][2]["id"]
+    records = [
+        candidate for candidate in document.candidates
+        if candidate.target.stable_id == member
+        and candidate.category in CHANNEL_GROUP
+        and candidate.parameters.get("port-channel-number") is not None
+    ]
+    assert len(records) == 1
+    candidate = records[0]
+    assert candidate.target.stable_id == member
     assert candidate.status is CandidateStatus.BLOCKED
     assert candidate.risk_class is RiskClass.R4
     assert candidate.candidate_text is None
+    assert candidate.syntax_validation.level is SyntaxValidationLevel.NOT_RUN
+    assert candidate.requires_field_verification is True
     assert has_reason(candidate, "channel-migration-requires-source-channel-evidence")
     assert has_reason(candidate, f"{MODE}:access-to-trunk:Gi1/0/2")
+    assert has_reason(candidate, f"{MODE}:access-to-trunk:Port-channel1")
+    # The unaffected member of the untouched second aggregate keeps a candidate.
+    untouched = [
+        candidate for candidate in document.candidates
+        if candidate.target.stable_id == unrelated
+        and candidate.category in CHANNEL_GROUP
+        and candidate.parameters.get("port-channel-number") is not None
+    ]
+    assert len(untouched) == 1
+    assert untouched[0].status is CandidateStatus.CANDIDATE
+    assert untouched[0].candidate_text == "channel-group 2 mode active"
+    assert not has_reason(untouched[0], MODE)
 
 
 def test_plain_member_addition_stays_candidate() -> None:
@@ -722,6 +748,137 @@ def test_no_cleanup_or_l3_text_in_fixtures() -> None:
     assert cleanup_text(document) == []
 
 
+
+# --------------------------------------------------------------------------- #
+# R13 supplementary coverage
+# --------------------------------------------------------------------------- #
+
+def test_member_routed_to_trunk_blocks_channel_group_at_r5() -> None:
+    first = base_plan()
+    set_port(first, 0, dict(TRUNK))
+    set_port(first, 1, {"mode": "routed", "address": "192.0.2.2/24"})
+    add_channel(first, 1, [0], TRUNK)
+    second = copy.deepcopy(first)
+    set_port(second, 1, dict(TRUNK))
+    second["port_channels"][0]["member_ids"] = [
+        first["physical_interfaces"][0]["id"],
+        first["physical_interfaces"][1]["id"],
+    ]
+    document = render([first, second])
+    member = second["physical_interfaces"][1]["id"]
+    records = member_channel_group(document, {member})
+    assert {record.target.stable_id for record in records} == {member}
+    assert len(records) == 1
+    candidate = records[0]
+    assert candidate.status is CandidateStatus.BLOCKED
+    assert candidate.risk_class is RiskClass.R5
+    assert candidate.candidate_text is None
+    assert candidate.syntax_validation.level is SyntaxValidationLevel.NOT_RUN
+    assert has_reason(candidate, f"{MODE}:routed-to-switchport:Gi1/0/2")
+
+
+def test_public_category_filter_blocks_cleanup_dependency() -> None:
+    first = base_plan()
+    add_channel(first, 1, [0, 1], {"mode": "access", "access_vlan": 20})
+    second = copy.deepcopy(first)
+    second["port_channels"][0]["member_ids"] = [
+        first["physical_interfaces"][1]["id"],
+    ]
+    set_port(second, 0, {"mode": "access", "access_vlan": 20,
+                         "portfast": "edge", "bpdu_guard": "enabled",
+                         "admin_state": "down"})
+    member = second["physical_interfaces"][0]["id"]
+    document = render(
+        [first, second],
+        categories=(CandidateCategory.PORTFAST, CandidateCategory.BPDU_GUARD,
+                    CandidateCategory.ADMIN_SHUTDOWN),
+    )
+    records = [
+        candidate for candidate in document.candidates
+        if candidate.target.stable_id == member
+    ]
+    assert len(records) == 3
+    assert {record.category for record in records} == {
+        CandidateCategory.PORTFAST, CandidateCategory.BPDU_GUARD,
+        CandidateCategory.ADMIN_SHUTDOWN,
+    }
+    assert all(record.status is CandidateStatus.BLOCKED for record in records)
+    assert all(record.candidate_text is None for record in records)
+    assert all(
+        any("pending-member-cleanup" in reason
+            for reason in record.blocking_reasons)
+        for record in records
+    )
+    # The filtered document does not contain the port-channel removal record;
+    # the cleanup gate still applies because it is evaluated during construction.
+    assert not [
+        candidate for candidate in document.candidates
+        if candidate.category is CandidateCategory.PORT_CHANNEL
+    ]
+
+
+def test_public_category_filter_blocks_member_mode() -> None:
+    first = base_plan()
+    set_port(first, 0, dict(TRUNK))
+    add_channel(first, 1, [0], TRUNK)
+    second = copy.deepcopy(first)
+    set_port(second, 1, dict(TRUNK))
+    second["port_channels"][0]["member_ids"] = [
+        first["physical_interfaces"][0]["id"],
+        first["physical_interfaces"][1]["id"],
+    ]
+    members = {
+        second["physical_interfaces"][0]["id"],
+        second["physical_interfaces"][1]["id"],
+    }
+    document = render(
+        [first, second], categories=(CandidateCategory.LACP_MODE,),
+    )
+    records = member_channel_group(document, members)
+    assert {record.target.stable_id for record in records} == members
+    assert len(records) == 2
+    moved = [record for record in records
+             if record.target.stable_id == second["physical_interfaces"][1]["id"]]
+    assert len(moved) == 1
+    assert moved[0].status is CandidateStatus.BLOCKED
+    assert moved[0].risk_class is RiskClass.R4
+    assert moved[0].candidate_text is None
+    assert has_reason(moved[0], f"{MODE}:access-to-trunk:Gi1/0/2")
+    unchanged = [record for record in records
+                 if record.target.stable_id
+                 == second["physical_interfaces"][0]["id"]]
+    assert unchanged[0].status is CandidateStatus.CANDIDATE
+
+
+def test_topology_gate_keeps_stricter_r5_over_cleanup() -> None:
+    first = base_plan()
+    add_channel(first, 1, [0, 1], {"mode": "access", "access_vlan": 20})
+    second = copy.deepcopy(first)
+    second["port_channels"][0]["member_ids"] = [
+        first["physical_interfaces"][1]["id"],
+    ]
+    set_port(second, 0, {"mode": "access", "access_vlan": 20,
+                         "portfast": "edge"})
+    second["links"] = [{
+        "id": new_id(),
+        "endpoints": [
+            first["physical_interfaces"][0]["id"],
+            first["physical_interfaces"][2]["id"],
+        ],
+    }]
+    document = render([first, second])
+    member = second["physical_interfaces"][0]["id"]
+    records = by_category(document, member, CandidateCategory.PORTFAST)
+    assert len(records) == 1
+    candidate = records[0]
+    assert candidate.status is CandidateStatus.BLOCKED
+    assert candidate.risk_class is RiskClass.R5
+    assert candidate.candidate_text is None
+    assert has_reason(candidate, "portfast-non-edge-topology:link:Gi1/0/1")
+    # The existing stricter topology gate has precedence over the cleanup reason.
+    assert not has_reason(candidate, CLEANUP)
+
+
 # --------------------------------------------------------------------------- #
 # Real API regressions on the shipped registry
 # --------------------------------------------------------------------------- #
@@ -775,21 +932,27 @@ def test_api_pending_cleanup_blocks_stp_and_admin(client: TestClient) -> None:
     revision = save_revision(client, event_id, second)
     member = second["physical_interfaces"][0]["id"]
     candidates = get_candidates(client, event_id, revision["id"], assignment_id)
-    for category, risk in (("portfast", "R4"), ("bpdu-guard", "R4"),
-                           ("admin-shutdown", "R5")):
+    for category, risk, blocker_prefix in (
+        ("portfast", "R4", "portfast-pending-member-cleanup-unverified:removed:"),
+        ("bpdu-guard", "R4", "bpdu-guard-pending-member-cleanup-unverified:removed:"),
+        ("admin-shutdown", "R5",
+         "admin-state-pending-member-cleanup-requires-topology-evidence:removed:"),
+    ):
         records = [
             candidate for candidate in candidates
             if candidate["target"]["stable_id"] == member
             and candidate["category"] == category
         ]
         assert len(records) == 1, category
+        assert {record["target"]["stable_id"] for record in records} == {member}
         record = records[0]
         assert record["status"] == "blocked"
         assert record["risk_class"] == risk
         assert record["candidate_text"] is None
         assert record["syntax_validation"]["level"] == "not-run"
-        assert any("pending-member-cleanup" in reason
-                   for reason in record["blocking_reasons"]), records
+        assert record["syntax_validation"]["parser_verified"] is False
+        assert record["requires_field_verification"] is True
+        assert blocker_prefix + "Gi1/0/1" in record["blocking_reasons"]
     removal = [
         candidate for candidate in candidates
         if candidate["target"]["stable_id"] == member
@@ -823,11 +986,15 @@ def test_api_member_mode_blocks_channel_group(client: TestClient) -> None:
         and candidate["parameters"].get("port-channel-number") is not None
     ]
     assert len(records) == 1
+    assert {record["target"]["stable_id"] for record in records} == {member}
     record = records[0]
     assert record["status"] == "blocked"
     assert record["risk_class"] == "R4"
     assert record["candidate_text"] is None
     assert record["syntax_validation"]["level"] == "not-run"
+    assert record["syntax_validation"]["parser_verified"] is False
+    assert record["requires_field_verification"] is True
     assert "mode-transition-inherited:access-to-trunk:Gi1/0/2" in (
         record["blocking_reasons"]
     )
+    assert "cleanup-requires-field-verification" in record["blocking_reasons"]
