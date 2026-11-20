@@ -2,7 +2,7 @@ from datetime import UTC
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import Field, field_validator
 from sqlalchemy import select, text
 
@@ -20,6 +20,13 @@ from .cisco_capabilities import (
 from .cisco_catalog import CapabilityId
 from .models import Device, EventPlanRevision
 from .planning.inventory import EventDeviceAssignment
+from .planning.layer2_cli_candidates import (
+    CandidateCategory,
+    L2CliCandidateDocument,
+    RenderBindingError,
+    RenderTargetNotFound,
+    build_l2_cli_candidates,
+)
 from .planning.layer2_config_preview import (
     Layer2ConfigPreview,
     Layer2DeviceConfigPreview,
@@ -238,6 +245,71 @@ def read_device_layer2_config_preview(
     except PreviewInputError as exc:
         raise HTTPException(status_code=409, detail=exc.reason_code) from None
     except PreviewTargetNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+UNDECLARED_INPUT = "undeclared-input"
+ALLOWED_CANDIDATE_QUERY = frozenset({"category"})
+# Conditional concurrency is a separate future design; a caller that sends these
+# must be told so instead of having the header silently ignored.
+REFUSED_CANDIDATE_HEADERS = ("if-match", "if-none-match")
+
+
+def reject_undeclared_input(request: Request, body: bytes) -> None:
+    """Refuse unlisted query fields, headers and any request body outright.
+
+    The framework would otherwise ignore an attacker-supplied override silently;
+    CIS-02B2 accepts only the documented selector and category filter.
+    """
+    undeclared = sorted(set(request.query_params.keys()) - ALLOWED_CANDIDATE_QUERY)
+    undeclared.extend(
+        name for name in REFUSED_CANDIDATE_HEADERS
+        if name in request.headers
+    )
+    if undeclared:
+        raise HTTPException(
+            status_code=400,
+            detail={"reason_code": UNDECLARED_INPUT, "fields": undeclared},
+        )
+    if body:
+        raise HTTPException(
+            status_code=400,
+            detail={"reason_code": UNDECLARED_INPUT, "fields": ["request-body"]},
+        )
+
+
+@router.get(
+    "/plan-revisions/{revision_id}/assignments/{assignment_id}/l2-cli-candidates",
+)
+async def read_l2_cli_candidates(
+    event_id: UUID,
+    revision_id: UUID,
+    assignment_id: UUID,
+    request: Request,
+    session: DatabaseSession,
+    category: Annotated[tuple[CandidateCategory, ...] | None, Query()] = None,
+) -> L2CliCandidateDocument:
+    """CIS-02B2 review-only L2 CLI candidates for one Assignment.
+
+    Read-only: no persistence, no audit write, no device access. The revision,
+    intent and preview are rebuilt server-side on every request; the client
+    supplies only the path selector and the optional category filter.
+    """
+    reject_undeclared_input(request, await request.body())
+    revision, intent = revision_intent(event_id, revision_id, session)
+    try:
+        preview = build_device_layer2_config_preview(revision, intent, assignment_id)
+    except PreviewInputError as exc:
+        raise HTTPException(status_code=409, detail=exc.reason_code) from None
+    except PreviewTargetNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    try:
+        return build_l2_cli_candidates(
+            revision, intent, preview, categories=category,
+        )
+    except RenderBindingError as exc:
+        raise HTTPException(status_code=409, detail=exc.reason_code) from None
+    except RenderTargetNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
 
 

@@ -9,6 +9,10 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from .models import Device, Event
+from .planning.layer2_cli_candidates import (
+    candidate_catalog_json_schema,
+    candidate_document_json_schema,
+)
 from .planning.layer2_config_preview import (
     aggregate_preview_json_schema,
     config_preview_json_schema,
@@ -93,6 +97,27 @@ def read_layer2_config_preview_device_schema() -> JSONResponse:
         content=device_preview_json_schema(),
         media_type=SCHEMA_MEDIA_TYPE,
     )
+
+
+@router.get(
+    "/contracts/l2-cli-candidates/schema",
+    response_class=Response,
+    responses=_schema_route_responses(
+        "Draft 2020-12 JSON Schema for a CIS-02B2 L2 CLI candidate document"
+    ),
+)
+def read_l2_cli_candidate_schema() -> JSONResponse:
+    """Directly validatable CIS-02B2 candidate-document JSON Schema."""
+    return JSONResponse(
+        content=candidate_document_json_schema(),
+        media_type=SCHEMA_MEDIA_TYPE,
+    )
+
+
+@router.get("/contracts/l2-cli-candidates/schema/catalog")
+def read_l2_cli_candidate_schema_catalog() -> JSONResponse:
+    """Schema Catalog for CIS-02B2. Directory only; not a document validator."""
+    return JSONResponse(content=candidate_catalog_json_schema())
 
 
 @router.get("/events", response_model=list[EventView])
