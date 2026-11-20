@@ -1174,6 +1174,24 @@ def _require_portfast_mode(
     return ()
 
 
+_PENDING_MEMBER_CLEANUP_TRANSITIONS = frozenset({"removed", "migrated", "replaced"})
+
+
+def _pending_member_cleanup(context: _Context, target_id: str) -> str | None:
+    """Return the transition of an unresolved previous aggregate membership.
+
+    This is a dependency check on the existing previous/current membership index,
+    not a second membership state: it answers only whether the physical interface
+    still owes a cleanup to an aggregate it belonged to in the previous revision.
+    """
+    transition = context.member_transition(target_id)
+    return (
+        transition
+        if transition in _PENDING_MEMBER_CLEANUP_TRANSITIONS
+        else None
+    )
+
+
 def _edge_role_findings(
     context: _Context, spec: _Spec, prefix: str,
 ) -> tuple[_RequirementFinding, ...]:
@@ -1183,6 +1201,9 @@ def _edge_role_findings(
     core-role device is a known topology conflict: it may not be presented as an
     ordinary edge candidate. Only an unreferenced physical port keeps the ordinary
     candidate, and even then the field notes keep the real device state unverified.
+    An interface whose previous aggregate membership still needs cleanup is not
+    independent either: the current planning role may look unreferenced, but the
+    port cannot be treated as a confirmed edge port until that cleanup is done.
     """
     if spec.target_kind is TargetKind.PORT_CHANNEL:
         return ((
@@ -1197,15 +1218,36 @@ def _edge_role_findings(
             f"{prefix}-non-edge-topology:{role}:{spec.target_name}",
             RiskClass.R5,
         ),)
+    pending = _pending_member_cleanup(context, spec.target_id)
     if "channel-member" in roles:
-        return ((
+        findings: list[_RequirementFinding] = [(
             f"{prefix}-aggregate-member-role-unverified:{spec.target_name}",
             RiskClass.R3,
-        ),)
+        )]
+        if pending is not None:
+            findings.append((
+                f"{prefix}-pending-member-cleanup-unverified:"
+                f"{pending}:{spec.target_name}",
+                RiskClass.R4,
+            ))
+        return tuple(findings)
     if context.identity.role in {"core", "external-distribution"}:
-        return ((
+        findings = [(
             f"{prefix}-core-role-unverified:{spec.target_name}",
             RiskClass.R5,
+        )]
+        if pending is not None:
+            findings.append((
+                f"{prefix}-pending-member-cleanup-unverified:"
+                f"{pending}:{spec.target_name}",
+                RiskClass.R4,
+            ))
+        return tuple(findings)
+    if pending is not None:
+        return ((
+            f"{prefix}-pending-member-cleanup-unverified:"
+            f"{pending}:{spec.target_name}",
+            RiskClass.R4,
         ),)
     if roles == frozenset({"unreferenced"}):
         # No planned topology says this is an edge port; the field note keeps the
@@ -1264,24 +1306,42 @@ def _require_admin_state(
         )
         return ((reason, RiskClass.R5), ("aggregate-member-impact-unverified", RiskClass.R5))
     roles = context.port_roles(spec.target_name)
+    pending = _pending_member_cleanup(context, spec.target_id)
+    cleanup_finding: _RequirementFinding = (
+        f"admin-state-pending-member-cleanup-requires-topology-evidence:"
+        f"{pending}:{spec.target_name}",
+        RiskClass.R5,
+    )
     if "channel-member" in roles:
-        return ((
-            f"channel-member-admin-state-requires-topology-evidence:{spec.target_name}",
+        findings: list[_RequirementFinding] = [(
+            f"channel-member-admin-state-requires-topology-evidence:"
+            f"{spec.target_name}",
             RiskClass.R5,
-        ),)
+        )]
+        if pending is not None:
+            findings.append(cleanup_finding)
+        return tuple(findings)
     if value == "down":
         if roles & {"isp", "transit"}:
-            return ((
+            findings = [(
                 f"wan-or-transit-port-shutdown-requires-topology-evidence:"
                 f"{spec.target_name}",
                 RiskClass.R5,
-            ),)
+            )]
+            if pending is not None:
+                findings.append(cleanup_finding)
+            return tuple(findings)
         if "link" in roles:
-            return ((
+            findings = [(
                 f"link-uplink-port-shutdown-requires-topology-evidence:"
                 f"{spec.target_name}",
                 RiskClass.R5,
-            ),)
+            )]
+            if pending is not None:
+                findings.append(cleanup_finding)
+            return tuple(findings)
+    if pending is not None:
+        return (cleanup_finding,)
     return ()
 
 
@@ -1779,6 +1839,18 @@ def _channel_group_spec(
         )
         membership_risk = _raise_risk(
             membership_risk or RiskClass.R3, _transition_risk_floor(aggregate_mode),
+        )
+    member_mode = context.mode_transition(TargetKind.INTERFACE, target_id)
+    if member_mode in BLOCKED_MODE_TRANSITIONS:
+        # The member's own switchport mode also changes in this revision. The
+        # member channel-group command depends on that mode change, so it inherits
+        # the same frozen transition semantics as the member's mode command.
+        membership_block += (
+            f"mode-transition-inherited:{member_mode}:{target_name}",
+            "cleanup-requires-field-verification",
+        )
+        membership_risk = _raise_risk(
+            membership_risk or RiskClass.R3, _transition_risk_floor(member_mode),
         )
     membership_block = tuple(dict.fromkeys(membership_block))
     prerequisite_tuple = tuple(dict.fromkeys(prerequisites))

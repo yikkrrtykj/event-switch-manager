@@ -545,9 +545,10 @@ def test_mode_and_object_replacement_keeps_identity_gate() -> None:
     assert candidate.candidate_text is None
     assert has_reason(candidate, IDENTITY_CHANGE)
     assert candidate.risk_class is RiskClass.R5
-    # Replaced logical objects are not comparable, so the mode marker is not
-    # fabricated; the stricter identity gate carries the block.
-    assert not has_reason(candidate, MODE_TRANSITION)
+    # The aggregate object is replaced (identity gate), and the member's own
+    # switchport mode also changes in this revision. Both dependencies are real,
+    # so both blockers are retained instead of letting one hide the other.
+    assert has_reason(candidate, MODE_TRANSITION)
 
 
 def test_unaffected_second_aggregate_keeps_candidates() -> None:
