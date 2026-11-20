@@ -159,6 +159,22 @@ CONNECTIVITY_RISK_CATEGORIES = frozenset({
 })
 
 
+#: Commands that are Layer-2-specific to an aggregate. They may never be
+#: rendered when the target Port-Channel object is routed; generic interface
+#: attributes such as description are deliberately not in this set.
+AGGREGATE_L2_CATEGORIES = frozenset({
+    CandidateCategory.PORT_CHANNEL,
+    CandidateCategory.LACP_MODE,
+    CandidateCategory.ACCESS_MODE,
+    CandidateCategory.ACCESS_VLAN,
+    CandidateCategory.TRUNK_MODE,
+    CandidateCategory.NATIVE_VLAN,
+    CandidateCategory.ALLOWED_VLANS,
+    CandidateCategory.PORTFAST,
+    CandidateCategory.BPDU_GUARD,
+})
+
+
 class CandidateStatus(StrEnum):
     CANDIDATE = "candidate"
     BLOCKED = "blocked"
@@ -616,6 +632,15 @@ def verify_render_binding(
 CheckKey = tuple[str, str, str]
 
 
+class _AggregateScope(StrEnum):
+    """Layer-2 / Layer-3 scope of one Port-Channel object."""
+
+    L2 = "l2"
+    ROUTED = "routed"
+    UNKNOWN = "unknown"
+    INCONSISTENT = "inconsistent"
+
+
 @dataclass(frozen=True, slots=True)
 class _ChannelRef:
     """Identity of the aggregate a member belongs to in one revision."""
@@ -623,6 +648,7 @@ class _ChannelRef:
     number: int
     interface_id: str
     lacp: str
+    mode: str = "access"
 
 
 @dataclass(frozen=True, slots=True)
@@ -693,6 +719,25 @@ class _Membership:
             return "protocol-switch"
         return "lacp-mode-change"
 
+    def aggregate_mode_transition(self, number: int) -> str:
+        """L2/L3 scope change of the aggregate that currently holds ``number``."""
+        current = next(
+            (ref for ref in self.current_objects.values() if ref.number == number),
+            None,
+        )
+        previous = self.previous_by_number.get(number)
+        if current is None or previous is None:
+            return "not-comparable"
+        if current.interface_id != previous.interface_id:
+            return "replaced"
+        if current.mode == previous.mode:
+            return "unchanged"
+        if current.mode == "routed":
+            return "to-routed"
+        if previous.mode == "routed":
+            return "to-l2"
+        return "mode-change"
+
 
 def _channel_refs(state: DeviceDesiredState | None) -> Mapping[str, _ChannelRef]:
     refs: dict[str, _ChannelRef] = {}
@@ -701,6 +746,7 @@ def _channel_refs(state: DeviceDesiredState | None) -> Mapping[str, _ChannelRef]
             number=channel.number,
             interface_id=str(channel.interface_id),
             lacp=channel.lacp,
+            mode=channel.settings.mode,
         )
         for member in channel.member_ids:
             refs[str(member)] = ref
@@ -713,6 +759,7 @@ def _channel_objects(state: DeviceDesiredState | None) -> Mapping[str, _ChannelR
             number=channel.number,
             interface_id=str(channel.interface_id),
             lacp=channel.lacp,
+            mode=channel.settings.mode,
         )
         for channel in (state.port_channels if state is not None else ())
     }
@@ -726,6 +773,7 @@ def _channel_objects_by_number(
             number=channel.number,
             interface_id=str(channel.interface_id),
             lacp=channel.lacp,
+            mode=channel.settings.mode,
         )
         for channel in (state.port_channels if state is not None else ())
     }
@@ -822,6 +870,43 @@ class _Context:
 
     def aggregate_transition(self, number: int, interface_id: str) -> str:
         return self.membership.aggregate_transition(number, interface_id)
+
+    def aggregate_mode_transition(self, number: int) -> str:
+        return self.membership.aggregate_mode_transition(number)
+
+    def aggregate_scope(
+        self, number: int,
+    ) -> tuple[_AggregateScope, tuple[str, ...]]:
+        """Mode of the aggregate object and of every planned member.
+
+        A routed aggregate is an L3 object: no Layer-2 aggregate command may be
+        rendered for it. A member whose mode disagrees with the aggregate, or a
+        missing member record, fails closed instead of being assumed L2.
+        """
+        channel = self.channel(number)
+        if channel is None:
+            return _AggregateScope.UNKNOWN, (f"aggregate-scope-unknown:{number}",)
+        routed = channel.settings.mode == "routed"
+        for member in channel.member_ids:
+            port = next(
+                (item for item in self.device_intent.desired.physical_ports
+                 if item.interface_id == member),
+                None,
+            )
+            if port is None:
+                return (
+                    _AggregateScope.UNKNOWN,
+                    (f"aggregate-member-scope-unknown:{number}",),
+                )
+            if (port.mode == "routed") != routed:
+                return (
+                    _AggregateScope.INCONSISTENT,
+                    (f"aggregate-scope-inconsistent:{number}",),
+                )
+        return (
+            _AggregateScope.ROUTED if routed else _AggregateScope.L2,
+            (),
+        )
 
     def mode_transition(self, target: TargetKind, stable_id: str) -> str | None:
         return self.mode_transitions.get((target.value, stable_id))
@@ -2220,6 +2305,50 @@ def _vlan_target_reasons(vlan_id: int) -> tuple[str, ...]:
     return ()
 
 
+def _aggregate_number(context: _Context, spec: _Spec) -> int | None:
+    """Number of the aggregate whose configuration mode a spec would enter."""
+    if spec.target_kind is TargetKind.PORT_CHANNEL:
+        channel = context.channel_for_interface(spec.target_id)
+        return channel.number if channel is not None else None
+    number = _as_int((spec.parameters or {}).get("port-channel-number"))
+    if number is not None:
+        return number
+    # A command on a physical interface can still be an aggregate command when
+    # that interface currently belongs to a Port-Channel (for example its own
+    # access-mode setting). The aggregate scope then decides the outcome.
+    ref = context.membership.current.get(spec.target_id)
+    return ref.number if ref is not None else None
+
+
+def _aggregate_scope_gate(
+    context: _Context, spec: _Spec,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return ``(unsupported, blocked)`` scope reasons for an L2 aggregate command.
+
+    Only specs that are Layer-2-specific to an aggregate carry the flag. A routed
+    aggregate is a valid L3 object, so its interface and member commands are
+    reported as unsupported with no text; an unresolvable or mixed-mode aggregate
+    fails closed. When a routed aggregate transitions to L2, the existing
+    migration block is preserved.
+    """
+    if spec.category not in AGGREGATE_L2_CATEGORIES:
+        return (), ()
+    number = _aggregate_number(context, spec)
+    if number is None:
+        return (), ()
+    scope, findings = context.aggregate_scope(number)
+    if scope is _AggregateScope.ROUTED:
+        return ("routed-port-channel-not-l2",), ()
+    if scope is _AggregateScope.INCONSISTENT:
+        return (), findings or (f"aggregate-scope-inconsistent:{number}",)
+    if scope is _AggregateScope.UNKNOWN:
+        return (), findings or (f"aggregate-scope-unknown:{number}",)
+    transition = context.aggregate_mode_transition(number)
+    if transition == "to-l2":
+        return (), ("routed-boundary-transition-unverified",)
+    return (), ()
+
+
 def _target_reasons(context: _Context, spec: _Spec) -> tuple[str, ...]:
     """Validate the configuration target itself, not only the command line.
 
@@ -2285,9 +2414,11 @@ def _build_candidate(
     requirement_findings = _requirement_findings(context, spec, evidence)
     for _reason, floor in requirement_findings:
         risk = _raise_risk(risk, floor)
+    scope_unsupported, scope_blocked = _aggregate_scope_gate(context, spec)
     reasons: list[str] = []
     unsupported: list[str] = list(entry.extra_unsupported)
     unsupported.extend(spec.force_unsupported)
+    unsupported.extend(scope_unsupported)
     if verdict == "unsupported":
         unsupported.append(
             f"capability-unsupported:{capability_reason}:{spec.target_name}"
@@ -2306,11 +2437,12 @@ def _build_candidate(
     elif verdict == "unknown":
         status = CandidateStatus.BLOCKED
         reasons = [f"capability-unknown:{capability_reason}:{spec.target_name}"]
-    elif spec.force_block or entry.extra_block or requirement_findings:
+    elif spec.force_block or entry.extra_block or requirement_findings or scope_blocked:
         status = CandidateStatus.BLOCKED
         reasons = [
             *entry.extra_block,
             *spec.force_block,
+            *scope_blocked,
             *(reason for reason, _floor in requirement_findings),
         ]
     elif risk is RiskClass.R5:
@@ -2327,6 +2459,7 @@ def _build_candidate(
 
     reasons.extend(_blocked_conflicts(item, context.preview.device.conflicts))
     reasons.extend(reason for reason, _floor in requirement_findings)
+    reasons.extend(scope_blocked)
 
     target_reasons = _target_reasons(context, spec) if spec.topic is not None else ()
     if target_reasons:

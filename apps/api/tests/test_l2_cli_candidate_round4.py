@@ -162,6 +162,9 @@ def test_invalid_parent_evidence_blocks_every_port_channel_candidate(
         )
     ]
     assert channel_candidates, state
+    assert {candidate.target.stable_id for candidate in member_candidates} == {
+        plan["physical_interfaces"][0]["id"],
+    }, state
     expected = PARENT_DIAGNOSIS[state]
     for candidate in (*channel_candidates, *member_candidates):
         assert candidate.status is not CandidateStatus.CANDIDATE, (
@@ -281,7 +284,12 @@ def test_aggregate_protocol_switch_reaches_a_newly_added_member(
     ]
     document = render([first, second])
     members = _member_channel_group(document, {"Gi1/0/1", "Gi1/0/2"})
-    assert members
+    expected_members = {
+        first["physical_interfaces"][0]["id"],
+        first["physical_interfaces"][1]["id"],
+    }
+    assert {candidate.target.stable_id for candidate in members} == expected_members
+    assert len(members) == 2
     for candidate in members:
         assert candidate.status is CandidateStatus.BLOCKED, candidate.target.name
         assert candidate.candidate_text is None
@@ -294,23 +302,43 @@ def test_aggregate_protocol_switch_reaches_a_newly_added_member(
 
 
 def test_aggregate_protocol_switch_after_replacing_all_members_blocks_all() -> None:
-    first = _two_member_plan(new_id(), "static")
+    first = base_plan(new_id(), [
+        {"name": "Gi1/0/1", "settings": {"mode": "access", "access_vlan": 20}},
+        {"name": "Gi1/0/2", "settings": {"mode": "access", "access_vlan": 20}},
+        {"name": "Gi1/0/3", "settings": {"mode": "access", "access_vlan": 20}},
+        {"name": "Gi1/0/4", "settings": {"mode": "access", "access_vlan": 20}},
+    ])
+    add_channel(first, 1, [0, 1], {"mode": "access", "access_vlan": 20},
+                lacp="static")
     second = copy.deepcopy(first)
-    # Keep the same logical object but replace every member and the protocol.
+    # Keep the logical object and number, replace every member and the protocol.
     second["port_channels"][0]["lacp"] = "active"
     second["port_channels"][0]["member_ids"] = [
-        first["physical_interfaces"][1]["id"],
-        first["physical_interfaces"][0]["id"],
+        first["physical_interfaces"][2]["id"],
+        first["physical_interfaces"][3]["id"],
     ]
+    old_members = {
+        first["physical_interfaces"][0]["id"],
+        first["physical_interfaces"][1]["id"],
+    }
+    new_members = {
+        first["physical_interfaces"][2]["id"],
+        first["physical_interfaces"][3]["id"],
+    }
+    assert old_members & new_members == set()
     document = render([first, second])
-    members = _member_channel_group(document, {"Gi1/0/1", "Gi1/0/2"})
-    assert members
+    members = _member_channel_group(document, {"Gi1/0/3", "Gi1/0/4"})
+    assert {candidate.target.stable_id for candidate in members} == new_members
+    assert len(members) == 2
     for candidate in members:
         assert candidate.status is CandidateStatus.BLOCKED
         assert candidate.candidate_text is None
         assert _has_reason(
             candidate, "aggregation-protocol-change-requires-field-evidence",
         )
+    assert all(
+        "no " not in str(candidate.candidate_text) for candidate in document.candidates
+    )
 
 
 def test_same_number_object_rebuild_reaches_every_member() -> None:
@@ -322,7 +350,9 @@ def test_same_number_object_rebuild_reaches_every_member() -> None:
     assert first["logical_interfaces"][0]["id"] != second["logical_interfaces"][0]["id"]
     document = render([first, second])
     new_member = _member_channel_group(document, {"Gi1/0/2"})
-    assert new_member
+    assert {candidate.target.stable_id for candidate in new_member} == {
+        first["physical_interfaces"][1]["id"],
+    }
     assert new_member[0].status is CandidateStatus.BLOCKED
     assert new_member[0].candidate_text is None
     assert _has_reason(new_member[0], "channel-object-identity-changed")
@@ -338,7 +368,12 @@ def test_active_to_passive_with_added_member_marks_risk_consistently() -> None:
     ]
     document = render([first, second])
     members = _member_channel_group(document, {"Gi1/0/1", "Gi1/0/2"})
-    assert members
+    expected_members = {
+        first["physical_interfaces"][0]["id"],
+        first["physical_interfaces"][1]["id"],
+    }
+    assert {candidate.target.stable_id for candidate in members} == expected_members
+    assert len(members) == 2
     for candidate in members:
         assert candidate.status is CandidateStatus.CANDIDATE
         assert candidate.risk_class is RiskClass.R3
@@ -360,7 +395,12 @@ def test_unchanged_protocol_with_added_member_keeps_candidates() -> None:
     ]
     document = render([first, second])
     members = _member_channel_group(document, {"Gi1/0/1", "Gi1/0/2"})
-    assert members
+    expected_members = {
+        first["physical_interfaces"][0]["id"],
+        first["physical_interfaces"][1]["id"],
+    }
+    assert {candidate.target.stable_id for candidate in members} == expected_members
+    assert len(members) == 2
     for candidate in members:
         assert candidate.status is CandidateStatus.CANDIDATE
         assert candidate.candidate_text == "channel-group 1 mode active"
