@@ -97,6 +97,14 @@ BLOCKED_MODE_TRANSITIONS = frozenset({
     "switchport-to-routed",
 })
 
+
+def _transition_risk_floor(transition: str) -> RiskClass:
+    if transition in {"trunk-to-access", "routed-to-switchport",
+                      "switchport-to-routed"}:
+        return RiskClass.R5
+    return RiskClass.R4
+
+
 _ASCII = "ascii"
 
 VLAN_NAME_PATTERN = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
@@ -172,6 +180,13 @@ AGGREGATE_L2_CATEGORIES = frozenset({
     CandidateCategory.ALLOWED_VLANS,
     CandidateCategory.PORTFAST,
     CandidateCategory.BPDU_GUARD,
+})
+
+#: Switchport commands whose value depends on an unresolved aggregate cleanup of
+#: the physical interface (member detached, migrated or its object replaced).
+MEMBER_CLEANUP_CATEGORIES = frozenset({
+    CandidateCategory.ACCESS_VLAN,
+    CandidateCategory.ALLOWED_VLANS,
 })
 
 
@@ -720,7 +735,12 @@ class _Membership:
         return "lacp-mode-change"
 
     def aggregate_mode_transition(self, number: int) -> str:
-        """L2/L3 scope change of the aggregate that currently holds ``number``."""
+        """L2/L3 scope change of the aggregate that currently holds ``number``.
+
+        ``access-to-trunk`` / ``trunk-to-access`` are returned as directional
+        migration names so member commands can inherit the frozen mode-transition
+        semantics instead of a generic marker.
+        """
         current = next(
             (ref for ref in self.current_objects.values() if ref.number == number),
             None,
@@ -736,7 +756,7 @@ class _Membership:
             return "to-routed"
         if previous.mode == "routed":
             return "to-l2"
-        return "mode-change"
+        return f"{previous.mode}-to-{current.mode}"
 
 
 def _channel_refs(state: DeviceDesiredState | None) -> Mapping[str, _ChannelRef]:
@@ -1747,6 +1767,19 @@ def _channel_group_spec(
         # behavior and needs the peer precondition confirmed; it is never claimed
         # to be safe without field evidence.
         prerequisites.append("lacp-negotiation-change-requires-peer-evidence")
+    aggregate_mode = context.aggregate_mode_transition(number)
+    if aggregate_mode in BLOCKED_MODE_TRANSITIONS:
+        # A member command joins the aggregate object itself, so a blocked
+        # aggregate access/trunk transition applies to every current member,
+        # including a member added in the same revision.
+        aggregate_name = channel.name or f"Port-channel{number}"
+        membership_block += (
+            f"mode-transition-inherited:{aggregate_mode}:{aggregate_name}",
+            "cleanup-requires-field-verification",
+        )
+        membership_risk = _raise_risk(
+            membership_risk or RiskClass.R3, _transition_risk_floor(aggregate_mode),
+        )
     membership_block = tuple(dict.fromkeys(membership_block))
     prerequisite_tuple = tuple(dict.fromkeys(prerequisites))
     if channel.lacp == "static":
@@ -2349,6 +2382,34 @@ def _aggregate_scope_gate(
     return (), ()
 
 
+def _member_cleanup_gate(
+    context: _Context, spec: _Spec,
+) -> tuple[tuple[str, ...], RiskClass | None]:
+    """Block switchport commands that depend on an unresolved member cleanup.
+
+    A physical interface that left, migrated between, or whose aggregate object
+    was replaced in the previous revision still needs the old membership cleaned
+    up. Until that cleanup is field-verified, its access/allowed VLAN values
+    cannot be treated as independently configurable, so they are blocked with a
+    reason that names the membership transition. Generic interface attributes and
+    commands already blocked by other gates are deliberately not widened here.
+    """
+    if spec.category not in MEMBER_CLEANUP_CATEGORIES:
+        return (), None
+    if spec.target_kind is not TargetKind.INTERFACE:
+        return (), None
+    transition = context.member_transition(spec.target_id)
+    if transition not in {"removed", "migrated", "replaced"}:
+        return (), None
+    return (
+        (
+            f"member-cleanup-unresolved:{transition}:{spec.target_name}",
+            "cleanup-requires-field-verification",
+        ),
+        RiskClass.R4,
+    )
+
+
 def _target_reasons(context: _Context, spec: _Spec) -> tuple[str, ...]:
     """Validate the configuration target itself, not only the command line.
 
@@ -2415,6 +2476,9 @@ def _build_candidate(
     for _reason, floor in requirement_findings:
         risk = _raise_risk(risk, floor)
     scope_unsupported, scope_blocked = _aggregate_scope_gate(context, spec)
+    cleanup_blocked, cleanup_floor = _member_cleanup_gate(context, spec)
+    if cleanup_floor is not None:
+        risk = _raise_risk(risk, cleanup_floor)
     reasons: list[str] = []
     unsupported: list[str] = list(entry.extra_unsupported)
     unsupported.extend(spec.force_unsupported)
@@ -2434,15 +2498,20 @@ def _build_candidate(
     elif unsupported:
         status = CandidateStatus.UNSUPPORTED
         reasons = unsupported
+    elif cleanup_blocked:
+        status = CandidateStatus.BLOCKED
+        reasons = [*cleanup_blocked]
     elif verdict == "unknown":
         status = CandidateStatus.BLOCKED
         reasons = [f"capability-unknown:{capability_reason}:{spec.target_name}"]
-    elif spec.force_block or entry.extra_block or requirement_findings or scope_blocked:
+    elif (spec.force_block or entry.extra_block or requirement_findings
+          or scope_blocked or cleanup_blocked):
         status = CandidateStatus.BLOCKED
         reasons = [
             *entry.extra_block,
             *spec.force_block,
             *scope_blocked,
+            *cleanup_blocked,
             *(reason for reason, _floor in requirement_findings),
         ]
     elif risk is RiskClass.R5:
@@ -2460,6 +2529,7 @@ def _build_candidate(
     reasons.extend(_blocked_conflicts(item, context.preview.device.conflicts))
     reasons.extend(reason for reason, _floor in requirement_findings)
     reasons.extend(scope_blocked)
+    reasons.extend(cleanup_blocked)
 
     target_reasons = _target_reasons(context, spec) if spec.topic is not None else ()
     if target_reasons:
