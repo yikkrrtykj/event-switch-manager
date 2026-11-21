@@ -78,7 +78,7 @@ def synthetic_eligible_evidence_registry() -> CommandEvidenceRegistry:
 def make_l3_plan(
     event_id: str,
     *,
-    core_pid: str = "C9300L-24P-4X-E",
+    core_pid: str = "C9300L-24P-4X",
     core_family: str = "catalyst-9300",
     core_image: str = "17.12.4",
     core_license: str | None = "Network Advantage",
@@ -314,7 +314,7 @@ def make_l3_plan(
 def make_stack_plan(
     event_id: str,
     *,
-    second_pid: str | None = "C9300L-24P-4X-E",
+    second_pid: str | None = "C9300L-24P-4X",
     second_serial: str | None = "SYN-CORE-002",
     second_state: str = "ready",
     include_second_device: bool = True,

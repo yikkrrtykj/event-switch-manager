@@ -6,6 +6,9 @@ from dataclasses import replace
 
 import pytest
 from layer3_helpers import TEST_REVIEWER
+from layer3_helpers import (
+    synthetic_eligible_evidence_registry as _synthetic_eligible_evidence_registry,
+)
 from layer3_helpers import test_only_evidence_registry as _test_only_evidence_registry
 
 from event_switch_manager.domain import DeviceFamily
@@ -46,7 +49,7 @@ def test_every_row_has_exact_scope_and_sources() -> None:
         assert row.source_section
         assert row.command and row.grammar
         assert row.content_digest()
-        assert row.evidence_version == 3
+        assert row.evidence_version == 4
         assert row.classification is not None
         if row.topic is L3CommandTopic.DHCP_HELPER_ADDRESS:
             assert row.licenses == ("Network Advantage",)
@@ -71,7 +74,7 @@ def test_classification_separates_platform_generic_license_and_renderer_rules() 
     expected_generic = {
         L3CommandTopic.IP_ROUTING: True,
         L3CommandTopic.SVI_INTERFACE: False,
-        L3CommandTopic.SVI_ADDRESS: True,
+        L3CommandTopic.SVI_ADDRESS: False,
         L3CommandTopic.STATIC_ROUTE: True,
         L3CommandTopic.DEFAULT_ROUTE: True,
         L3CommandTopic.DHCP_HELPER_ADDRESS: False,
@@ -84,17 +87,24 @@ def test_classification_separates_platform_generic_license_and_renderer_rules() 
         assert classification.renderer_safety_restriction
         assert classification.blocking_evidence_gaps
         assert classification.excluded_scope_notes
-        assert "pid-license-suffix-mapping" in classification.blocking_evidence_gaps
+        assert set(classification.hardware_pids) | set(classification.ordering_skus) == (
+            set(classification.verified_pids)
+        )
+        assert set(classification.verified_pids) <= set(row.pids)
+        assert "per-pid-release-support" in classification.blocking_evidence_gaps
+        assert "pid-license-suffix-mapping" not in classification.blocking_evidence_gaps
         if row.topic is L3CommandTopic.DHCP_HELPER_ADDRESS:
             assert classification.license_evidence is EvidenceStatus.UNRESOLVED
             assert classification.license_source_url is None
             assert classification.license_source_section is None
             assert "dhcp-relay-license" in classification.blocking_evidence_gaps
         else:
-            assert classification.license_evidence is EvidenceStatus.PARTIAL
+            assert classification.license_evidence is EvidenceStatus.VERIFIED
             assert classification.license_source_url is not None
             assert classification.license_source_section == "Information About IP Routing"
-            assert "per-pid-release-support" in classification.blocking_evidence_gaps
+            assert "actual-active-license-not-hardware-verified" in (
+                classification.excluded_scope_notes
+            )
 
 
 def test_dhcp_license_remains_contract_consistent_but_unresolved() -> None:
@@ -132,13 +142,24 @@ def test_default_route_excludes_ip_default_network() -> None:
     )
 
 
+def test_svi_interface_has_official_vlan_range_supplement() -> None:
+    svi = next(item for item in ROWS if item.topic is L3CommandTopic.SVI_INTERFACE)
+    assert any(
+        source.section == "Manually Assigning IP Information to Multiple SVIs"
+        and "performing_device_setup_configuration.html" in source.url
+        for source in svi.supplemental_sources
+    )
+    assert svi.classification is not None
+    assert "vlan-id-platform-range" not in svi.classification.blocking_evidence_gaps
+
+
 def test_static_and_default_route_use_protocol_independent_features() -> None:
     for topic in (L3CommandTopic.STATIC_ROUTE, L3CommandTopic.DEFAULT_ROUTE):
         row = next(item for item in ROWS if item.topic is topic)
         assert "protocol_independent_features.html" in row.source_url
         assert "configuring_ip_unicast_routing.html" not in row.source_url
         assert row.command_reference_url is not None
-        assert "iri_pi1.html" in row.command_reference_url
+        assert "iri-cr-a1.html" in row.command_reference_url
         assert row.command_reference_section == "ip route"
         assert row.command_reference_scope
         assert "Protocol-Independent" in row.command_reference_scope
@@ -178,9 +199,11 @@ def test_digest_changes_when_content_changes() -> None:
     assert row.renderable is False
 
 
-def test_reviewed_registry_is_explicitly_test_only_and_renderable() -> None:
+def test_reviewed_registry_separates_review_valid_from_renderable() -> None:
     registry = _test_only_evidence_registry()
-    assert registry.renderable_count == 6
+    assert registry.review_valid_count == 6
+    assert registry.eligible_count == 0
+    assert registry.renderable_count == 0
     assert registry.fingerprint != DEFAULT_REGISTRY.fingerprint
     assert all(
         row.review.reviewer == TEST_REVIEWER
@@ -311,6 +334,28 @@ def test_registry_fingerprint_is_content_sensitive_and_deterministic() -> None:
     assert registry.fingerprint != DEFAULT_REGISTRY.fingerprint
 
 
+def test_review_valid_scope_eligible_and_renderable_counts_are_separate() -> None:
+    actual = _test_only_evidence_registry()
+    assert actual.review_valid_count == 6
+    assert actual.eligible_count == 0
+    assert actual.renderable_count == 0
+    synthetic = _synthetic_eligible_evidence_registry()
+    assert synthetic.review_valid_count == 6
+    assert synthetic.eligible_count == 6
+    assert synthetic.renderable_count == 0
+    production_rows = tuple(
+        replace(
+            row,
+            review=replace(row.review, reviewer="synthetic-reviewer"),
+        )
+        for row in synthetic.rows
+    )
+    production = CommandEvidenceRegistry(production_rows, production=True)
+    assert production.review_valid_count == 6
+    assert production.eligible_count == 6
+    assert production.renderable_count == 6
+
+
 def test_test_registry_has_separate_identity_and_is_not_production() -> None:
     registry = _test_only_evidence_registry()
     assert DEFAULT_REGISTRY.production is True
@@ -319,22 +364,37 @@ def test_test_registry_has_separate_identity_and_is_not_production() -> None:
     assert registry.registry_id != DEFAULT_REGISTRY.registry_id
 
 
-def test_verified_pid_subset_is_explicit_and_bare_models_do_not_match() -> None:
-    expected = {
+def test_verified_pid_subset_maps_hardware_pids_and_ordering_skus() -> None:
+    expected_hardware = {
+        "C9300-24T", "C9300-24P",
+        "C9300L-24T-4G", "C9300L-24P-4X", "C9300X-24Y",
+    }
+    expected_ordering = {
         "C9300L-24T-4G-E", "C9300L-24P-4X-E", "C9300X-24Y-A",
     }
+    expected = expected_hardware | expected_ordering
     for row in ROWS:
-        assert row.classification is not None
-        assert set(row.classification.verified_pids) == expected
-        assert "C9300-24T" not in row.classification.verified_pids
-        assert "C9300L-24T-4G" not in row.classification.verified_pids
+        classification = row.classification
+        assert classification is not None
+        assert set(classification.hardware_pids) == expected_hardware
+        assert set(classification.ordering_skus) == expected_ordering
+        assert set(classification.verified_pids) == expected
+        assert set(classification.verified_pids) <= set(row.pids)
     row = ROWS[0]
-    assert DEFAULT_REGISTRY.matching(
-        row.topic, "C9300L-24T-4G-E", "17.12.4", "Network Essentials",
-    )
-    assert not DEFAULT_REGISTRY.matching(
-        row.topic, "C9300-24T", "17.12.4", "Network Essentials",
-    )
+    for pid in (
+        "C9300-24T", "C9300-24P", "C9300L-24T-4G", "C9300L-24P-4X",
+        "C9300X-24Y", "C9300L-24T-4G-E", "C9300L-24P-4X-E", "C9300X-24Y-A",
+    ):
+        assert DEFAULT_REGISTRY.matching(
+            row.topic, pid, "17.12.4", "Network Essentials",
+        )
+    for unknown in (
+        "C9300-24T-A", "C9300L-24T-4G-A", "C9300L-24T-4G-X",
+        "C9300X-24Y-E",
+    ):
+        assert not DEFAULT_REGISTRY.matching(
+            row.topic, unknown, "17.12.4", "Network Essentials",
+        )
 
 
 def test_registry_matching_scope_including_license_and_release() -> None:

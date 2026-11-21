@@ -26,7 +26,7 @@ from ..domain import DeviceFamily
 from .layer3_command_evidence_reviews import REJECTED_RECORDS, REVIEWED_RECORDS
 
 REGISTRY_ID: Literal["cis-03-l1-command-evidence-v1"] = "cis-03-l1-command-evidence-v1"
-EVIDENCE_SCHEMA_VERSION: Literal[3] = 3
+EVIDENCE_SCHEMA_VERSION: Literal[4] = 4
 
 _9300_PIDS = (
     "C9300-24T", "C9300-24P",
@@ -35,11 +35,19 @@ _9300_PIDS = (
     "C9300X-24Y", "C9300X-24Y-A",
 )
 _RELEASE = "17.12.4"
-_VERIFIED_PIDS = (
+_HARDWARE_PIDS = (
+    "C9300-24T",
+    "C9300-24P",
+    "C9300L-24T-4G",
+    "C9300L-24P-4X",
+    "C9300X-24Y",
+)
+_ORDERING_SKUS = (
     "C9300L-24T-4G-E",
     "C9300L-24P-4X-E",
     "C9300X-24Y-A",
 )
+_VERIFIED_PIDS = _HARDWARE_PIDS + _ORDERING_SKUS
 _FORWARD_LICENSES = ("Network Essentials", "Network Advantage")
 _DHCP_LICENSES = ("Network Advantage",)
 
@@ -59,12 +67,17 @@ _DHCP_GUIDE = (
     "b_1712_ip_9300_cg/configuring_dhcp.html"
 )
 _CR_IP_ROUTE = (
-    "https://www.cisco.com/c/en/us/td/docs/ios/iproute_pi/command/reference/"
-    "iri_book/iri_pi1.html#wp1037816"
+    "https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/iproute_pi/"
+    "command/iri-cr-book/iri-cr-a1.html"
 )
 _CR_IP_ROUTING = (
     "https://www.cisco.com/c/en/us/td/docs/ios/iproute_pi/command/reference/"
     "iri_book/iri_pi1.html#wp1029588"
+)
+_SYS_MGMT_GUIDE = (
+    "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
+    "software/release/17-12/configuration_guide/sys_mgmt/"
+    "b_1712_sys_mgmt_9300_cg/performing_device_setup_configuration.html"
 )
 _CR_IP_ADDRESS = (
     "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
@@ -115,6 +128,8 @@ class EvidenceClassification:
     license_evidence: EvidenceStatus
     license_source_url: str | None
     license_source_section: str | None
+    hardware_pids: tuple[str, ...]
+    ordering_skus: tuple[str, ...]
     verified_pids: tuple[str, ...]
     renderer_safety_restriction: tuple[str, ...]
     blocking_evidence_gaps: tuple[str, ...]
@@ -127,6 +142,8 @@ class EvidenceClassification:
             "license_evidence": self.license_evidence.value,
             "license_source_url": self.license_source_url,
             "license_source_section": self.license_source_section,
+            "hardware_pids": list(self.hardware_pids),
+            "ordering_skus": list(self.ordering_skus),
             "verified_pids": list(self.verified_pids),
             "renderer_safety_restriction": list(self.renderer_safety_restriction),
             "blocking_evidence_gaps": list(self.blocking_evidence_gaps),
@@ -315,8 +332,19 @@ class CommandEvidenceRegistry:
                     )
 
     @property
-    def renderable_count(self) -> int:
+    def review_valid_count(self) -> int:
         return sum(1 for row in self.rows if row.renderable)
+
+    @property
+    def eligible_count(self) -> int:
+        return sum(
+            1 for row in self.rows
+            if row.renderable and not row.scope_blockers()
+        )
+
+    @property
+    def renderable_count(self) -> int:
+        return self.eligible_count if self.production else 0
 
     def get(self, evidence_id: str) -> CommandEvidenceRow | None:
         return next(
@@ -488,21 +516,22 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         classification=EvidenceClassification(
             platform_documented=True,
             generic_command_reference=True,
-            license_evidence=EvidenceStatus.PARTIAL,
+            license_evidence=EvidenceStatus.VERIFIED,
             license_source_url=_ROUTING_GUIDE,
             license_source_section="Information About IP Routing",
+            hardware_pids=_HARDWARE_PIDS,
+            ordering_skus=_ORDERING_SKUS,
             verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "planned-cisco-core-only",
                 "at-least-one-svi-required",
             ),
             blocking_evidence_gaps=(
-                "explicit-command-license",
                 "per-pid-release-support",
-                "pid-license-suffix-mapping",
             ),
             excluded_scope_notes=(
                 "no-no-form-renderer-excluded",
+                "actual-active-license-not-hardware-verified",
             ),
         ),
         exclusions=("No no ip routing form in the first batch.",),
@@ -525,12 +554,20 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         ("One SVI per VLAN per assignment.",),
         _ROUTING_GUIDE,
         "Configuration Guidelines for IP Routing",
+        supplemental_sources=(
+            SourceRef(
+                _SYS_MGMT_GUIDE,
+                "Manually Assigning IP Information to Multiple SVIs",
+            ),
+        ),
         classification=EvidenceClassification(
             platform_documented=True,
             generic_command_reference=False,
-            license_evidence=EvidenceStatus.PARTIAL,
+            license_evidence=EvidenceStatus.VERIFIED,
             license_source_url=_ROUTING_GUIDE,
             license_source_section="Information About IP Routing",
+            hardware_pids=_HARDWARE_PIDS,
+            ordering_skus=_ORDERING_SKUS,
             verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "vlan-1-1002-1005-blocked",
@@ -539,14 +576,13 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "planned-carrier-required",
             ),
             blocking_evidence_gaps=(
-                "vlan-id-platform-range",
-                "interface-name-case-sensitivity",
                 "per-pid-release-support",
-                "pid-license-suffix-mapping",
             ),
             excluded_scope_notes=(
                 "vlan-1-1002-1005-renderer-excluded",
                 "exact-vlan-name-renderer-canonical",
+                "interface-name-case-insensitivity-not-expanded",
+                "actual-active-license-not-hardware-verified",
             ),
         ),
         exclusions=_SVI_NAME_EXCLUSION,
@@ -576,10 +612,12 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         command_reference_section="ip address",
         classification=EvidenceClassification(
             platform_documented=True,
-            generic_command_reference=True,
-            license_evidence=EvidenceStatus.PARTIAL,
+            generic_command_reference=False,
+            license_evidence=EvidenceStatus.VERIFIED,
             license_source_url=_ROUTING_GUIDE,
             license_source_section="Information About IP Routing",
+            hardware_pids=_HARDWARE_PIDS,
+            ordering_skus=_ORDERING_SKUS,
             verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "prefix-1-30-only",
@@ -587,13 +625,12 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "gateway-subnet-match",
             ),
             blocking_evidence_gaps=(
-                "subnet-mask-platform-boundary",
                 "per-pid-release-support",
-                "pid-license-suffix-mapping",
             ),
             excluded_scope_notes=(
                 "slash31-slash32-renderer-excluded",
                 "secondary-address-renderer-excluded",
+                "actual-active-license-not-hardware-verified",
             ),
         ),
         exclusions=("No secondary address, DHCP address or unnumbered form.",),
@@ -623,7 +660,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         command_reference_url=_CR_IP_ROUTE,
         command_reference_section="ip route",
         command_reference_scope=(
-            "Cisco IOS IP Routing: Protocol-Independent Command Reference; "
+            "Cisco IOS XE Protocol-Independent Command Reference; "
             "Catalyst 9300 17.12 platform applicability from the platform guide."
         ),
         semantic_source_url=_ADMIN_DISTANCE,
@@ -631,9 +668,11 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         classification=EvidenceClassification(
             platform_documented=True,
             generic_command_reference=True,
-            license_evidence=EvidenceStatus.PARTIAL,
+            license_evidence=EvidenceStatus.VERIFIED,
             license_source_url=_ROUTING_GUIDE,
             license_source_section="Information About IP Routing",
+            hardware_pids=_HARDWARE_PIDS,
+            ordering_skus=_ORDERING_SKUS,
             verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "ipv4-next-hop-only",
@@ -642,14 +681,13 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "eligible-svi-dependency",
             ),
             blocking_evidence_gaps=(
-                "distance-1-255-command-reference",
                 "per-pid-release-support",
-                "pid-license-suffix-mapping",
             ),
             excluded_scope_notes=(
                 "generic-ios-command-reference-used",
                 "interface-only-next-hop-renderer-excluded",
                 "distance-255-renderer-blocked",
+                "actual-active-license-not-hardware-verified",
             ),
         ),
         exclusions=_ROUTE_EXCLUSION,
@@ -678,7 +716,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         command_reference_url=_CR_IP_ROUTE,
         command_reference_section="ip route",
         command_reference_scope=(
-            "Cisco IOS IP Routing: Protocol-Independent Command Reference; "
+            "Cisco IOS XE Protocol-Independent Command Reference; "
             "Catalyst 9300 17.12 platform applicability from the static route "
             "section and the default-route information section."
         ),
@@ -691,9 +729,11 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         classification=EvidenceClassification(
             platform_documented=True,
             generic_command_reference=True,
-            license_evidence=EvidenceStatus.PARTIAL,
+            license_evidence=EvidenceStatus.VERIFIED,
             license_source_url=_ROUTING_GUIDE,
             license_source_section="Information About IP Routing",
+            hardware_pids=_HARDWARE_PIDS,
+            ordering_skus=_ORDERING_SKUS,
             verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "only-planned-transit-default",
@@ -703,14 +743,13 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "eligible-svi-dependency",
             ),
             blocking_evidence_gaps=(
-                "distance-1-255-command-reference",
                 "per-pid-release-support",
-                "pid-license-suffix-mapping",
             ),
             excluded_scope_notes=(
                 "ip-default-network-renderer-excluded",
                 "interface-only-next-hop-renderer-excluded",
                 "trustsec-page-confirms-0-0-0-0-route-existence-only",
+                "actual-active-license-not-hardware-verified",
             ),
         ),
         exclusions=_DEFAULT_ROUTE_EXCLUSION,
@@ -736,6 +775,8 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             license_evidence=EvidenceStatus.UNRESOLVED,
             license_source_url=None,
             license_source_section=None,
+            hardware_pids=_HARDWARE_PIDS,
+            ordering_skus=_ORDERING_SKUS,
             verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "one-candidate-per-server",
@@ -746,10 +787,10 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             blocking_evidence_gaps=(
                 "dhcp-relay-license",
                 "per-pid-release-support",
-                "pid-license-suffix-mapping",
             ),
             excluded_scope_notes=(
                 "helper-address-command-reference-not-in-9300-cr",
+                "actual-active-license-not-hardware-verified",
             ),
         ),
         exclusions=_DHCP_EXCLUSION,
