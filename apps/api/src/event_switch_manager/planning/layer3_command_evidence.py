@@ -15,7 +15,9 @@ evidence.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 from hashlib import sha256
 from typing import Literal
@@ -116,6 +118,27 @@ class EvidenceReview:
     findings: tuple[str, ...]
     content_digest: str
 
+    @property
+    def well_formed(self) -> bool:
+        if not isinstance(self.reviewer, str) or not self.reviewer.strip():
+            return False
+        if (
+            not isinstance(self.content_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", self.content_digest)
+        ):
+            return False
+        if not isinstance(self.reviewed_at, str):
+            return False
+        try:
+            date.fromisoformat(self.reviewed_at)
+        except ValueError:
+            return False
+        if not isinstance(self.findings, tuple):
+            return False
+        return bool(self.findings) and all(
+            isinstance(item, str) and item.strip() for item in self.findings
+        )
+
 
 PENDING_REVIEW = EvidenceReview(
     EvidenceReviewState.PENDING, "", "", (), "",
@@ -192,6 +215,7 @@ class CommandEvidenceRow:
     def renderable(self) -> bool:
         return (
             self.review.state is EvidenceReviewState.REVIEWED
+            and self.review.well_formed
             and self.review.content_digest == self.content_digest()
         )
 
@@ -200,11 +224,21 @@ class CommandEvidenceRow:
 class CommandEvidenceRegistry:
     rows: tuple[CommandEvidenceRow, ...]
     registry_id: str = REGISTRY_ID
+    production: bool = True
 
     def __post_init__(self) -> None:
         ids = [row.evidence_id for row in self.rows]
         if len(ids) != len(set(ids)):
             raise ValueError("Duplicate command evidence ID")
+        if self.production:
+            for row in self.rows:
+                if (
+                    row.review.state is EvidenceReviewState.REVIEWED
+                    and row.review.reviewer.strip().casefold().startswith("test-only")
+                ):
+                    raise ValueError(
+                        "A test-only reviewer cannot authorize production evidence",
+                    )
 
     @property
     def renderable_count(self) -> int:
@@ -247,6 +281,9 @@ class CommandEvidenceRegistry:
                 "content_digest": row.content_digest(),
                 "review_state": row.review.state.value,
                 "review_digest": row.review.content_digest,
+                "reviewer": row.review.reviewer,
+                "reviewed_at": row.review.reviewed_at,
+                "findings": list(row.review.findings),
             }
             for row in self.rows
         ]
@@ -259,15 +296,21 @@ class CommandEvidenceRegistry:
 def _review_record(
     record: dict[str, object], state: EvidenceReviewState,
 ) -> EvidenceReview:
-    findings = record.get("findings")
-    if not isinstance(findings, (list, tuple)):
-        raise TypeError("Evidence review findings must be a sequence")
+    reviewer = record.get("reviewer")
+    reviewed_at = record.get("reviewed_at")
+    digest = record.get("content_digest")
+    findings_value = record.get("findings")
+    findings: tuple[str, ...] = ()
+    if isinstance(findings_value, (list, tuple)) and all(
+        isinstance(item, str) and item.strip() for item in findings_value
+    ):
+        findings = tuple(str(item) for item in findings_value)
     return EvidenceReview(
         state=state,
-        reviewer=str(record.get("reviewer", "")),
-        reviewed_at=str(record.get("reviewed_at", "")),
-        findings=tuple(str(item) for item in findings),
-        content_digest=str(record.get("content_digest", "")),
+        reviewer=reviewer if isinstance(reviewer, str) else "",
+        reviewed_at=reviewed_at if isinstance(reviewed_at, str) else "",
+        findings=findings,
+        content_digest=digest if isinstance(digest, str) else "",
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
@@ -28,7 +29,9 @@ from event_switch_manager.planning.layer3_cli_candidates import (
     render_fingerprint,
 )
 from event_switch_manager.planning.layer3_command_evidence import (
+    PENDING_REVIEW,
     CommandEvidenceRegistry,
+    L3CommandTopic,
 )
 from event_switch_manager.planning.layer3_intent import build_layer3_intent
 from event_switch_manager.planning.plan import PlanRevision
@@ -50,6 +53,7 @@ def _build(
     intent = build_layer3_intent(revision, baseline)
     document = build_l3_cli_candidates(
         revision, intent, _core_assignment(intent), registry,
+        baseline=baseline, test_only_registry=True,
     )
     return revision, intent, document
 
@@ -64,7 +68,18 @@ def test_positive_six_categories_with_test_only_registry() -> None:
             "00000000-0000-0000-0000-000000000099", static_route_count=1,
         ),
     )
+    core = next(
+        device for device in intent.devices if device.identity.hostname == "L3-Core"
+    )
+    svis = {item.name: item for item in core.interfaces if item.kind == "svi"}
+    assert svis["Vlan9"].role.value == "transit"
+    assert svis["Vlan10"].role.value == "gateway"
+    assert svis["Vlan20"].role.value == "gateway"
+    assert svis["Vlan10"].gateway_address is not None
+    assert svis["Vlan10"].subnet_id is not None
     assert document.render_state.value == "review-candidates"
+    assert document.source.command_evidence_registry_id == TEST_REGISTRY.registry_id
+    assert TEST_REGISTRY.production is False
     assert document.summary.total == 10
     assert document.summary.candidates == 10
     assert document.summary.blocked == 0
@@ -323,6 +338,79 @@ def test_svi_prefix_and_vlan_reserved_limits_block_text() -> None:
     assert all(item.candidate_text is None for item in vlan_doc.candidates)
 
 
+def test_svi_role_other_is_blocked() -> None:
+    payload = make_l3_plan("00000000-0000-0000-0000-000000000099")
+    core_id = next(
+        assignment["id"] for assignment in payload["assignments"]
+        if assignment["hostname"] == "L3-Core"
+    )
+    for port in payload["physical_interfaces"]:
+        if port["assignment_id"] == core_id and port["name"] == "Gi1/0/2":
+            port["settings"]["allowed_vlans"] = [9, 10, 20, 30]
+    payload["vlans"].append({"id": 30, "name": "Other"})
+    payload["logical_interfaces"].append({
+        "id": "00000000-0000-0000-0000-0000000000aa",
+        "assignment_id": core_id,
+        "name": "Vlan30",
+        "kind": "svi",
+        "vlan": 30,
+        "address": "192.168.30.1/24",
+    })
+    _, _, document = _build(payload)
+    other = [
+        item for item in _by_category(document, CandidateCategory.SVI_INTERFACE)
+        if item.target.name == "Vlan30"
+    ]
+    assert other
+    assert other[0].status is CandidateStatus.BLOCKED
+    assert "svi-role-other" in other[0].blocking_reasons
+    assert other[0].candidate_text is None
+
+
+def test_dhcp_helper_requires_eligible_svi() -> None:
+    payload = make_l3_plan("00000000-0000-0000-0000-000000000099")
+    subnet = next(
+        item for item in payload["subnets"]
+        if item["network"] == "192.168.20.0/24"
+    )
+    subnet["network"] = "192.168.20.0/31"
+    svi = next(
+        item for item in payload["logical_interfaces"]
+        if item["kind"] == "svi" and item["vlan"] == 20
+    )
+    svi["address"] = "192.168.20.1/31"
+    _, _, document = _build(payload)
+    helper = _by_category(document, CandidateCategory.DHCP_HELPER_ADDRESS)[0]
+    assert helper.status is CandidateStatus.BLOCKED
+    assert helper.candidate_text is None
+    assert "svi-prefix-not-first-batch" in helper.blocking_reasons
+    svi_address = [
+        item for item in _by_category(document, CandidateCategory.SVI_ADDRESS)
+        if item.target.name == "Vlan20"
+    ][0]
+    assert svi_address.status is CandidateStatus.BLOCKED
+
+
+def test_dhcp_helper_requires_svi_evidence_too() -> None:
+    base = _test_only_evidence_registry()
+    rows = tuple(
+        replace(row, review=PENDING_REVIEW)
+        if row.topic is L3CommandTopic.SVI_ADDRESS
+        else row
+        for row in base.rows
+    )
+    registry = CommandEvidenceRegistry(
+        rows, registry_id="test-only-svi-address-pending", production=False,
+    )
+    _, _, document = _build(
+        make_l3_plan("00000000-0000-0000-0000-000000000099"),
+        registry=registry,
+    )
+    helper = _by_category(document, CandidateCategory.DHCP_HELPER_ADDRESS)[0]
+    assert helper.status is CandidateStatus.BLOCKED
+    assert "syntax-evidence-pending" in helper.blocking_reasons
+
+
 def test_extra_default_route_is_blocked() -> None:
     payload = make_l3_plan("00000000-0000-0000-0000-000000000099")
     core_id = next(
@@ -365,25 +453,16 @@ def test_routed_port_transition_produces_no_text() -> None:
 
 
 def test_no_svi_blocks_ip_routing() -> None:
-    revision = revision_for(make_l3_plan("00000000-0000-0000-0000-000000000099"))
-    intent = build_layer3_intent(revision)
-    core = next(
-        device for device in intent.devices if device.identity.hostname == "L3-Core"
-    )
-    no_svi = intent.model_copy(update={
-        "devices": tuple(
-            device.model_copy(update={"interfaces": ()})
-            if device.identity.assignment_id == core.identity.assignment_id
-            else device
-            for device in intent.devices
-        ),
-    })
-    no_svi = no_svi.model_copy(update={
-        "intent_fingerprint": intent_fingerprint(no_svi),
-    })
-    document = build_l3_cli_candidates(
-        revision, no_svi, core.identity.assignment_id, TEST_REGISTRY,
-    )
+    payload = make_l3_plan("00000000-0000-0000-0000-000000000099")
+    payload["logical_interfaces"] = []
+    payload["subnets"] = []
+    payload["gateways"] = []
+    payload["dhcp_pools"] = []
+    payload["dhcp_relays"] = []
+    payload["transit"] = None
+    payload["default_routes"] = []
+    payload["static_routes"] = []
+    _, _, document = _build(payload)
     ip_routing = _by_category(document, CandidateCategory.IP_ROUTING)[0]
     assert ip_routing.status is CandidateStatus.BLOCKED
     assert "no-svi-for-ip-routing" in ip_routing.blocking_reasons
@@ -396,25 +475,94 @@ def test_binding_and_target_errors() -> None:
     with pytest.raises(RenderBindingError, match="revision-canonical-hash-mismatch"):
         build_l3_cli_candidates(
             revision.model_copy(update={"content_hash": "0" * 64}),
-            intent, core, TEST_REGISTRY,
+            intent, core, TEST_REGISTRY, test_only_registry=True,
         )
-    with pytest.raises(RenderBindingError, match="intent-fingerprint-mismatch"):
+    with pytest.raises(
+        RenderBindingError,
+        match="intent-not-derived-from-trusted-revision",
+    ):
         build_l3_cli_candidates(
             revision,
             intent.model_copy(update={"intent_fingerprint": "0" * 64}),
-            core, TEST_REGISTRY,
+            core, TEST_REGISTRY, test_only_registry=True,
+        )
+    forged = intent.model_copy(update={
+        "devices": tuple(
+            device.model_copy(update={
+                "routes": tuple(
+                    route.model_copy(update={"distance": 254})
+                    if route.kind == "default" else route
+                    for route in device.routes
+                ),
+            })
+            if device.identity.assignment_id == core
+            else device
+            for device in intent.devices
+        ),
+    })
+    forged = forged.model_copy(update={
+        "intent_fingerprint": intent_fingerprint(forged),
+    })
+    with pytest.raises(
+        RenderBindingError,
+        match="intent-not-derived-from-trusted-revision",
+    ):
+        build_l3_cli_candidates(
+            revision, forged, core, TEST_REGISTRY, test_only_registry=True,
         )
     with pytest.raises(RenderTargetNotFound):
         build_l3_cli_candidates(
             revision, intent, UUID(int=0), TEST_REGISTRY,
+            test_only_registry=True,
+        )
+
+
+def test_baseline_must_be_supplied_and_match() -> None:
+    baseline_payload = make_l3_plan("00000000-0000-0000-0000-000000000099")
+    baseline = revision_for(baseline_payload)
+    current_payload = make_l3_plan(
+        "00000000-0000-0000-0000-000000000099", static_route_count=1,
+    )
+    revision = revision_for(current_payload)
+    intent = build_layer3_intent(revision, baseline)
+    core = _core_assignment(intent)
+    with pytest.raises(
+        RenderBindingError,
+        match="intent-not-derived-from-trusted-revision",
+    ):
+        build_l3_cli_candidates(
+            revision, intent, core, TEST_REGISTRY, test_only_registry=True,
+        )
+    tampered = baseline.model_copy(update={"content_hash": "0" * 64})
+    with pytest.raises(RenderBindingError, match="baseline-canonical-hash-mismatch"):
+        build_l3_cli_candidates(
+            revision, intent, core, TEST_REGISTRY,
+            baseline=tampered, test_only_registry=True,
+        )
+
+
+def test_test_only_registry_requires_explicit_test_flag() -> None:
+    revision = revision_for(make_l3_plan("00000000-0000-0000-0000-000000000099"))
+    intent = build_layer3_intent(revision)
+    with pytest.raises(
+        RenderBindingError, match="non-production-registry-not-allowed",
+    ):
+        build_l3_cli_candidates(
+            revision, intent, _core_assignment(intent), TEST_REGISTRY,
         )
 
 
 def test_document_and_candidate_fingerprints_are_deterministic() -> None:
     revision = revision_for(make_l3_plan("00000000-0000-0000-0000-000000000099"))
     intent = build_layer3_intent(revision)
-    first = build_l3_cli_candidates(revision, intent, _core_assignment(intent), TEST_REGISTRY)
-    second = build_l3_cli_candidates(revision, intent, _core_assignment(intent), TEST_REGISTRY)
+    first = build_l3_cli_candidates(
+        revision, intent, _core_assignment(intent), TEST_REGISTRY,
+        test_only_registry=True,
+    )
+    second = build_l3_cli_candidates(
+        revision, intent, _core_assignment(intent), TEST_REGISTRY,
+        test_only_registry=True,
+    )
     assert first.l3_render_fingerprint == second.l3_render_fingerprint
     assert first.model_dump() == second.model_dump()
     candidate = first.candidates[0]

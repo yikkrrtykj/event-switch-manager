@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
 from layer3_helpers import TEST_REVIEWER
 from layer3_helpers import test_only_evidence_registry as _test_only_evidence_registry
 
@@ -127,8 +128,101 @@ def test_rejected_or_digest_mismatched_review_is_not_renderable() -> None:
         ),
     )
     assert mismatched.renderable is False
-    registry = CommandEvidenceRegistry((rejected, mismatched))
+    registry = CommandEvidenceRegistry((rejected, mismatched), production=False)
     assert registry.renderable_count == 0
+
+
+def test_review_metadata_must_be_complete_and_valid() -> None:
+    row = ROWS[0]
+    valid = EvidenceReview(
+        state=EvidenceReviewState.REVIEWED,
+        reviewer="independent-reviewer",
+        reviewed_at="2026-11-21",
+        findings=("verified command syntax and platform applicability",),
+        content_digest=row.content_digest(),
+    )
+    assert replace(row, review=valid).renderable is True
+
+    for invalid in (
+        EvidenceReview(
+            state=EvidenceReviewState.REVIEWED,
+            reviewer="",
+            reviewed_at="2026-11-21",
+            findings=("finding",),
+            content_digest=row.content_digest(),
+        ),
+        EvidenceReview(
+            state=EvidenceReviewState.REVIEWED,
+            reviewer="independent-reviewer",
+            reviewed_at="2026-11-21",
+            findings=(),
+            content_digest=row.content_digest(),
+        ),
+        EvidenceReview(
+            state=EvidenceReviewState.REVIEWED,
+            reviewer="independent-reviewer",
+            reviewed_at="not-a-date",
+            findings=("finding",),
+            content_digest=row.content_digest(),
+        ),
+        EvidenceReview(
+            state=EvidenceReviewState.REVIEWED,
+            reviewer="independent-reviewer",
+            reviewed_at="2026-11-21",
+            findings=("finding",),
+            content_digest="not-a-sha256",
+        ),
+        EvidenceReview(
+            state=EvidenceReviewState.REVIEWED,
+            reviewer="independent-reviewer",
+            reviewed_at="2026-11-21",
+            findings=("finding",),
+            content_digest="0" * 64,
+        ),
+    ):
+        assert replace(row, review=invalid).renderable is False
+
+
+def test_production_registry_rejects_test_only_reviewer() -> None:
+    row = ROWS[0]
+    reviewed = replace(row, review=EvidenceReview(
+        state=EvidenceReviewState.REVIEWED,
+        reviewer="TEST-ONLY-NOT-A-PRODUCTION-EVIDENCE-REVIEW",
+        reviewed_at="2026-11-21",
+        findings=("test-only",),
+        content_digest=row.content_digest(),
+    ))
+    with pytest.raises(ValueError, match="test-only reviewer"):
+        CommandEvidenceRegistry((reviewed,), production=True)
+
+
+def test_registry_fingerprint_reflects_review_identity_and_findings() -> None:
+    row = ROWS[0]
+    first = replace(row, review=EvidenceReview(
+        state=EvidenceReviewState.REVIEWED,
+        reviewer="reviewer-a",
+        reviewed_at="2026-11-21",
+        findings=("finding-a",),
+        content_digest=row.content_digest(),
+    ))
+    second = replace(row, review=EvidenceReview(
+        state=EvidenceReviewState.REVIEWED,
+        reviewer="reviewer-b",
+        reviewed_at="2026-11-21",
+        findings=("finding-b",),
+        content_digest=row.content_digest(),
+    ))
+    registry_a = CommandEvidenceRegistry((first,), production=False)
+    registry_b = CommandEvidenceRegistry((second,), production=False)
+    assert registry_a.fingerprint != registry_b.fingerprint
+
+
+def test_test_registry_has_separate_identity_and_is_not_production() -> None:
+    registry = _test_only_evidence_registry()
+    assert DEFAULT_REGISTRY.production is True
+    assert registry.production is False
+    assert registry.registry_id == "cis-03-test-only-command-evidence-v1"
+    assert registry.registry_id != DEFAULT_REGISTRY.registry_id
 
 
 def test_registry_matching_scope_including_license_and_release() -> None:

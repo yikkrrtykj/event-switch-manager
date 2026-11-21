@@ -1,4 +1,4 @@
-﻿"""Shared builders for CIS-03-02A L3 intent tests."""
+"""Shared builders for CIS-03-02A L3 intent tests."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from event_switch_manager.planning.plan import (
 )
 
 TEST_REVIEWER = "TEST-ONLY-NOT-A-PRODUCTION-EVIDENCE-REVIEW"
+TEST_REGISTRY_ID = "cis-03-test-only-command-evidence-v1"
 
 
 def test_only_evidence_registry() -> CommandEvidenceRegistry:
@@ -35,7 +36,9 @@ def test_only_evidence_registry() -> CommandEvidenceRegistry:
         ))
         for row in ROWS
     )
-    return CommandEvidenceRegistry(rows)
+    return CommandEvidenceRegistry(
+        rows, registry_id=TEST_REGISTRY_ID, production=False,
+    )
 
 
 def make_l3_plan(

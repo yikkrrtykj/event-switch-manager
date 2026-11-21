@@ -43,8 +43,10 @@ from .layer3_command_evidence import (
 from .layer3_intent import (
     L3DeviceIntent,
     L3InterfaceIntent,
+    L3InterfaceRole,
     L3RouteIntent,
     Layer3Intent,
+    build_layer3_intent,
 )
 from .plan import PlanRevision, canonical_plan, plan_hash
 from .types import Record
@@ -456,10 +458,23 @@ def _candidate(
     })
 
 
-def _svi_blockers(interface: L3InterfaceIntent) -> tuple[str, ...]:
+def _svi_blockers(
+    interface: L3InterfaceIntent, device: L3DeviceIntent,
+) -> tuple[str, ...]:
     blockers: list[str] = []
     if interface.kind != "svi":
         blockers.append("svi-kind-unsupported")
+    if interface.role is L3InterfaceRole.OTHER:
+        blockers.append("svi-role-other")
+    elif interface.role is L3InterfaceRole.GATEWAY:
+        if interface.gateway_address is None or interface.subnet_id is None:
+            blockers.append("svi-gateway-binding-missing")
+    elif interface.role is L3InterfaceRole.TRANSIT:
+        if (
+            device.transit is None
+            or interface.interface_id != device.transit.core_svi_id
+        ):
+            blockers.append("svi-transit-binding-missing")
     if interface.vlan is None:
         blockers.append("svi-vlan-missing")
     else:
@@ -567,7 +582,7 @@ def _svi_candidates(
     for interface in device.interfaces:
         if interface.kind != "svi":
             continue
-        blockers = _svi_blockers(interface)
+        blockers = _svi_blockers(interface, device)
         row, evidence_blockers, syntax = _evidence(
             registry, device, L3CommandTopic.SVI_INTERFACE,
         )
@@ -708,14 +723,31 @@ def _dhcp_candidates(
     svis = {
         item.interface_id: item for item in device.interfaces if item.kind == "svi"
     }
+    _, svi_interface_evidence, _ = _evidence(
+        registry, device, L3CommandTopic.SVI_INTERFACE,
+    )
+    _, svi_address_evidence, _ = _evidence(
+        registry, device, L3CommandTopic.SVI_ADDRESS,
+    )
+    svi_capability_blockers = _capability_blockers(device, L3Capability.SVI)
     for relay in device.dhcp_relays:
         svi = svis.get(relay.svi_id)
-        semantic: list[str] = []
+        semantic: list[str] = [
+            *svi_interface_evidence,
+            *svi_address_evidence,
+            *svi_capability_blockers,
+        ]
         if not relay.allowed:
             semantic.append("dhcp-relay-not-allowed")
         semantic.extend(relay.blockers)
         if svi is None:
             semantic.append("dhcp-relay-svi-missing")
+        else:
+            semantic.extend(_svi_blockers(svi, device))
+            if svi.subnet_id != relay.subnet_id:
+                semantic.append("dhcp-relay-svi-subnet-mismatch")
+            if svi.vlan != relay.vlan:
+                semantic.append("dhcp-relay-svi-vlan-mismatch")
         for server in relay.servers:
             row, evidence_blockers, syntax = _evidence(
                 registry, device, L3CommandTopic.DHCP_HELPER_ADDRESS,
@@ -762,17 +794,35 @@ def _dhcp_candidates(
     return tuple(values)
 
 
-def _verify_binding(revision: PlanRevision, intent: Layer3Intent) -> None:
+def _verify_binding(
+    revision: PlanRevision,
+    intent: Layer3Intent,
+    baseline: PlanRevision | None,
+) -> Layer3Intent:
     if plan_hash(canonical_plan(revision.plan)) != revision.content_hash:
         raise RenderBindingError("revision-canonical-hash-mismatch")
+    if baseline is not None:
+        if plan_hash(canonical_plan(baseline.plan)) != baseline.content_hash:
+            raise RenderBindingError("baseline-canonical-hash-mismatch")
+        if baseline.plan.event_id != revision.plan.event_id:
+            raise RenderBindingError("baseline-event-mismatch")
     if (
         intent.revision_id != revision.id
         or intent.revision_hash != revision.content_hash
         or intent.event_id != revision.plan.event_id
     ):
         raise RenderBindingError("intent-revision-mismatch")
-    if intent_fingerprint(intent) != intent.intent_fingerprint:
-        raise RenderBindingError("intent-fingerprint-mismatch")
+    trusted = build_layer3_intent(revision, baseline)
+    if trusted.intent_fingerprint != intent.intent_fingerprint:
+        raise RenderBindingError("intent-not-derived-from-trusted-revision")
+    if (
+        intent.baseline.revision_id
+        != (baseline.id if baseline is not None else None)
+        or intent.baseline.revision_hash
+        != (baseline.content_hash if baseline is not None else None)
+    ):
+        raise RenderBindingError("intent-baseline-mismatch")
+    return trusted
 
 
 def build_l3_cli_candidates(
@@ -780,9 +830,14 @@ def build_l3_cli_candidates(
     intent: Layer3Intent,
     assignment_id: UUID,
     registry: CommandEvidenceRegistry = DEFAULT_REGISTRY,
+    *,
+    baseline: PlanRevision | None = None,
+    test_only_registry: bool = False,
 ) -> L3CandidateDocument:
     """Build one deterministic, read-only candidate document."""
-    _verify_binding(revision, intent)
+    if not registry.production and not test_only_registry:
+        raise RenderBindingError("non-production-registry-not-allowed")
+    intent = _verify_binding(revision, intent, baseline)
     device = _device(intent, assignment_id)
     device_ref = _device_ref(device)
     source = SourceBinding(
