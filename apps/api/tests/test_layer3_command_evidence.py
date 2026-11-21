@@ -46,7 +46,7 @@ def test_every_row_has_exact_scope_and_sources() -> None:
         assert row.source_section
         assert row.command and row.grammar
         assert row.content_digest()
-        assert row.evidence_version == 2
+        assert row.evidence_version == 3
         assert row.classification is not None
         if row.topic is L3CommandTopic.DHCP_HELPER_ADDRESS:
             assert row.licenses == ("Network Advantage",)
@@ -82,18 +82,19 @@ def test_classification_separates_platform_generic_license_and_renderer_rules() 
         assert classification.platform_documented is True
         assert classification.generic_command_reference is expected_generic[row.topic]
         assert classification.renderer_safety_restriction
-        assert classification.unverified_scope
-        assert "pid-license-suffix-mapping" in classification.unverified_scope
+        assert classification.blocking_evidence_gaps
+        assert classification.excluded_scope_notes
+        assert "pid-license-suffix-mapping" in classification.blocking_evidence_gaps
         if row.topic is L3CommandTopic.DHCP_HELPER_ADDRESS:
             assert classification.license_evidence is EvidenceStatus.UNRESOLVED
             assert classification.license_source_url is None
             assert classification.license_source_section is None
-            assert "dhcp-relay-license" in classification.unverified_scope
+            assert "dhcp-relay-license" in classification.blocking_evidence_gaps
         else:
             assert classification.license_evidence is EvidenceStatus.PARTIAL
             assert classification.license_source_url is not None
             assert classification.license_source_section == "Information About IP Routing"
-            assert "per-pid-release-support" in classification.unverified_scope
+            assert "per-pid-release-support" in classification.blocking_evidence_gaps
 
 
 def test_dhcp_license_remains_contract_consistent_but_unresolved() -> None:
@@ -101,7 +102,16 @@ def test_dhcp_license_remains_contract_consistent_but_unresolved() -> None:
     assert dhcp.licenses == ("Network Advantage",)
     assert dhcp.classification is not None
     assert dhcp.classification.license_evidence is EvidenceStatus.UNRESOLVED
-    assert "dhcp-relay-license" in dhcp.classification.unverified_scope
+    assert "dhcp-relay-license" in dhcp.classification.blocking_evidence_gaps
+
+
+def test_scope_blockers_are_independent_of_review_metadata() -> None:
+    dhcp = next(item for item in ROWS if item.topic is L3CommandTopic.DHCP_HELPER_ADDRESS)
+    blockers = dhcp.scope_blockers()
+    assert "evidence-license-unresolved" in blockers
+    assert "evidence-scope-gap-dhcp-relay-license" in blockers
+    missing = replace(dhcp, classification=None)
+    assert missing.scope_blockers() == ("evidence-classification-missing",)
 
 
 def test_default_route_excludes_ip_default_network() -> None:

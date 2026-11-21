@@ -26,7 +26,7 @@ from ..domain import DeviceFamily
 from .layer3_command_evidence_reviews import REJECTED_RECORDS, REVIEWED_RECORDS
 
 REGISTRY_ID: Literal["cis-03-l1-command-evidence-v1"] = "cis-03-l1-command-evidence-v1"
-EVIDENCE_SCHEMA_VERSION: Literal[2] = 2
+EVIDENCE_SCHEMA_VERSION: Literal[3] = 3
 
 _9300_PIDS = (
     "C9300-24T", "C9300-24P",
@@ -106,7 +106,8 @@ class EvidenceClassification:
     license_source_url: str | None
     license_source_section: str | None
     renderer_safety_restriction: tuple[str, ...]
-    unverified_scope: tuple[str, ...]
+    blocking_evidence_gaps: tuple[str, ...]
+    excluded_scope_notes: tuple[str, ...] = ()
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -116,7 +117,8 @@ class EvidenceClassification:
             "license_source_url": self.license_source_url,
             "license_source_section": self.license_source_section,
             "renderer_safety_restriction": list(self.renderer_safety_restriction),
-            "unverified_scope": list(self.unverified_scope),
+            "blocking_evidence_gaps": list(self.blocking_evidence_gaps),
+            "excluded_scope_notes": list(self.excluded_scope_notes),
         }
 
 
@@ -171,6 +173,10 @@ class EvidenceReview:
 PENDING_REVIEW = EvidenceReview(
     EvidenceReviewState.PENDING, "", "", (), "",
 )
+
+
+def _dedupe_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(values))
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +257,24 @@ class CommandEvidenceRow:
             and self.review.well_formed
             and self.review.content_digest == self.content_digest()
         )
+
+    def scope_blockers(self) -> tuple[str, ...]:
+        """Production eligibility gates separate from review/digest validity."""
+        classification = self.classification
+        if classification is None:
+            return ("evidence-classification-missing",)
+        blockers: list[str] = []
+        if not classification.platform_documented:
+            blockers.append("evidence-platform-not-documented")
+        if classification.license_evidence is not EvidenceStatus.VERIFIED:
+            blockers.append(
+                f"evidence-license-{classification.license_evidence.value}",
+            )
+        blockers.extend(
+            f"evidence-scope-gap-{gap}"
+            for gap in classification.blocking_evidence_gaps
+        )
+        return _dedupe_tuple(tuple(blockers))
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,10 +471,13 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "planned-cisco-core-only",
                 "at-least-one-svi-required",
             ),
-            unverified_scope=(
+            blocking_evidence_gaps=(
                 "explicit-command-license",
                 "per-pid-release-support",
                 "pid-license-suffix-mapping",
+            ),
+            excluded_scope_notes=(
+                "no-no-form-renderer-excluded",
             ),
         ),
         exclusions=("No no ip routing form in the first batch.",),
@@ -485,11 +512,15 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "one-svi-per-vlan",
                 "planned-carrier-required",
             ),
-            unverified_scope=(
+            blocking_evidence_gaps=(
                 "vlan-id-platform-range",
                 "interface-name-case-sensitivity",
                 "per-pid-release-support",
                 "pid-license-suffix-mapping",
+            ),
+            excluded_scope_notes=(
+                "vlan-1-1002-1005-renderer-excluded",
+                "exact-vlan-name-renderer-canonical",
             ),
         ),
         exclusions=_SVI_NAME_EXCLUSION,
@@ -528,11 +559,14 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "primary-address-only",
                 "gateway-subnet-match",
             ),
-            unverified_scope=(
+            blocking_evidence_gaps=(
                 "subnet-mask-platform-boundary",
-                "slash31-slash32-platform-support",
                 "per-pid-release-support",
                 "pid-license-suffix-mapping",
+            ),
+            excluded_scope_notes=(
+                "slash31-slash32-renderer-excluded",
+                "secondary-address-renderer-excluded",
             ),
         ),
         exclusions=("No secondary address, DHCP address or unnumbered form.",),
@@ -579,11 +613,15 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "distance-255-blocked",
                 "eligible-svi-dependency",
             ),
-            unverified_scope=(
+            blocking_evidence_gaps=(
                 "distance-1-255-command-reference",
-                "platform-specific-ip-route-reference",
                 "per-pid-release-support",
                 "pid-license-suffix-mapping",
+            ),
+            excluded_scope_notes=(
+                "generic-ios-command-reference-used",
+                "interface-only-next-hop-renderer-excluded",
+                "distance-255-renderer-blocked",
             ),
         ),
         exclusions=_ROUTE_EXCLUSION,
@@ -631,11 +669,15 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "ip-default-network-excluded",
                 "eligible-svi-dependency",
             ),
-            unverified_scope=(
+            blocking_evidence_gaps=(
                 "explicit-default-0.0.0.0-platform-example",
                 "distance-1-255-command-reference",
                 "per-pid-release-support",
                 "pid-license-suffix-mapping",
+            ),
+            excluded_scope_notes=(
+                "ip-default-network-renderer-excluded",
+                "interface-only-next-hop-renderer-excluded",
             ),
         ),
         exclusions=_DEFAULT_ROUTE_EXCLUSION,
@@ -667,11 +709,13 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "relay-allowed-required",
                 "no-cisco-dhcp-server",
             ),
-            unverified_scope=(
+            blocking_evidence_gaps=(
                 "dhcp-relay-license",
-                "helper-address-command-reference",
                 "per-pid-release-support",
                 "pid-license-suffix-mapping",
+            ),
+            excluded_scope_notes=(
+                "helper-address-command-reference-not-in-9300-cr",
             ),
         ),
         exclusions=_DHCP_EXCLUSION,

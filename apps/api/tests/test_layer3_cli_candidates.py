@@ -15,6 +15,9 @@ from layer3_helpers import (
     revision_for,
 )
 from layer3_helpers import (
+    synthetic_eligible_evidence_registry as _synthetic_eligible_evidence_registry,
+)
+from layer3_helpers import (
     test_only_evidence_registry as _test_only_evidence_registry,
 )
 
@@ -38,7 +41,8 @@ from event_switch_manager.planning.layer3_command_evidence import (
 from event_switch_manager.planning.layer3_intent import build_layer3_intent
 from event_switch_manager.planning.plan import PlanRevision
 
-TEST_REGISTRY = _test_only_evidence_registry()
+TEST_REGISTRY = _synthetic_eligible_evidence_registry()
+ACTUAL_TEST_REGISTRY = _test_only_evidence_registry()
 
 
 def _core_assignment(intent: Any) -> Any:
@@ -135,6 +139,70 @@ def test_production_registry_renders_no_text() -> None:
     assert all("syntax-evidence-pending" in item.blocking_reasons
                for item in document.candidates)
     assert all(item.status is CandidateStatus.BLOCKED for item in document.candidates)
+
+
+def test_actual_scope_gaps_block_even_with_test_review() -> None:
+    dhcp_row = next(
+        row for row in ACTUAL_TEST_REGISTRY.rows
+        if row.topic is L3CommandTopic.DHCP_HELPER_ADDRESS
+    )
+    assert dhcp_row.renderable is True
+    assert "evidence-license-unresolved" in dhcp_row.scope_blockers()
+    assert "evidence-scope-gap-dhcp-relay-license" in dhcp_row.scope_blockers()
+    _, _, document = _build(
+        make_l3_plan("00000000-0000-0000-0000-000000000099"),
+        registry=ACTUAL_TEST_REGISTRY,
+    )
+    helper = _by_category(document, CandidateCategory.DHCP_HELPER_ADDRESS)[0]
+    assert helper.status is CandidateStatus.BLOCKED
+    assert helper.candidate_text is None
+    assert "evidence-license-unresolved" in helper.blocking_reasons
+    assert "evidence-scope-gap-dhcp-relay-license" in helper.blocking_reasons
+
+
+def test_missing_classification_blocks_production_scope() -> None:
+    base = ACTUAL_TEST_REGISTRY.get("l3-9300-dhcp-helper-address-v1")
+    assert base is not None
+    changed = replace(base, classification=None)
+    changed = replace(changed, review=replace(
+        changed.review, content_digest=changed.content_digest(),
+    ))
+    rows = tuple(
+        changed if row.evidence_id == changed.evidence_id else row
+        for row in ACTUAL_TEST_REGISTRY.rows
+    )
+    registry = CommandEvidenceRegistry(
+        rows, registry_id="test-only-missing-classification", production=False,
+    )
+    _, _, document = _build(
+        make_l3_plan("00000000-0000-0000-0000-000000000099"),
+        registry=registry,
+    )
+    helper = _by_category(document, CandidateCategory.DHCP_HELPER_ADDRESS)[0]
+    assert helper.status is CandidateStatus.BLOCKED
+    assert "evidence-classification-missing" in helper.blocking_reasons
+
+
+def test_nonblocking_excluded_scope_notes_do_not_globally_block() -> None:
+    registry = _synthetic_eligible_evidence_registry()
+    assert all(
+        row.scope_blockers() == () for row in registry.rows
+    )
+    assert all(
+        row.classification is not None
+        and row.classification.excluded_scope_notes
+        for row in registry.rows
+    )
+    _, _, document = _build(
+        make_l3_plan("00000000-0000-0000-0000-000000000099"),
+        registry=registry,
+    )
+    helper = _by_category(document, CandidateCategory.DHCP_HELPER_ADDRESS)[0]
+    assert helper.status is CandidateStatus.CANDIDATE
+    assert not any(
+        reason.startswith("evidence-scope-gap-")
+        for reason in helper.blocking_reasons
+    )
 
 
 def test_missing_or_wrong_scope_evidence_blocks() -> None:

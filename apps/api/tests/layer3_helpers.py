@@ -12,6 +12,7 @@ from event_switch_manager.planning.layer3_command_evidence import (
     CommandEvidenceRegistry,
     EvidenceReview,
     EvidenceReviewState,
+    EvidenceStatus,
 )
 from event_switch_manager.planning.plan import (
     EventPlan,
@@ -22,10 +23,11 @@ from event_switch_manager.planning.plan import (
 
 TEST_REVIEWER = "TEST-ONLY-NOT-A-PRODUCTION-EVIDENCE-REVIEW"
 TEST_REGISTRY_ID = "cis-03-test-only-command-evidence-v1"
+TEST_SYNTHETIC_REGISTRY_ID = "cis-03-test-only-synthetic-eligible-v1"
 
 
 def test_only_evidence_registry() -> CommandEvidenceRegistry:
-    """Explicitly test-only reviewed rows; never used by production code."""
+    """Actual production rows with test-only reviews; scope gate still applies."""
     rows = tuple(
         replace(row, review=EvidenceReview(
             state=EvidenceReviewState.REVIEWED,
@@ -38,6 +40,38 @@ def test_only_evidence_registry() -> CommandEvidenceRegistry:
     )
     return CommandEvidenceRegistry(
         rows, registry_id=TEST_REGISTRY_ID, production=False,
+    )
+
+
+def synthetic_eligible_evidence_registry() -> CommandEvidenceRegistry:
+    """Complete synthetic test-only evidence for Renderer mechanics only.
+
+    This deliberately clears production blocking gaps in a distinct synthetic
+    fixture.  It must never be used by production code and does not authorize
+    the actual production rows.
+    """
+    rows = []
+    for row in ROWS:
+        if row.classification is None:
+            raise AssertionError("Production row has no classification")
+        classification = replace(
+            row.classification,
+            license_evidence=EvidenceStatus.VERIFIED,
+            license_source_url=row.source_url,
+            license_source_section=row.source_section,
+            blocking_evidence_gaps=(),
+            excluded_scope_notes=("synthetic-test-only-non-blocking-note",),
+        )
+        base = replace(row, classification=classification)
+        rows.append(replace(base, review=EvidenceReview(
+            state=EvidenceReviewState.REVIEWED,
+            reviewer=TEST_REVIEWER,
+            reviewed_at="2026-11-21",
+            findings=("synthetic test-only fixture; not production evidence",),
+            content_digest=base.content_digest(),
+        )))
+    return CommandEvidenceRegistry(
+        tuple(rows), registry_id=TEST_SYNTHETIC_REGISTRY_ID, production=False,
     )
 
 

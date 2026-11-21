@@ -375,6 +375,7 @@ def _evidence(
         blockers.append("syntax-evidence-rejected")
     elif row.review.content_digest != row.content_digest():
         blockers.append("syntax-evidence-digest-mismatch")
+    blockers.extend(row.scope_blockers())
     if not row.renderable:
         blockers.append("syntax-evidence-not-renderable")
     return row, _dedupe(tuple(blockers)), (ref,)
