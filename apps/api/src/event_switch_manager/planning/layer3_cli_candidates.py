@@ -504,8 +504,52 @@ def _svi_blockers(
     return _dedupe(tuple(blockers))
 
 
+def _route_dependency_blockers(
+    device: L3DeviceIntent,
+    route: L3RouteIntent,
+    registry: CommandEvidenceRegistry,
+) -> tuple[str, ...]:
+    matches = tuple(
+        item for item in device.interfaces
+        if item.kind == "svi"
+        and item.address is not None
+        and route.next_hop in item.address.network
+    )
+    if not matches:
+        return ("route-next-hop-not-on-link",)
+    if len(matches) != 1:
+        return ("route-next-hop-ambiguous",)
+    interface = matches[0]
+    blockers: list[str] = [
+        f"route-dependency-{reason}"
+        for reason in _svi_blockers(interface, device)
+    ]
+    blockers.extend(
+        f"route-dependency-svi-capability-{reason}"
+        for reason in _capability_blockers(device, L3Capability.SVI)
+    )
+    _, interface_evidence, _ = _evidence(
+        registry, device, L3CommandTopic.SVI_INTERFACE,
+    )
+    _, address_evidence, _ = _evidence(
+        registry, device, L3CommandTopic.SVI_ADDRESS,
+    )
+    blockers.extend(
+        f"route-dependency-svi-interface-{reason}"
+        for reason in interface_evidence
+    )
+    blockers.extend(
+        f"route-dependency-svi-address-{reason}"
+        for reason in address_evidence
+    )
+    return _dedupe(tuple(blockers))
+
+
 def _route_blockers(
-    device: L3DeviceIntent, route: L3RouteIntent, category: CandidateCategory,
+    device: L3DeviceIntent,
+    route: L3RouteIntent,
+    category: CandidateCategory,
+    registry: CommandEvidenceRegistry,
 ) -> tuple[str, ...]:
     blockers: list[str] = []
     if not 1 <= route.distance <= 255:
@@ -514,12 +558,7 @@ def _route_blockers(
         blockers.append("route-distance-255-not-installed")
     if route.owner_assignment_id != device.identity.assignment_id:
         blockers.append("route-owner-mismatch")
-    connected = tuple(
-        item.address.network for item in device.interfaces
-        if item.kind == "svi" and item.address is not None
-    )
-    if not any(route.next_hop in network for network in connected):
-        blockers.append("route-next-hop-not-on-link")
+    blockers.extend(_route_dependency_blockers(device, route, registry))
     if category is CandidateCategory.STATIC_ROUTE:
         if route.destination.prefixlen == 0:
             blockers.append("static-route-default-destination")
@@ -673,7 +712,7 @@ def _route_candidates(
             else L3Capability.STATIC_ROUTE
         )
         row, evidence_blockers, syntax = _evidence(registry, device, topic)
-        blockers = _route_blockers(device, route, category)
+        blockers = _route_blockers(device, route, category, registry)
         if is_default:
             text = f"ip route 0.0.0.0 0.0.0.0 {route.next_hop}"
         else:

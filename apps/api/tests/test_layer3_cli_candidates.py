@@ -11,12 +11,14 @@ import pytest
 from layer3_helpers import (
     make_l3_plan,
     make_stack_plan,
+    plan_model,
     revision_for,
 )
 from layer3_helpers import (
     test_only_evidence_registry as _test_only_evidence_registry,
 )
 
+from event_switch_manager.planning.checks import validate_plan
 from event_switch_manager.planning.layer3_cli_candidates import (
     CandidateCategory,
     CandidateStatus,
@@ -409,6 +411,154 @@ def test_dhcp_helper_requires_svi_evidence_too() -> None:
     helper = _by_category(document, CandidateCategory.DHCP_HELPER_ADDRESS)[0]
     assert helper.status is CandidateStatus.BLOCKED
     assert "syntax-evidence-pending" in helper.blocking_reasons
+
+
+def _planner_errors(payload: dict[str, Any]) -> list[str]:
+    return [
+        issue.code for issue in validate_plan(plan_model(payload))
+        if issue.severity == "ERROR"
+    ]
+
+
+def test_transit_slash31_blocks_default_route_dependency() -> None:
+    payload = make_l3_plan(
+        "00000000-0000-0000-0000-000000000099", transit_prefix=31,
+    )
+    assert _planner_errors(payload) == []
+    _, intent, document = _build(payload)
+    core = next(
+        device for device in intent.devices if device.identity.hostname == "L3-Core"
+    )
+    assert core.readiness.allowed is True
+    svi9 = [
+        item for item in _by_category(document, CandidateCategory.SVI_INTERFACE)
+        if item.target.name == "Vlan9"
+    ][0]
+    address9 = [
+        item for item in _by_category(document, CandidateCategory.SVI_ADDRESS)
+        if item.target.name == "Vlan9"
+    ][0]
+    assert svi9.status is CandidateStatus.BLOCKED
+    assert address9.status is CandidateStatus.BLOCKED
+    assert "svi-prefix-not-first-batch" in svi9.blocking_reasons
+    default = _by_category(document, CandidateCategory.DEFAULT_ROUTE)[0]
+    assert default.status is CandidateStatus.BLOCKED
+    assert default.candidate_text is None
+    assert "route-dependency-svi-prefix-not-first-batch" in default.blocking_reasons
+
+
+def test_static_route_via_blocked_transit_svi_is_blocked() -> None:
+    payload = make_l3_plan(
+        "00000000-0000-0000-0000-000000000099",
+        transit_prefix=31, static_route_count=1,
+    )
+    assert _planner_errors(payload) == []
+    _, _, document = _build(payload)
+    static = _by_category(document, CandidateCategory.STATIC_ROUTE)[0]
+    assert static.status is CandidateStatus.BLOCKED
+    assert static.candidate_text is None
+    assert "route-dependency-svi-prefix-not-first-batch" in static.blocking_reasons
+
+
+def test_route_dependency_requires_svi_evidence() -> None:
+    base = _test_only_evidence_registry()
+    rows = tuple(
+        replace(row, review=PENDING_REVIEW)
+        if row.topic in {L3CommandTopic.SVI_INTERFACE, L3CommandTopic.SVI_ADDRESS}
+        else row
+        for row in base.rows
+    )
+    registry = CommandEvidenceRegistry(
+        rows, registry_id="test-only-route-svi-evidence-pending", production=False,
+    )
+    _, _, document = _build(
+        make_l3_plan(
+            "00000000-0000-0000-0000-000000000099", static_route_count=1,
+        ),
+        registry=registry,
+    )
+    default = _by_category(document, CandidateCategory.DEFAULT_ROUTE)[0]
+    assert default.status is CandidateStatus.BLOCKED
+    assert default.candidate_text is None
+    assert "route-dependency-svi-interface-syntax-evidence-pending" in (
+        default.blocking_reasons
+    )
+    static = _by_category(document, CandidateCategory.STATIC_ROUTE)[0]
+    assert static.status is CandidateStatus.BLOCKED
+    assert static.candidate_text is None
+    assert "route-dependency-svi-interface-syntax-evidence-pending" in (
+        static.blocking_reasons
+    )
+
+
+def test_transit_slash30_default_route_remains_candidate() -> None:
+    _, _, document = _build(
+        make_l3_plan("00000000-0000-0000-0000-000000000099", transit_prefix=30),
+    )
+    default = _by_category(document, CandidateCategory.DEFAULT_ROUTE)[0]
+    assert default.status is CandidateStatus.CANDIDATE
+    assert default.candidate_text == "ip route 0.0.0.0 0.0.0.0 10.0.0.2"
+
+
+def test_static_route_via_valid_svi_remains_candidate() -> None:
+    _, _, document = _build(make_l3_plan(
+        "00000000-0000-0000-0000-000000000099", static_route_count=1,
+    ))
+    static = _by_category(document, CandidateCategory.STATIC_ROUTE)[0]
+    assert static.status is CandidateStatus.CANDIDATE
+    assert static.candidate_text == "ip route 10.200.0.0 255.255.255.0 10.0.0.2"
+
+
+def test_blocked_unrelated_svi_does_not_block_valid_route() -> None:
+    payload = make_l3_plan(
+        "00000000-0000-0000-0000-000000000099",
+        transit_prefix=31,
+        static_route_count=1,
+        static_route_next_hop="192.168.10.2",
+    )
+    assert _planner_errors(payload) == []
+    _, _, document = _build(payload)
+    default = _by_category(document, CandidateCategory.DEFAULT_ROUTE)[0]
+    static = _by_category(document, CandidateCategory.STATIC_ROUTE)[0]
+    assert default.status is CandidateStatus.BLOCKED
+    assert static.status is CandidateStatus.CANDIDATE
+    assert static.candidate_text == (
+        "ip route 10.200.0.0 255.255.255.0 192.168.10.2"
+    )
+
+
+def test_route_next_hop_on_routed_port_is_not_a_candidate_dependency() -> None:
+    payload = make_l3_plan("00000000-0000-0000-0000-000000000099")
+    core_id = next(
+        item["id"] for item in payload["assignments"]
+        if item["hostname"] == "L3-Core"
+    )
+    core_device = next(
+        item["physical_device_id"] for item in payload["assignments"]
+        if item["hostname"] == "L3-Core"
+    )
+    payload["physical_interfaces"].append({
+        "id": "00000000-0000-0000-0000-0000000000cc",
+        "assignment_id": core_id,
+        "physical_device_id": core_device,
+        "name": "Gi1/0/3",
+        "settings": {"mode": "routed", "address": "10.99.0.1/30"},
+    })
+    payload["static_routes"].append({
+        "id": "00000000-0000-0000-0000-0000000000cd",
+        "assignment_id": core_id,
+        "destination": "10.201.0.0/24",
+        "next_hop": {"kind": "ip", "address": "10.99.0.2"},
+    })
+    assert _planner_errors(payload) == []
+    _, _, document = _build(payload)
+    target = [
+        item for item in _by_category(document, CandidateCategory.STATIC_ROUTE)
+        if item.target.name == "10.201.0.0/24"
+    ][0]
+    assert target.status is CandidateStatus.BLOCKED
+    assert target.candidate_text is None
+    assert "route-next-hop-not-on-link" in target.blocking_reasons
 
 
 def test_extra_default_route_is_blocked() -> None:

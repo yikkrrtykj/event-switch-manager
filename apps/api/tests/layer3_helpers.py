@@ -63,6 +63,8 @@ def make_l3_plan(
     access_management_ip: bool = True,
     static_route_count: int = 0,
     static_route_distance: int = 1,
+    transit_prefix: int = 30,
+    static_route_next_hop: str | None = None,
 ) -> dict[str, Any]:
     core_assignment = str(uuid4())
     access_assignment = str(uuid4())
@@ -91,9 +93,21 @@ def make_l3_plan(
         if no_carrier
         else {"mode": "trunk", "allowed_vlans": [9, 10, 20], "admin_state": "up"}
     )
+    if transit_prefix not in (30, 31):
+        raise ValueError("transit_prefix must be 30 or 31")
+    if transit_prefix == 31:
+        transit_network = "10.0.0.0/31"
+        transit_core_ip = "10.0.0.0"
+        transit_hillstone_ip = "10.0.0.1"
+        transit_svi_address = "10.0.0.0/31"
+    else:
+        transit_network = "10.0.0.0/30"
+        transit_core_ip = "10.0.0.1"
+        transit_hillstone_ip = "10.0.0.2"
+        transit_svi_address = "10.0.0.1/30"
     logical: list[dict[str, Any]] = [
         {"id": vlan9_svi, "assignment_id": core_assignment, "name": "Vlan9",
-         "kind": "svi", "vlan": 9, "address": "10.0.0.1/30"},
+         "kind": "svi", "vlan": 9, "address": transit_svi_address},
         {"id": vlan10_svi, "assignment_id": core_assignment, "name": "Vlan10",
          "kind": "svi", "vlan": 10, "address": "192.168.10.1/24"},
         {"id": vlan20_svi, "assignment_id": core_assignment, "name": "Vlan20",
@@ -221,12 +235,12 @@ def make_l3_plan(
             {
                 "id": return_gateway, "assignment_id": firewall_assignment,
                 "destination": "192.168.10.0/24",
-                "next_hop": {"kind": "ip", "address": "10.0.0.1"},
+                "next_hop": {"kind": "ip", "address": transit_core_ip},
             },
             {
                 "id": return_players, "assignment_id": firewall_assignment,
                 "destination": "192.168.20.0/24",
-                "next_hop": {"kind": "ip", "address": "10.0.0.1"},
+                "next_hop": {"kind": "ip", "address": transit_core_ip},
             },
         ],
         "default_routes": [],
@@ -239,14 +253,14 @@ def make_l3_plan(
             "hillstone_port_id": firewall_transit_port,
             "core_svi_id": vlan9_svi,
             "vlan": 9,
-            "network": "10.0.0.0/30",
-            "core_ip": "10.0.0.1",
-            "hillstone_ip": "10.0.0.2",
+            "network": transit_network,
+            "core_ip": transit_core_ip,
+            "hillstone_ip": transit_hillstone_ip,
         }
         if with_default:
             plan["default_routes"] = [{
                 "id": default_route, "assignment_id": core_assignment,
-                "next_hop": {"kind": "ip", "address": "10.0.0.2"},
+                "next_hop": {"kind": "ip", "address": transit_hillstone_ip},
                 "preference": default_distance,
             }]
     for index in range(static_route_count):
@@ -254,7 +268,10 @@ def make_l3_plan(
             "id": str(uuid4()),
             "assignment_id": core_assignment,
             "destination": f"10.200.{index}.0/24",
-            "next_hop": {"kind": "ip", "address": "10.0.0.2"},
+            "next_hop": {
+                "kind": "ip",
+                "address": static_route_next_hop or transit_hillstone_ip,
+            },
             "preference": static_route_distance,
         })
     return plan
