@@ -124,6 +124,9 @@ def canonical_plan(plan: EventPlan) -> str:
             ):
                 if settings[field] is None:
                     del settings[field]
+    for record in document["assignments"]:
+        if record["routing_enabled"] is None:
+            del record["routing_enabled"]
     return _json(_canonical(document))
 
 

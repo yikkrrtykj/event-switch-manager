@@ -44,6 +44,7 @@ class EventDeviceAssignment(Record):
     software: SoftwareProfile | None = None
     management_ip: IPv4Address | None = None
     location: LocationText | None = None
+    routing_enabled: bool | None = None
 
 
 class StackMember(Record):
