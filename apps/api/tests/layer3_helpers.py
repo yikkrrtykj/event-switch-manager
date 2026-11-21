@@ -1,17 +1,41 @@
-"""Shared builders for CIS-03-02A L3 intent tests."""
+﻿"""Shared builders for CIS-03-02A L3 intent tests."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from event_switch_manager.planning.layer3_command_evidence import (
+    ROWS,
+    CommandEvidenceRegistry,
+    EvidenceReview,
+    EvidenceReviewState,
+)
 from event_switch_manager.planning.plan import (
     EventPlan,
     PlanRevision,
     canonical_plan,
     plan_hash,
 )
+
+TEST_REVIEWER = "TEST-ONLY-NOT-A-PRODUCTION-EVIDENCE-REVIEW"
+
+
+def test_only_evidence_registry() -> CommandEvidenceRegistry:
+    """Explicitly test-only reviewed rows; never used by production code."""
+    rows = tuple(
+        replace(row, review=EvidenceReview(
+            state=EvidenceReviewState.REVIEWED,
+            reviewer=TEST_REVIEWER,
+            reviewed_at="2026-11-21",
+            findings=("test-only fixture; not a production evidence review",),
+            content_digest=row.content_digest(),
+        ))
+        for row in ROWS
+    )
+    return CommandEvidenceRegistry(rows)
 
 
 def make_l3_plan(
@@ -35,6 +59,7 @@ def make_l3_plan(
     default_distance: int = 1,
     access_management_ip: bool = True,
     static_route_count: int = 0,
+    static_route_distance: int = 1,
 ) -> dict[str, Any]:
     core_assignment = str(uuid4())
     access_assignment = str(uuid4())
@@ -227,6 +252,7 @@ def make_l3_plan(
             "assignment_id": core_assignment,
             "destination": f"10.200.{index}.0/24",
             "next_hop": {"kind": "ip", "address": "10.0.0.2"},
+            "preference": static_route_distance,
         })
     return plan
 
