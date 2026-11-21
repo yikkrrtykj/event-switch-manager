@@ -311,9 +311,27 @@ def test_test_registry_has_separate_identity_and_is_not_production() -> None:
     assert registry.registry_id != DEFAULT_REGISTRY.registry_id
 
 
+def test_verified_pid_subset_is_explicit_and_bare_models_do_not_match() -> None:
+    expected = {
+        "C9300L-24T-4G-E", "C9300L-24P-4X-E", "C9300X-24Y-A",
+    }
+    for row in ROWS:
+        assert row.classification is not None
+        assert set(row.classification.verified_pids) == expected
+        assert "C9300-24T" not in row.classification.verified_pids
+        assert "C9300L-24T-4G" not in row.classification.verified_pids
+    row = ROWS[0]
+    assert DEFAULT_REGISTRY.matching(
+        row.topic, "C9300L-24T-4G-E", "17.12.4", "Network Essentials",
+    )
+    assert not DEFAULT_REGISTRY.matching(
+        row.topic, "C9300-24T", "17.12.4", "Network Essentials",
+    )
+
+
 def test_registry_matching_scope_including_license_and_release() -> None:
     row = ROWS[0]
-    pid = row.pids[0]
+    pid = "C9300L-24T-4G-E"
     assert DEFAULT_REGISTRY.matching(
         row.topic, pid, "17.12.4", "Network Essentials",
     )
@@ -323,10 +341,10 @@ def test_registry_matching_scope_including_license_and_release() -> None:
     )
     dhcp = next(item for item in ROWS if item.topic is L3CommandTopic.DHCP_HELPER_ADDRESS)
     assert not DEFAULT_REGISTRY.matching(
-        dhcp.topic, dhcp.pids[0], "17.12.4", "Network Essentials",
+        dhcp.topic, pid, "17.12.4", "Network Essentials",
     )
     assert DEFAULT_REGISTRY.matching(
-        dhcp.topic, dhcp.pids[0], "17.12.4", "Network Advantage",
+        dhcp.topic, pid, "17.12.4", "Network Advantage",
     )
 
 

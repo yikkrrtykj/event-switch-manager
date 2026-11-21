@@ -38,7 +38,7 @@ def test_positive_intent_binds_identity_and_allows_core_forwarding() -> None:
     assert result.baseline.source == "planning-baseline-unavailable"
     assert result.before_state_evidence == "planning-baseline-unavailable"
     assert core.identity.role is DeviceRole.CORE
-    assert core.identity.exact_pid == "C9300L-24P-4X"
+    assert core.identity.exact_pid == "C9300L-24P-4X-E"
     assert core.identity.pid_evidence == "exact-verified-pid"
     assert core.identity.serial_verified is True
     assert core.identity.software_image == "17.12.4"

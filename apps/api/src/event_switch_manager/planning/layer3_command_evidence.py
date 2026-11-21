@@ -35,6 +35,11 @@ _9300_PIDS = (
     "C9300X-24Y", "C9300X-24Y-A",
 )
 _RELEASE = "17.12.4"
+_VERIFIED_PIDS = (
+    "C9300L-24T-4G-E",
+    "C9300L-24P-4X-E",
+    "C9300X-24Y-A",
+)
 _FORWARD_LICENSES = ("Network Essentials", "Network Advantage")
 _DHCP_LICENSES = ("Network Advantage",)
 
@@ -105,6 +110,7 @@ class EvidenceClassification:
     license_evidence: EvidenceStatus
     license_source_url: str | None
     license_source_section: str | None
+    verified_pids: tuple[str, ...]
     renderer_safety_restriction: tuple[str, ...]
     blocking_evidence_gaps: tuple[str, ...]
     excluded_scope_notes: tuple[str, ...] = ()
@@ -116,6 +122,7 @@ class EvidenceClassification:
             "license_evidence": self.license_evidence.value,
             "license_source_url": self.license_source_url,
             "license_source_section": self.license_source_section,
+            "verified_pids": list(self.verified_pids),
             "renderer_safety_restriction": list(self.renderer_safety_restriction),
             "blocking_evidence_gaps": list(self.blocking_evidence_gaps),
             "excluded_scope_notes": list(self.excluded_scope_notes),
@@ -320,7 +327,12 @@ class CommandEvidenceRegistry:
         return tuple(
             row for row in self.rows
             if row.topic is topic
-            and pid in {item.upper() for item in row.pids}
+            and pid in {
+                item.upper() for item in (
+                    row.classification.verified_pids
+                    if row.classification is not None else row.pids
+                )
+            }
             and release.casefold() in {item.casefold() for item in row.releases}
             and (
                 (row.licenses and license_fold in {
@@ -467,6 +479,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             license_evidence=EvidenceStatus.PARTIAL,
             license_source_url=_ROUTING_GUIDE,
             license_source_section="Information About IP Routing",
+            verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "planned-cisco-core-only",
                 "at-least-one-svi-required",
@@ -506,6 +519,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             license_evidence=EvidenceStatus.PARTIAL,
             license_source_url=_ROUTING_GUIDE,
             license_source_section="Information About IP Routing",
+            verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "vlan-1-1002-1005-blocked",
                 "exact-Vlan-name",
@@ -554,6 +568,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             license_evidence=EvidenceStatus.PARTIAL,
             license_source_url=_ROUTING_GUIDE,
             license_source_section="Information About IP Routing",
+            verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "prefix-1-30-only",
                 "primary-address-only",
@@ -607,6 +622,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             license_evidence=EvidenceStatus.PARTIAL,
             license_source_url=_ROUTING_GUIDE,
             license_source_section="Information About IP Routing",
+            verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "ipv4-next-hop-only",
                 "no-interface-only-next-hop",
@@ -662,6 +678,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             license_evidence=EvidenceStatus.PARTIAL,
             license_source_url=_ROUTING_GUIDE,
             license_source_section="Information About IP Routing",
+            verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "only-planned-transit-default",
                 "hillstone-ip-only",
@@ -703,6 +720,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             license_evidence=EvidenceStatus.UNRESOLVED,
             license_source_url=None,
             license_source_section=None,
+            verified_pids=_VERIFIED_PIDS,
             renderer_safety_restriction=(
                 "one-candidate-per-server",
                 "eligible-svi-dependency",
