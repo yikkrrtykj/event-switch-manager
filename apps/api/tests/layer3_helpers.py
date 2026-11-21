@@ -34,6 +34,7 @@ def make_l3_plan(
     no_carrier: bool = False,
     default_distance: int = 1,
     access_management_ip: bool = True,
+    static_route_count: int = 0,
 ) -> dict[str, Any]:
     core_assignment = str(uuid4())
     access_assignment = str(uuid4())
@@ -220,7 +221,62 @@ def make_l3_plan(
                 "next_hop": {"kind": "ip", "address": "10.0.0.2"},
                 "preference": default_distance,
             }]
+    for index in range(static_route_count):
+        plan["static_routes"].append({
+            "id": str(uuid4()),
+            "assignment_id": core_assignment,
+            "destination": f"10.200.{index}.0/24",
+            "next_hop": {"kind": "ip", "address": "10.0.0.2"},
+        })
     return plan
+
+
+def make_stack_plan(
+    event_id: str,
+    *,
+    second_pid: str | None = "C9300L-24P-4X",
+    second_serial: str | None = "SYN-CORE-002",
+    second_state: str = "ready",
+    include_second_device: bool = True,
+    reference_missing_device: bool = False,
+    assignment_outside_stack: bool = False,
+) -> dict[str, Any]:
+    payload = make_l3_plan(event_id)
+    core_assignment = next(
+        item for item in payload["assignments"] if item["hostname"] == "L3-Core"
+    )
+    core_device = core_assignment["physical_device_id"]
+    second_device = str(uuid4())
+    member_device = (
+        str(uuid4()) if reference_missing_device else second_device
+    )
+    if include_second_device:
+        payload["physical_devices"].append({
+            "id": second_device,
+            "vendor": "cisco",
+            "model": second_pid,
+            "verified_serial": second_serial,
+        })
+    if assignment_outside_stack:
+        outside = str(uuid4())
+        payload["physical_devices"].append({
+            "id": outside,
+            "vendor": "cisco",
+            "model": "C9300L-24P-4X",
+            "verified_serial": "SYN-OUTSIDE-001",
+        })
+        core_assignment["physical_device_id"] = outside
+    payload["stacks"] = [{
+        "assignment_id": core_assignment["id"],
+        "members": [
+            {"number": 1, "physical_device_id": core_device, "state": "ready"},
+            {"number": 2, "physical_device_id": member_device, "state": second_state},
+        ],
+    }]
+    for port in payload["physical_interfaces"]:
+        if port["assignment_id"] == core_assignment["id"]:
+            port["stack_member"] = 1
+    return payload
 
 
 def plan_model(payload: dict[str, Any]) -> EventPlan:

@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
-from layer3_helpers import make_l3_plan
+from layer3_helpers import make_l3_plan, make_stack_plan
 
 from event_switch_manager.app import create_app
 from event_switch_manager.settings import Settings
@@ -215,3 +215,83 @@ def test_canonical_hash_failure_returns_409(
     assert response.json()["detail"] == {
         "reason_code": "revision-canonical-hash-mismatch", "stage": "revision",
     }
+
+
+def test_svi_name_mismatch_is_saved_unchanged_and_blocked(client: TestClient) -> None:
+    event_id = _event(client)
+    payload = make_l3_plan(event_id)
+    svi = next(
+        item for item in payload["logical_interfaces"]
+        if item["kind"] == "svi" and item["vlan"] == 20
+    )
+    svi["name"] = "Vlan200"
+    revision = _save(client, event_id, payload)
+    document = _intent(client, event_id, str(revision["id"]))
+    core = next(
+        device for device in document["devices"]
+        if device["identity"]["hostname"] == "L3-Core"
+    )
+    assert core["readiness"]["allowed"] is False
+    assert core["readiness"]["ip_routing"] == "blocked"
+    assert "l3-svi-name-vlan-mismatch" in core["blockers"]
+    saved = next(
+        interface for interface in core["interfaces"]
+        if interface["vlan"] == 20
+    )
+    assert saved["name"] == "Vlan200"
+    export = client.get(
+        f"{API}/events/{event_id}/plan-revisions/{revision['id']}/export",
+    )
+    assert '"name":"Vlan200"' in export.text
+
+
+def test_complete_ready_stack_is_resolved_over_api(client: TestClient) -> None:
+    event_id = _event(client)
+    revision = _save(client, event_id, make_stack_plan(event_id))
+    document = _intent(client, event_id, str(revision["id"]))
+    core = next(
+        device for device in document["devices"]
+        if device["identity"]["hostname"] == "L3-Core"
+    )
+    assert core["identity"]["stack_identity"] == "resolved"
+    assert core["readiness"]["allowed"] is True
+    assert core["readiness"]["hardware_verified"] is False
+
+
+@pytest.mark.parametrize(("kwargs", "reason"), [
+    ({"second_serial": None}, "l3-stack-unresolved"),
+    ({"second_pid": None}, "l3-stack-unresolved"),
+    ({"second_pid": "C9300L-24T-4G"}, "l3-stack-unresolved"),
+    ({"second_state": "unknown"}, "l3-stack-unresolved"),
+    ({"second_state": "missing"}, "l3-stack-unresolved"),
+])
+def test_incomplete_stack_is_blocked_over_api(
+    client: TestClient, kwargs: dict[str, Any], reason: str,
+) -> None:
+    event_id = _event(client)
+    revision = _save(client, event_id, make_stack_plan(event_id, **kwargs))
+    document = _intent(client, event_id, str(revision["id"]))
+    core = next(
+        device for device in document["devices"]
+        if device["identity"]["hostname"] == "L3-Core"
+    )
+    assert core["identity"]["stack_identity"] == "unresolved"
+    assert core["readiness"]["allowed"] is False
+    assert reason in core["blockers"]
+    assert core["readiness"]["hardware_verified"] is False
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"reference_missing_device": True},
+    {"assignment_outside_stack": True},
+])
+def test_missing_or_outside_stack_member_cannot_be_saved(
+    client: TestClient, kwargs: dict[str, Any],
+) -> None:
+    event_id = _event(client)
+    response = client.post(
+        f"{API}/events/{event_id}/plan-revisions",
+        json=make_stack_plan(event_id, **kwargs),
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]

@@ -368,3 +368,107 @@ def test_unknown_pid_and_missing_software_fail_closed() -> None:
     missing = _intent(core_image=None)
     assert _core(missing).readiness.allowed is False
     assert "l3-software-missing" in _core(missing).blockers
+
+
+def test_svi_name_must_match_vlan_exactly() -> None:
+    for name in ("Vlan200", "Vlan21", "vlan20", "VLAN20", "Vlan20x"):
+        payload = make_l3_plan("00000000-0000-0000-0000-000000000099")
+        svi = next(
+            item for item in payload["logical_interfaces"]
+            if item["kind"] == "svi" and item["vlan"] == 20
+        )
+        svi["name"] = name
+        result = build_layer3_intent(revision_for(payload))
+        core = _core(result)
+        assert core.readiness.allowed is False
+        assert core.readiness.ip_routing.value == "blocked"
+        assert "l3-svi-name-vlan-mismatch" in core.blockers
+        assert "l3-svi-name-vlan-mismatch" in {
+            conflict.code for conflict in core.conflicts
+        }
+        saved = next(
+            interface for interface in core.interfaces
+            if interface.vlan == 20
+        )
+        assert saved.name == name
+
+
+def test_route_limit_c1000_includes_default_route() -> None:
+    at_limit = _intent(
+        core_pid="C1000-24P-4G-L", core_family="catalyst-c1000",
+        core_image="15.2(7)E1", core_license=None, static_route_count=15,
+    )
+    assert _core(at_limit).readiness.allowed is True
+    over = _intent(
+        core_pid="C1000-24P-4G-L", core_family="catalyst-c1000",
+        core_image="15.2(7)E1", core_license=None, static_route_count=16,
+    )
+    assert _core(over).readiness.allowed is False
+    assert "l3-route-limit-exceeded" in _core(over).blockers
+
+
+def test_route_limit_3850_lanbase_boundary() -> None:
+    base = dict(
+        core_pid="WS-C3850-24P", core_family="catalyst-3850",
+        core_image="16.12.12", core_license="LAN Base",
+        with_transit=False, with_default=False,
+    )
+    at_limit = _intent(static_route_count=16, **base)
+    assert _core(at_limit).readiness.allowed is True
+    over = _intent(static_route_count=17, **base)
+    assert _core(over).readiness.allowed is False
+    assert "l3-route-limit-exceeded" in _core(over).blockers
+
+
+def test_route_limit_2960x_remains_conditional() -> None:
+    result = _intent(
+        core_pid="WS-C2960X-24TS-L", core_family="catalyst-2960x",
+        core_image="15.2(7)E", core_license="LAN Base",
+        with_transit=False, with_default=False, static_route_count=16,
+    )
+    core = _core(result)
+    assert core.readiness.allowed is False
+    assert core.readiness.documentation.value == "conditional"
+    assert "l3-runtime-prerequisite-unobserved" in core.blockers
+
+
+def test_route_limit_not_applied_to_9300_or_9200() -> None:
+    for pid, family in (
+        ("C9300L-24P-4X", "catalyst-9300"),
+        ("C9200L-24P-4X", "catalyst-9200"),
+    ):
+        result = _intent(
+            core_pid=pid, core_family=family,
+            with_transit=False, with_default=False, static_route_count=17,
+        )
+        core = _core(result)
+        assert core.readiness.allowed is True
+        assert "l3-route-limit-exceeded" not in core.blockers
+
+
+def test_route_limit_counts_filtered_invalid_routes() -> None:
+    payload = make_l3_plan(
+        "00000000-0000-0000-0000-000000000099",
+        core_pid="C1000-24P-4G-L", core_family="catalyst-c1000",
+        core_image="15.2(7)E1", core_license=None, static_route_count=16,
+    )
+    for route in payload["static_routes"]:
+        if route["assignment_id"] == assignment_id(payload, "L3-Core"):
+            route["next_hop"]["address"] = "10.99.0.1"
+            break
+    result = build_layer3_intent(revision_for(payload))
+    core = _core(result)
+    assert "l3-route-limit-exceeded" in core.blockers
+
+
+def test_service_relay_verdict_does_not_change_forwarding_readiness() -> None:
+    result = _intent(
+        core_pid="WS-C3850-24P", core_family="catalyst-3850",
+        core_image="16.12.12", core_license="IP Base",
+    )
+    core = _core(result)
+    assert core.readiness.allowed is True
+    assert len(core.dhcp_relays) == 1
+    assert core.dhcp_relays[0].allowed is False
+    assert core.service_blockers
+    assert "l3-evidence-missing" not in core.blockers

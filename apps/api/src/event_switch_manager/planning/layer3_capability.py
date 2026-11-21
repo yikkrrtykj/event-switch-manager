@@ -81,6 +81,8 @@ class L3EvidenceRow:
     source_section: str
     conditions: tuple[str, ...] = ()
     limits: tuple[str, ...] = ()
+    max_routes: int | None = None
+    route_limit_scope: Literal["static-and-default", "static-only"] | None = None
     evidence_version: int = 1
 
 
@@ -101,6 +103,8 @@ class L3CapabilityDecision(Record):
     reason: str
     evidence: tuple[L3EvidenceRef, ...] = ()
     affects_forwarding: bool
+    max_routes: int | None = None
+    route_limit_scope: Literal["static-and-default", "static-only"] | None = None
     hardware_verified: Literal[False] = False
     deployment_allowed: Literal[False] = False
 
@@ -187,7 +191,11 @@ _2960_LITE_CONDITION = (
 )
 _2960_LIMIT = "Up to 16 static routes including the default route."
 _3850_LANBASE_CONDITION = "LAN Base static routing is documented on SVIs only."
-_3850_LANBASE_LIMIT = "Up to 16 user-configured static routes."
+_3850_LANBASE_LIMIT = (
+    "Up to 16 user-configured static routes; the reviewed page does not explicitly "
+    "state whether a business default route shares this limit, so static and default "
+    "routes are counted together fail-closed."
+)
 _C1000_LIMIT = "Up to 16 static routes including the default route."
 
 
@@ -205,6 +213,8 @@ def _row(
     prerequisite: PrerequisiteStatus = PrerequisiteStatus.NOT_REQUIRED,
     conditions: tuple[str, ...] = (),
     limits: tuple[str, ...] = (),
+    max_routes: int | None = None,
+    route_limit_scope: Literal["static-and-default", "static-only"] | None = None,
 ) -> L3EvidenceRow:
     return L3EvidenceRow(
         evidence_id=evidence_id,
@@ -219,6 +229,8 @@ def _row(
         source_section=source_section,
         conditions=conditions,
         limits=limits,
+        max_routes=max_routes,
+        route_limit_scope=route_limit_scope,
     )
 
 
@@ -242,6 +254,15 @@ ROWS: tuple[L3EvidenceRow, ...] = (
             prerequisite=PrerequisiteStatus.UNOBSERVED,
             conditions=(_2960_SDM_CONDITION,),
             limits=(_2960_LIMIT,),
+            max_routes=(
+                16 if capability in {L3Capability.STATIC_ROUTE, L3Capability.DEFAULT_ROUTE}
+                else None
+            ),
+            route_limit_scope=(
+                "static-and-default"
+                if capability in {L3Capability.STATIC_ROUTE, L3Capability.DEFAULT_ROUTE}
+                else None
+            ),
         )
         for capability in (
             L3Capability.IPV4_ROUTING,
@@ -288,6 +309,11 @@ ROWS: tuple[L3EvidenceRow, ...] = (
             }[capability],
             conditions=(_3850_LANBASE_CONDITION,),
             limits=(_3850_LANBASE_LIMIT,),
+            max_routes=16 if capability is L3Capability.STATIC_ROUTE else None,
+            route_limit_scope=(
+                "static-and-default"
+                if capability is L3Capability.STATIC_ROUTE else None
+            ),
         )
         for capability in (
             L3Capability.IPV4_ROUTING,
@@ -399,6 +425,15 @@ ROWS: tuple[L3EvidenceRow, ...] = (
                 L3Capability.DEFAULT_ROUTE: "Configuring Default Routes and Networks",
             }[capability],
             limits=(_C1000_LIMIT,),
+            max_routes=(
+                16 if capability in {L3Capability.STATIC_ROUTE, L3Capability.DEFAULT_ROUTE}
+                else None
+            ),
+            route_limit_scope=(
+                "static-and-default"
+                if capability in {L3Capability.STATIC_ROUTE, L3Capability.DEFAULT_ROUTE}
+                else None
+            ),
         )
         for capability in (
             L3Capability.IPV4_ROUTING,
@@ -427,15 +462,31 @@ def _stack_identity(plan: EventPlan, assignment: EventDeviceAssignment) -> Liter
     stack = next((item for item in plan.stacks if item.assignment_id == assignment.id), None)
     if stack is None:
         return "standalone"
+    if not stack.members:
+        return "unresolved"
     devices = {item.id: item for item in plan.physical_devices}
-    pids = {
-        (devices[member.physical_device_id].model or "").upper()
-        for member in stack.members
-        if member.physical_device_id in devices
-        and devices[member.physical_device_id].model
-        and devices[member.physical_device_id].verified_serial
-    }
-    if len(pids) != 1 or any(member.state != "ready" for member in stack.members):
+    member_ids = [member.physical_device_id for member in stack.members]
+    member_numbers = [member.number for member in stack.members]
+    if (
+        assignment.physical_device_id is None
+        or assignment.physical_device_id not in member_ids
+        or len(set(member_ids)) != len(member_ids)
+        or len(set(member_numbers)) != len(member_numbers)
+    ):
+        return "unresolved"
+    pids: set[str] = set()
+    for member in stack.members:
+        device = devices.get(member.physical_device_id)
+        if (
+            device is None
+            or device.vendor != "cisco"
+            or not device.model
+            or not device.verified_serial
+            or member.state != "ready"
+        ):
+            return "unresolved"
+        pids.add(device.model.upper())
+    if len(pids) != 1:
         return "unresolved"
     return "resolved"
 
@@ -562,6 +613,8 @@ def resolve_l3_capability(
             reason="Vendor documentation excludes this capability for the exact profile.",
             evidence=(_evidence(row),),
             affects_forwarding=capability in FORWARDING_CAPABILITIES,
+            max_routes=row.max_routes,
+            route_limit_scope=row.route_limit_scope,
         )
     if row.documentation is DocumentationStatus.UNKNOWN:
         return _unknown(
@@ -578,6 +631,8 @@ def resolve_l3_capability(
             reason="Vendor documentation applies, but a runtime prerequisite was not observed.",
             evidence=(_evidence(row),),
             affects_forwarding=capability in FORWARDING_CAPABILITIES,
+            max_routes=row.max_routes,
+            route_limit_scope=row.route_limit_scope,
         )
     if row.prerequisite is PrerequisiteStatus.MISSING:
         return _unknown(
@@ -593,6 +648,8 @@ def resolve_l3_capability(
         reason="Vendor documentation applies to this exact profile.",
         evidence=(_evidence(row),),
         affects_forwarding=capability in FORWARDING_CAPABILITIES,
+        max_routes=row.max_routes,
+        route_limit_scope=row.route_limit_scope,
     )
 
 

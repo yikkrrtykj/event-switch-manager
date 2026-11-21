@@ -615,6 +615,16 @@ def _interface_intents(
                 target=f"vlan:{svi.vlan}",
             ))
         seen_vlans[svi.vlan] = svi.id
+        if svi.name != f"Vlan{svi.vlan}":
+            conflicts.append(L3Conflict(
+                code="l3-svi-name-vlan-mismatch",
+                message=(
+                    f"SVI for VLAN {svi.vlan} must be named exactly "
+                    f"Vlan{svi.vlan}; saved name {svi.name!r} is not normalized."
+                ),
+                severity="ERROR",
+                target=str(svi.id),
+            ))
         gateway = gateways.get(svi.id)
         subnet = subnets.get(gateway.subnet_id) if gateway else None
         role = L3InterfaceRole.TRANSIT if transit and transit.core_svi_id == svi.id else (
@@ -1057,20 +1067,54 @@ def _device_intent(
                 target=f"vlan:{vlan}",
             ))
             blockers.append("l3-multiple-subnets-per-vlan")
-    for conflict in conflicts:
-        if conflict.severity == "ERROR":
-            blockers.append(conflict.code)
-
+    raw_static_count = (
+        sum(1 for route in plan.static_routes if route.assignment_id == assignment.id)
+        if assignment.role is DeviceRole.CORE else 0
+    )
+    raw_default_count = (
+        sum(1 for route in plan.default_routes if route.assignment_id == assignment.id)
+        if assignment.role is DeviceRole.CORE else 0
+    )
     checks = _capability_checks(
         plan,
         assignment,
         svi_count=len(svis) if assignment.role is DeviceRole.CORE else 0,
         routed_ports=sum(1 for item in interfaces if item.kind in {"routed-port", "port-channel"}),
-        static_routes=sum(1 for item in routes if item.kind == "static"),
-        default_routes=sum(1 for item in routes if item.kind == "default"),
+        static_routes=raw_static_count,
+        default_routes=raw_default_count,
         dhcp_relays=len(dhcp_relays),
         routing_enabled=routing_enabled and assignment.role is DeviceRole.CORE,
     )
+    limit_check = next(
+        (
+            check for check in checks
+            if check.max_routes is not None
+            and check.capability in {L3Capability.STATIC_ROUTE, L3Capability.DEFAULT_ROUTE}
+        ),
+        None,
+    )
+    if limit_check is not None:
+        max_routes = limit_check.max_routes
+        assert max_routes is not None
+        counted = (
+            raw_static_count + raw_default_count
+            if limit_check.route_limit_scope == "static-and-default"
+            else raw_static_count
+        )
+        if counted > max_routes:
+            conflicts.append(L3Conflict(
+                code="l3-route-limit-exceeded",
+                message=(
+                    f"{counted} static/default routes exceed the documented "
+                    f"limit of {max_routes} for this exact profile."
+                ),
+                severity="ERROR",
+                target=assignment.hostname,
+            ))
+    for conflict in conflicts:
+        if conflict.severity == "ERROR":
+            blockers.append(conflict.code)
+
     service_blockers: list[str] = []
     relay_check = next(
         (check for check in checks if check.capability is L3Capability.DHCP_RELAY),

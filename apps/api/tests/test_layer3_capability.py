@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from layer3_helpers import make_stack_plan
 
 from event_switch_manager.domain import DeviceFamily, DeviceRole
 from event_switch_manager.planning.inventory import (
@@ -271,3 +273,67 @@ def test_target_for_binds_exact_pid_and_software() -> None:
     assert target.software_image == "17.12.4"
     assert target.license == "Network Advantage"
     assert target.stack_identity == "standalone"
+
+
+def test_route_limits_are_machine_readable_and_scoped() -> None:
+    c1000, c1000_aid = _plan("C1000-24P-4G-L", "catalyst-c1000", "15.2(7)E1", None)
+    static = resolve_l3_capability(c1000, c1000_aid, L3Capability.STATIC_ROUTE)
+    assert (static.max_routes, static.route_limit_scope) == (16, "static-and-default")
+    default = resolve_l3_capability(c1000, c1000_aid, L3Capability.DEFAULT_ROUTE)
+    assert (default.max_routes, default.route_limit_scope) == (16, "static-and-default")
+    lanbase, lanbase_aid = _plan("WS-C3850-24P", "catalyst-3850", "16.12.12", "LAN Base")
+    lanbase_static = resolve_l3_capability(
+        lanbase, lanbase_aid, L3Capability.STATIC_ROUTE,
+    )
+    assert (lanbase_static.max_routes, lanbase_static.route_limit_scope) == (
+        16, "static-and-default",
+    )
+    s2960, s2960_aid = _plan("WS-C2960X-24TS-L", "catalyst-2960x", "15.2(7)E", "LAN Base")
+    assert resolve_l3_capability(
+        s2960, s2960_aid, L3Capability.STATIC_ROUTE,
+    ).max_routes == 16
+    c9300, c9300_aid = _plan("C9300L-24P-4X", "catalyst-9300", "17.12.4", "Network Advantage")
+    assert resolve_l3_capability(
+        c9300, c9300_aid, L3Capability.STATIC_ROUTE,
+    ).max_routes is None
+    c9200, c9200_aid = _plan("C9200L-24P-4X", "catalyst-9200", "17.12.4", "Network Advantage")
+    assert resolve_l3_capability(
+        c9200, c9200_aid, L3Capability.STATIC_ROUTE,
+    ).max_routes is None
+
+
+def _stack_target(**kwargs: Any) -> tuple[EventPlan, UUID, str]:
+    payload = make_stack_plan("00000000-0000-0000-0000-000000000099", **kwargs)
+    plan = EventPlan.model_validate(payload)
+    aid = next(
+        item.id for item in plan.assignments if item.hostname == "L3-Core"
+    )
+    assignment = next(item for item in plan.assignments if item.id == aid)
+    return plan, aid, target_for(plan, assignment).stack_identity
+
+
+def test_complete_homogeneous_ready_stack_is_resolved() -> None:
+    plan, aid, identity = _stack_target()
+    assert identity == "resolved"
+    decision = resolve_l3_capability(plan, aid, L3Capability.SVI)
+    assert decision.verdict is L3Verdict.DOCUMENTED
+    assert decision.hardware_verified is False
+
+
+@pytest.mark.parametrize(("kwargs", "expected"), [
+    ({"second_serial": None}, "unresolved"),
+    ({"second_pid": None}, "unresolved"),
+    ({"second_pid": "C9300L-24T-4G"}, "unresolved"),
+    ({"second_state": "unknown"}, "unresolved"),
+    ({"second_state": "missing"}, "unresolved"),
+    ({"reference_missing_device": True}, "unresolved"),
+    ({"assignment_outside_stack": True}, "unresolved"),
+])
+def test_incomplete_or_incompatible_stack_is_unresolved(
+    kwargs: dict[str, object], expected: str,
+) -> None:
+    plan, aid, identity = _stack_target(**kwargs)
+    assert identity == expected
+    decision = resolve_l3_capability(plan, aid, L3Capability.SVI)
+    assert decision.verdict is L3Verdict.UNKNOWN
+    assert decision.reason_code == "l3-stack-unresolved"
