@@ -83,6 +83,7 @@ def test_classification_separates_platform_generic_license_and_renderer_rules() 
         assert classification.generic_command_reference is expected_generic[row.topic]
         assert classification.renderer_safety_restriction
         assert classification.unverified_scope
+        assert "pid-license-suffix-mapping" in classification.unverified_scope
         if row.topic is L3CommandTopic.DHCP_HELPER_ADDRESS:
             assert classification.license_evidence is EvidenceStatus.UNRESOLVED
             assert classification.license_source_url is None
