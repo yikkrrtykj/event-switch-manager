@@ -257,6 +257,36 @@ class RiskReport(ReportModel):
     findings: tuple[str, ...] = ()
 
 
+class PortGroupBinding(ReportModel):
+    prefix: str
+    slot: int
+    first: int
+    count: int
+    medium: str
+    rates: tuple[int, ...]
+    poe_plus: bool
+
+
+class ContextBindingReport(ReportModel):
+    status: Verdict
+    topic: str | None = None
+    candidate_mode: str | None = None
+    candidate_target_class: str | None = None
+    reviewed_command_mode: str | None = None
+    reviewed_modes: tuple[str, ...] = ()
+    port_channel_exception_applied: bool = False
+    reasons: tuple[str, ...] = ()
+
+
+class TargetCapabilityReport(ReportModel):
+    status: Verdict
+    applicable: bool = False
+    exact_pid: str | None = None
+    interface_name: str | None = None
+    port_group: PortGroupBinding | None = None
+    reasons: tuple[str, ...] = ()
+
+
 class CandidateValidation(ReportModel):
     candidate_id: str
     category: str
@@ -269,6 +299,8 @@ class CandidateValidation(ReportModel):
     candidate_fingerprint_match: bool
     parse: ParseReport
     scope: ScopeReport
+    context_binding: ContextBindingReport
+    target_capability: TargetCapabilityReport
     security: SecurityReport
     semantics: SemanticReport
     risk: RiskReport
@@ -359,6 +391,9 @@ class ValidationSummary(ReportModel):
     parse_fail: int
     not_run: int
     scope_blocked: int
+    context_fail: int
+    capability_fail: int
+    capability_not_run: int
     security_fail: int
     semantic_mismatch: int
     risk_fail: int
@@ -805,6 +840,326 @@ _CONNECTIVITY_RISK_CATEGORIES: frozenset[str] = frozenset({
     "admin-shutdown", "unused-shutdown", "speed", "duplex", "poe-mode",
 })
 _VLAN_RENAME_TRANSITIONS: frozenset[str] = frozenset({"vlan-renamed", "no-change"})
+
+#: Independent reviewed context policy. The Grammar already narrows the
+#: physical-interface forms; this table is the second, adapter-independent
+#: judgement so a forged context cannot rely on Grammar alone. The frozen
+#: Renderer emits the switchport/description/admin/PortFast/BPDU-Guard forms on
+#: a logical Port-Channel target, so the reviewed INTERFACE command mode is
+#: explicitly widened only for that known Renderer target semantics.
+_CONTEXT_MODES: Mapping[CommandTopic, frozenset[CommandMode]] = {
+    CommandTopic.VLAN: frozenset({CommandMode.GLOBAL}),
+    CommandTopic.VLAN_NAME: frozenset({CommandMode.VLAN}),
+    CommandTopic.ACCESS_MODE: frozenset({
+        CommandMode.INTERFACE, CommandMode.PORT_CHANNEL,
+    }),
+    CommandTopic.ACCESS_VLAN: frozenset({
+        CommandMode.INTERFACE, CommandMode.PORT_CHANNEL,
+    }),
+    CommandTopic.TRUNK_MODE: frozenset({
+        CommandMode.INTERFACE, CommandMode.PORT_CHANNEL,
+    }),
+    CommandTopic.NATIVE_VLAN: frozenset({
+        CommandMode.INTERFACE, CommandMode.PORT_CHANNEL,
+    }),
+    CommandTopic.ALLOWED_VLANS: frozenset({
+        CommandMode.INTERFACE, CommandMode.PORT_CHANNEL,
+    }),
+    CommandTopic.PORT_CHANNEL_INTERFACE: frozenset({CommandMode.GLOBAL}),
+    CommandTopic.CHANNEL_GROUP_STATIC: frozenset({CommandMode.INTERFACE}),
+    CommandTopic.CHANNEL_GROUP_LACP: frozenset({CommandMode.INTERFACE}),
+    CommandTopic.RAPID_PVST: frozenset({CommandMode.GLOBAL}),
+    CommandTopic.VTP_TRANSPARENT: frozenset({CommandMode.GLOBAL}),
+    CommandTopic.ROOT_PRIORITY: frozenset({CommandMode.GLOBAL}),
+    CommandTopic.PORTFAST: frozenset({
+        CommandMode.INTERFACE, CommandMode.PORT_CHANNEL,
+    }),
+    CommandTopic.BPDU_GUARD: frozenset({
+        CommandMode.INTERFACE, CommandMode.PORT_CHANNEL,
+    }),
+    CommandTopic.POE_MODE: frozenset({CommandMode.INTERFACE}),
+    CommandTopic.SPEED: frozenset({CommandMode.INTERFACE}),
+    CommandTopic.DUPLEX: frozenset({CommandMode.INTERFACE}),
+    CommandTopic.DESCRIPTION: frozenset({
+        CommandMode.INTERFACE, CommandMode.PORT_CHANNEL,
+    }),
+    CommandTopic.ADMIN_SHUTDOWN: frozenset({
+        CommandMode.INTERFACE, CommandMode.PORT_CHANNEL,
+    }),
+}
+
+_CONTEXT_TARGET_CLASSES: Mapping[CommandTopic, frozenset[TargetClass]] = {
+    CommandTopic.VLAN: frozenset({TargetClass.VLAN}),
+    CommandTopic.VLAN_NAME: frozenset({TargetClass.VLAN}),
+    CommandTopic.ACCESS_MODE: frozenset({
+        TargetClass.INTERFACE, TargetClass.PORT_CHANNEL,
+    }),
+    CommandTopic.ACCESS_VLAN: frozenset({
+        TargetClass.INTERFACE, TargetClass.PORT_CHANNEL,
+    }),
+    CommandTopic.TRUNK_MODE: frozenset({
+        TargetClass.INTERFACE, TargetClass.PORT_CHANNEL,
+    }),
+    CommandTopic.NATIVE_VLAN: frozenset({
+        TargetClass.INTERFACE, TargetClass.PORT_CHANNEL,
+    }),
+    CommandTopic.ALLOWED_VLANS: frozenset({
+        TargetClass.INTERFACE, TargetClass.PORT_CHANNEL,
+    }),
+    CommandTopic.PORT_CHANNEL_INTERFACE: frozenset({TargetClass.PORT_CHANNEL}),
+    CommandTopic.CHANNEL_GROUP_STATIC: frozenset({TargetClass.INTERFACE}),
+    CommandTopic.CHANNEL_GROUP_LACP: frozenset({TargetClass.INTERFACE}),
+    CommandTopic.RAPID_PVST: frozenset({TargetClass.DEVICE}),
+    CommandTopic.VTP_TRANSPARENT: frozenset({TargetClass.DEVICE}),
+    CommandTopic.ROOT_PRIORITY: frozenset({TargetClass.DEVICE}),
+    CommandTopic.PORTFAST: frozenset({
+        TargetClass.INTERFACE, TargetClass.PORT_CHANNEL,
+    }),
+    CommandTopic.BPDU_GUARD: frozenset({
+        TargetClass.INTERFACE, TargetClass.PORT_CHANNEL,
+    }),
+    CommandTopic.POE_MODE: frozenset({TargetClass.INTERFACE}),
+    CommandTopic.SPEED: frozenset({TargetClass.INTERFACE}),
+    CommandTopic.DUPLEX: frozenset({TargetClass.INTERFACE}),
+    CommandTopic.DESCRIPTION: frozenset({
+        TargetClass.INTERFACE, TargetClass.PORT_CHANNEL,
+    }),
+    CommandTopic.ADMIN_SHUTDOWN: frozenset({
+        TargetClass.INTERFACE, TargetClass.PORT_CHANNEL,
+    }),
+}
+
+#: Reviewed topics the frozen Renderer emits on a logical Port-Channel target.
+#: Their evidence row command_mode is INTERFACE (Cisco's general interface
+#: configuration mode), which must not be read as excluding every Port-Channel
+#: sub-command. Physical-member/port-attribute topics are deliberately absent.
+_PORT_CHANNEL_REVIEWED_TOPICS: frozenset[CommandTopic] = frozenset({
+    CommandTopic.ACCESS_MODE,
+    CommandTopic.ACCESS_VLAN,
+    CommandTopic.TRUNK_MODE,
+    CommandTopic.NATIVE_VLAN,
+    CommandTopic.ALLOWED_VLANS,
+    CommandTopic.PORTFAST,
+    CommandTopic.BPDU_GUARD,
+    CommandTopic.DESCRIPTION,
+    CommandTopic.ADMIN_SHUTDOWN,
+})
+
+_PHYSICAL_ONLY_TOPICS: frozenset[CommandTopic] = frozenset({
+    CommandTopic.CHANNEL_GROUP_STATIC,
+    CommandTopic.CHANNEL_GROUP_LACP,
+    CommandTopic.POE_MODE,
+    CommandTopic.SPEED,
+    CommandTopic.DUPLEX,
+})
+
+_CAPABILITY_TOPICS: frozenset[CommandTopic] = frozenset({
+    CommandTopic.POE_MODE, CommandTopic.SPEED, CommandTopic.DUPLEX,
+})
+_COPPER_MEDIUM = "copper-rj45"
+
+
+def _context_binding_report(
+    candidate: Candidate,
+    parsed: ParsedCommand | None,
+    topic: CommandTopic | None,
+    evidence_row: CommandEvidence | None,
+) -> ContextBindingReport:
+    """Independently check context/target and the reviewed command mode."""
+    context_mode = candidate.command_context.mode
+    target_class = _TARGET_CLASS_MAP.get(candidate.target.kind)
+    candidate_mode = context_mode.value
+    candidate_target_class = target_class.value if target_class else None
+    reviewed_command_mode = (
+        evidence_row.command_mode.value if evidence_row else None
+    )
+    if candidate.status is not CandidateStatus.CANDIDATE:
+        return ContextBindingReport(
+            status=Verdict.NOT_RUN,
+            topic=topic.value if topic else None,
+            candidate_mode=candidate_mode,
+            candidate_target_class=candidate_target_class,
+            reviewed_command_mode=reviewed_command_mode,
+            reasons=(f"renderer-{candidate.status.value}-no-context-binding",),
+        )
+    if parsed is None or topic is None:
+        return ContextBindingReport(
+            status=Verdict.NOT_RUN,
+            topic=topic.value if topic else None,
+            candidate_mode=candidate_mode,
+            candidate_target_class=candidate_target_class,
+            reviewed_command_mode=reviewed_command_mode,
+            reasons=("parse-failed-or-not-run",),
+        )
+    reasons: list[str] = []
+    expected_modes = _CONTEXT_MODES.get(topic)
+    expected_targets = _CONTEXT_TARGET_CLASSES.get(topic)
+    if expected_modes is not None and context_mode not in expected_modes:
+        reasons.append(
+            f"context-mode-not-reviewed:{topic.value}:{context_mode.value}:"
+            + ",".join(sorted(mode.value for mode in expected_modes))
+        )
+    if expected_targets is not None and (
+        target_class is None or target_class not in expected_targets
+    ):
+        reasons.append(
+            f"context-target-not-reviewed:{topic.value}:"
+            f"{target_class.value if target_class else 'none'}"
+        )
+    port_channel_exception = False
+    if evidence_row is not None:
+        reviewed_mode = evidence_row.command_mode
+        allowed_modes: set[CommandMode] = set()
+        if reviewed_mode is CommandMode.INTERFACE:
+            allowed_modes.add(CommandMode.INTERFACE)
+            if topic in _PORT_CHANNEL_REVIEWED_TOPICS:
+                allowed_modes.add(CommandMode.PORT_CHANNEL)
+                port_channel_exception = context_mode is CommandMode.PORT_CHANNEL
+        elif reviewed_mode is CommandMode.GLOBAL:
+            allowed_modes.add(CommandMode.GLOBAL)
+        elif reviewed_mode is CommandMode.VLAN:
+            allowed_modes.add(CommandMode.VLAN)
+        else:
+            allowed_modes.add(CommandMode.PORT_CHANNEL)
+        if context_mode not in allowed_modes:
+            reasons.append(
+                "evidence-command-mode-context-mismatch:"
+                f"{evidence_row.evidence_id}:{reviewed_mode.value}:"
+                f"{context_mode.value}"
+            )
+    else:
+        reasons.append("no-reviewed-evidence-row-for-context")
+    return ContextBindingReport(
+        status=Verdict.FAIL if reasons else Verdict.PASS,
+        topic=topic.value,
+        candidate_mode=candidate_mode,
+        candidate_target_class=candidate_target_class,
+        reviewed_command_mode=reviewed_command_mode,
+        reviewed_modes=tuple(sorted(
+            mode.value for mode in (expected_modes or frozenset())
+        )),
+        port_channel_exception_applied=port_channel_exception,
+        reasons=tuple(dict.fromkeys(reasons)),
+    )
+
+
+def _port_group_binding(
+    device: RenderDevice, interface_name: str,
+) -> tuple[PortGroupBinding | None, tuple[str, ...]]:
+    """Resolve the exact-PID reviewed PortGroup for a physical interface."""
+    if not device.exact_pid:
+        return None, ("target-capability-pid-missing",)
+    profile = PROFILES.get(device.exact_pid.upper())
+    if profile is None:
+        return None, (
+            f"target-capability-pid-unknown:{device.exact_pid}",
+        )
+    components = _interface_components(interface_name)
+    if components is None:
+        return None, ("target-capability-interface-unresolvable",)
+    prefix, member, module, port = components
+    if device.stack_identity == "standalone":
+        if member != 1:
+            return None, ("target-capability-member-slot-invalid",)
+    elif device.stack_identity == "resolved":
+        if member not in {item.number for item in device.stack_members}:
+            return None, ("target-capability-member-slot-invalid",)
+    else:
+        return None, ("target-capability-stack-unresolved",)
+    for group in profile.ports:
+        if not prefix.startswith(group.prefix):
+            continue
+        if module == group.slot and group.first <= port < group.first + group.count:
+            return (
+                PortGroupBinding(
+                    prefix=group.prefix,
+                    slot=group.slot,
+                    first=group.first,
+                    count=group.count,
+                    medium=group.medium.value,
+                    rates=group.rates,
+                    poe_plus=group.poe_plus,
+                ),
+                (),
+            )
+    return None, ("target-capability-port-group-unknown",)
+
+
+def _target_capability_report(
+    candidate: Candidate,
+    parsed: ParsedCommand | None,
+    topic: CommandTopic | None,
+    device: RenderDevice,
+) -> TargetCapabilityReport:
+    """Independently validate physical port PoE/medium/rate capability."""
+    applicable_topic = topic if topic in _CAPABILITY_TOPICS else None
+    if candidate.status is not CandidateStatus.CANDIDATE:
+        return TargetCapabilityReport(
+            status=Verdict.NOT_RUN,
+            reasons=(f"renderer-{candidate.status.value}-no-target-capability",),
+        )
+    if parsed is None or applicable_topic is None or topic is None:
+        return TargetCapabilityReport(
+            status=Verdict.NOT_RUN,
+            reasons=("no-target-capability-rule",),
+        )
+    if candidate.target.kind is not TargetKind.INTERFACE:
+        return TargetCapabilityReport(
+            status=Verdict.FAIL,
+            applicable=True,
+            exact_pid=device.exact_pid,
+            interface_name=candidate.target.name,
+            reasons=(
+                "target-capability-requires-physical-interface:"
+                f"{candidate.target.kind.value}",
+            ),
+        )
+    binding, binding_reasons = _port_group_binding(device, candidate.target.name)
+    if binding is None:
+        return TargetCapabilityReport(
+            status=Verdict.FAIL,
+            applicable=True,
+            exact_pid=device.exact_pid,
+            interface_name=candidate.target.name,
+            reasons=binding_reasons or ("target-capability-port-group-unknown",),
+        )
+    reasons: list[str] = []
+    if topic is CommandTopic.POE_MODE:
+        mode_value = parsed.parameter("poe-mode")
+        if not binding.poe_plus:
+            reasons.append(
+                f"target-port-not-poe-capable:{candidate.target.name}:"
+                f"{binding.medium}"
+            )
+        if mode_value == "static":
+            reasons.append("poe-static-budget-evidence-required")
+    elif topic is CommandTopic.SPEED:
+        if binding.medium != _COPPER_MEDIUM:
+            reasons.append(
+                f"target-port-not-copper:{candidate.target.name}:{binding.medium}"
+            )
+        else:
+            speed_value = str(parsed.parameter("speed"))
+            if speed_value != "auto":
+                speed_number = _canonical_integer_text(speed_value)
+                if speed_number is None or speed_number not in binding.rates:
+                    reasons.append(
+                        f"speed-not-in-port-rates:{speed_value}:"
+                        + ",".join(str(rate) for rate in binding.rates)
+                    )
+    elif topic is CommandTopic.DUPLEX:
+        if binding.medium != _COPPER_MEDIUM:
+            reasons.append(
+                f"target-port-not-copper:{candidate.target.name}:{binding.medium}"
+            )
+    return TargetCapabilityReport(
+        status=Verdict.FAIL if reasons else Verdict.PASS,
+        applicable=True,
+        exact_pid=device.exact_pid,
+        interface_name=candidate.target.name,
+        port_group=binding,
+        reasons=tuple(dict.fromkeys(reasons)),
+    )
 
 
 def review_candidate_risk(
@@ -1511,6 +1866,17 @@ def _candidate_validation(
     binding_mismatches.extend(_category_binding_mismatches(
         candidate, parse.command, effective_topic,
     ))
+    context_row = (
+        _evidence_row(scope.evidence_id) if scope.evidence_id is not None else None
+    )
+    if context_row is None and candidate.syntax_evidence:
+        context_row = _evidence_row(candidate.syntax_evidence[0].evidence_id)
+    context_binding = _context_binding_report(
+        candidate, parse.command, effective_topic, context_row,
+    )
+    target_capability = _target_capability_report(
+        candidate, parse.command, effective_topic, document.device,
+    )
     if parse.command is not None and candidate.status is CandidateStatus.CANDIDATE:
         mismatches = _semantic_mismatches(
             parse.command, candidate, document, scope, effective_topic,
@@ -1543,6 +1909,10 @@ def _candidate_validation(
             failures.append("independent-security-failed")
         if semantic.status is not Verdict.PASS:
             failures.append("independent-semantics-mismatch")
+        if context_binding.status is not Verdict.PASS:
+            failures.append("independent-context-binding-failed")
+        if target_capability.status is Verdict.FAIL:
+            failures.append("independent-target-capability-failed")
     if risk.status is Verdict.FAIL:
         failures.append("independent-risk-review-failed")
 
@@ -1571,6 +1941,8 @@ def _candidate_validation(
         candidate_fingerprint_match=fingerprint_match,
         parse=parse_report,
         scope=scope_report,
+        context_binding=context_binding,
+        target_capability=target_capability,
         security=security,
         semantics=semantic,
         risk=risk,
@@ -1892,6 +2264,17 @@ def validate_candidate_document(
     scope_blocked = sum(
         1 for item in summary_candidates if item.scope.status is ScopeOutcome.BLOCKED
     )
+    context_fail = sum(
+        1 for item in summary_candidates if item.context_binding.status is Verdict.FAIL
+    )
+    capability_fail = sum(
+        1 for item in summary_candidates
+        if item.target_capability.status is Verdict.FAIL
+    )
+    capability_not_run = sum(
+        1 for item in summary_candidates
+        if item.target_capability.status is Verdict.NOT_RUN
+    )
     security_fail = sum(
         1 for item in summary_candidates if item.security.status is Verdict.FAIL
     )
@@ -1929,6 +2312,9 @@ def validate_candidate_document(
         parse_fail=parse_fail,
         not_run=not_run,
         scope_blocked=scope_blocked,
+        context_fail=context_fail,
+        capability_fail=capability_fail,
+        capability_not_run=capability_not_run,
         security_fail=security_fail,
         semantic_mismatch=semantic_mismatch,
         risk_fail=risk_fail,

@@ -253,8 +253,12 @@ def test_expected_mode_is_checked_independently() -> None:
         "switchport mode access", expected_mode=CommandMode.PORT_CHANNEL,
     ).ok
     assert parse_command(
-        "channel-group 1 mode active", expected_mode=CommandMode.PORT_CHANNEL,
+        "channel-group 1 mode active", expected_mode=CommandMode.INTERFACE,
     ).ok
+    channel_group_port_context = parse_command(
+        "channel-group 1 mode active", expected_mode=CommandMode.PORT_CHANNEL,
+    )
+    assert channel_group_port_context.failure_codes == ("mode-mismatch",)
     assert parse_command(
         "interface Port-Channel1", expected_mode=CommandMode.GLOBAL,
     ).ok

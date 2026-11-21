@@ -323,6 +323,12 @@ _SWITCHPORT_MODES = frozenset({CommandMode.INTERFACE, CommandMode.PORT_CHANNEL})
 _SWITCHPORT_TARGETS = frozenset({
     TargetClass.INTERFACE, TargetClass.PORT_CHANNEL,
 })
+#: Reviewed physical-interface-only forms. The frozen Renderer emits these only
+#: for a physical interface target in interface configuration mode; the reviewed
+#: evidence rows also record ``CommandMode.INTERFACE``. They are never legal on
+#: a logical Port-Channel context.
+_PHYSICAL_INTERFACE_MODES = frozenset({CommandMode.INTERFACE})
+_PHYSICAL_INTERFACE_TARGETS = frozenset({TargetClass.INTERFACE})
 _DEVICE_TARGETS = frozenset({TargetClass.DEVICE})
 _VLAN_TARGETS = frozenset({TargetClass.VLAN})
 _PORT_CHANNEL_TARGETS = frozenset({TargetClass.PORT_CHANNEL})
@@ -407,8 +413,8 @@ FORMS: tuple[GrammarForm, ...] = (
             Literal("channel-group"), _slot(CHANNEL_GROUP_NUMBER),
             Literal("mode"), Literal("on"),
         ),
-        modes=_SWITCHPORT_MODES,
-        target_classes=_SWITCHPORT_TARGETS,
+        modes=_PHYSICAL_INTERFACE_MODES,
+        target_classes=_PHYSICAL_INTERFACE_TARGETS,
         fixed_parameters=(("mode", "on"),),
     ),
     GrammarForm(
@@ -418,8 +424,8 @@ FORMS: tuple[GrammarForm, ...] = (
             Literal("channel-group"), _slot(CHANNEL_GROUP_NUMBER),
             Literal("mode"), _slot(LACP_MODE),
         ),
-        modes=_SWITCHPORT_MODES,
-        target_classes=_SWITCHPORT_TARGETS,
+        modes=_PHYSICAL_INTERFACE_MODES,
+        target_classes=_PHYSICAL_INTERFACE_TARGETS,
     ),
     GrammarForm(
         form_id="rapid-pvst",
@@ -474,22 +480,22 @@ FORMS: tuple[GrammarForm, ...] = (
         form_id="poe-mode",
         topic=CommandTopic.POE_MODE,
         pattern=(Literal("power"), Literal("inline"), _slot(POE_MODE)),
-        modes=_SWITCHPORT_MODES,
-        target_classes=_SWITCHPORT_TARGETS,
+        modes=_PHYSICAL_INTERFACE_MODES,
+        target_classes=_PHYSICAL_INTERFACE_TARGETS,
     ),
     GrammarForm(
         form_id="speed",
         topic=CommandTopic.SPEED,
         pattern=(Literal("speed"), _slot(SPEED)),
-        modes=_SWITCHPORT_MODES,
-        target_classes=_SWITCHPORT_TARGETS,
+        modes=_PHYSICAL_INTERFACE_MODES,
+        target_classes=_PHYSICAL_INTERFACE_TARGETS,
     ),
     GrammarForm(
         form_id="duplex",
         topic=CommandTopic.DUPLEX,
         pattern=(Literal("duplex"), _slot(DUPLEX)),
-        modes=_SWITCHPORT_MODES,
-        target_classes=_SWITCHPORT_TARGETS,
+        modes=_PHYSICAL_INTERFACE_MODES,
+        target_classes=_PHYSICAL_INTERFACE_TARGETS,
     ),
     GrammarForm(
         form_id="description",
