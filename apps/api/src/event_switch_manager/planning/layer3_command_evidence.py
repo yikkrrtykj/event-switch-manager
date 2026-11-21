@@ -26,7 +26,7 @@ from ..domain import DeviceFamily
 from .layer3_command_evidence_reviews import REJECTED_RECORDS, REVIEWED_RECORDS
 
 REGISTRY_ID: Literal["cis-03-l1-command-evidence-v1"] = "cis-03-l1-command-evidence-v1"
-EVIDENCE_SCHEMA_VERSION: Literal[1] = 1
+EVIDENCE_SCHEMA_VERSION: Literal[2] = 2
 
 _9300_PIDS = (
     "C9300-24T", "C9300-24P",
@@ -90,6 +90,34 @@ class EvidenceReviewState(StrEnum):
     PENDING = "pending-independent-review"
     REVIEWED = "independently-reviewed"
     REJECTED = "independently-rejected"
+
+
+class EvidenceStatus(StrEnum):
+    VERIFIED = "verified"
+    PARTIAL = "partial"
+    UNRESOLVED = "unresolved"
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceClassification:
+    platform_documented: bool
+    generic_command_reference: bool
+    license_evidence: EvidenceStatus
+    license_source_url: str | None
+    license_source_section: str | None
+    renderer_safety_restriction: tuple[str, ...]
+    unverified_scope: tuple[str, ...]
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "platform_documented": self.platform_documented,
+            "generic_command_reference": self.generic_command_reference,
+            "license_evidence": self.license_evidence.value,
+            "license_source_url": self.license_source_url,
+            "license_source_section": self.license_source_section,
+            "renderer_safety_restriction": list(self.renderer_safety_restriction),
+            "unverified_scope": list(self.unverified_scope),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +193,7 @@ class CommandEvidenceRow:
     command_reference_scope: str | None = None
     semantic_source_url: str | None = None
     semantic_source_section: str | None = None
+    classification: EvidenceClassification | None = None
     exclusions: tuple[str, ...] = ()
     requirements: tuple[str, ...] = ()
     review: EvidenceReview = PENDING_REVIEW
@@ -199,6 +228,10 @@ class CommandEvidenceRow:
             "command_reference_scope": self.command_reference_scope,
             "semantic_source_url": self.semantic_source_url,
             "semantic_source_section": self.semantic_source_section,
+            "classification": (
+                self.classification.as_payload()
+                if self.classification is not None else None
+            ),
             "exclusions": list(self.exclusions),
             "requirements": list(self.requirements),
             "evidence_version": self.evidence_version,
@@ -340,10 +373,13 @@ def _row(
     command_reference_scope: str | None = None,
     semantic_source_url: str | None = None,
     semantic_source_section: str | None = None,
+    classification: EvidenceClassification | None = None,
     exclusions: tuple[str, ...] = (),
     requirements: tuple[str, ...] = (),
     licenses: tuple[str, ...] = _FORWARD_LICENSES,
 ) -> CommandEvidenceRow:
+    if classification is None:
+        raise ValueError("Every command evidence row needs a classification")
     review = _REVIEWS.get(evidence_id) or _REJECTIONS.get(evidence_id) or PENDING_REVIEW
     return CommandEvidenceRow(
         evidence_id=evidence_id,
@@ -364,6 +400,7 @@ def _row(
         command_reference_scope=command_reference_scope,
         semantic_source_url=semantic_source_url,
         semantic_source_section=semantic_source_section,
+        classification=classification,
         exclusions=exclusions,
         requirements=requirements,
         review=review,
@@ -377,6 +414,10 @@ _SVI_NAME_EXCLUSION = (
 _ROUTE_EXCLUSION = (
     "No no-form, cleanup, deletion, VRF, DHCP, name, permanent, track or tag form.",
     "Only an IPv4 next-hop is supported; interface-only next hop is excluded.",
+)
+_DEFAULT_ROUTE_EXCLUSION = (
+    *_ROUTE_EXCLUSION,
+    "ip default-network is a different command and is excluded.",
 )
 _DHCP_EXCLUSION = (
     "No DHCP Server, DHCP Client, DHCP snooping or DHCP option configuration.",
@@ -396,6 +437,21 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         "Enabling IP Unicast Routing",
         command_reference_url=_CR_IP_ROUTING,
         command_reference_section="ip routing",
+        classification=EvidenceClassification(
+            platform_documented=True,
+            generic_command_reference=True,
+            license_evidence=EvidenceStatus.PARTIAL,
+            license_source_url=_ROUTING_GUIDE,
+            license_source_section="Information About IP Routing",
+            renderer_safety_restriction=(
+                "planned-cisco-core-only",
+                "at-least-one-svi-required",
+            ),
+            unverified_scope=(
+                "explicit-command-license",
+                "per-pid-release-support",
+            ),
+        ),
         exclusions=("No no ip routing form in the first batch.",),
         requirements=(
             "Device is a supported Cisco Core.",
@@ -415,7 +471,25 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         ),
         ("One SVI per VLAN per assignment.",),
         _ROUTING_GUIDE,
-        "Assigning IP Addresses to Network Interfaces",
+        "Configuration Guidelines for IP Routing",
+        classification=EvidenceClassification(
+            platform_documented=True,
+            generic_command_reference=False,
+            license_evidence=EvidenceStatus.PARTIAL,
+            license_source_url=_ROUTING_GUIDE,
+            license_source_section="Information About IP Routing",
+            renderer_safety_restriction=(
+                "vlan-1-1002-1005-blocked",
+                "exact-Vlan-name",
+                "one-svi-per-vlan",
+                "planned-carrier-required",
+            ),
+            unverified_scope=(
+                "vlan-id-platform-range",
+                "interface-name-case-sensitivity",
+                "per-pid-release-support",
+            ),
+        ),
         exclusions=_SVI_NAME_EXCLUSION,
         requirements=(
             "SVI name is exactly Vlan<vlan>.",
@@ -441,6 +515,23 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         "Assigning IP Addresses to Network Interfaces",
         command_reference_url=_CR_IP_ADDRESS,
         command_reference_section="ip address",
+        classification=EvidenceClassification(
+            platform_documented=True,
+            generic_command_reference=True,
+            license_evidence=EvidenceStatus.PARTIAL,
+            license_source_url=_ROUTING_GUIDE,
+            license_source_section="Information About IP Routing",
+            renderer_safety_restriction=(
+                "prefix-1-30-only",
+                "primary-address-only",
+                "gateway-subnet-match",
+            ),
+            unverified_scope=(
+                "subnet-mask-platform-boundary",
+                "slash31-slash32-platform-support",
+                "per-pid-release-support",
+            ),
+        ),
         exclusions=("No secondary address, DHCP address or unnumbered form.",),
         requirements=(
             "SVI exists with exact Vlan<vlan> name.",
@@ -473,6 +564,24 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         ),
         semantic_source_url=_ADMIN_DISTANCE,
         semantic_source_section="Understand Administrative Distance",
+        classification=EvidenceClassification(
+            platform_documented=True,
+            generic_command_reference=True,
+            license_evidence=EvidenceStatus.PARTIAL,
+            license_source_url=_ROUTING_GUIDE,
+            license_source_section="Information About IP Routing",
+            renderer_safety_restriction=(
+                "ipv4-next-hop-only",
+                "no-interface-only-next-hop",
+                "distance-255-blocked",
+                "eligible-svi-dependency",
+            ),
+            unverified_scope=(
+                "distance-1-255-command-reference",
+                "platform-specific-ip-route-reference",
+                "per-pid-release-support",
+            ),
+        ),
         exclusions=_ROUTE_EXCLUSION,
         requirements=(
             "Route owner is the supported Cisco Core.",
@@ -495,16 +604,36 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             "Next hop must equal the transit hillstone_ip.",
         ),
         _STATIC_GUIDE,
-        "How to Configure Default Routes and Networks",
+        "Configuring Static Unicast Routes",
         command_reference_url=_CR_IP_ROUTE,
         command_reference_section="ip route",
         command_reference_scope=(
             "Cisco IOS IP Routing: Protocol-Independent Command Reference; "
-            "Catalyst 9300 17.12 platform applicability from the platform guide."
+            "Catalyst 9300 17.12 platform applicability from the static route "
+            "section and the default-route information section."
         ),
         semantic_source_url=_ADMIN_DISTANCE,
         semantic_source_section="Understand Administrative Distance",
-        exclusions=_ROUTE_EXCLUSION,
+        classification=EvidenceClassification(
+            platform_documented=True,
+            generic_command_reference=True,
+            license_evidence=EvidenceStatus.PARTIAL,
+            license_source_url=_ROUTING_GUIDE,
+            license_source_section="Information About IP Routing",
+            renderer_safety_restriction=(
+                "only-planned-transit-default",
+                "hillstone-ip-only",
+                "distance-255-blocked",
+                "ip-default-network-excluded",
+                "eligible-svi-dependency",
+            ),
+            unverified_scope=(
+                "explicit-default-0.0.0.0-platform-example",
+                "distance-1-255-command-reference",
+                "per-pid-release-support",
+            ),
+        ),
+        exclusions=_DEFAULT_ROUTE_EXCLUSION,
         requirements=(
             "Device has a trusted transit relation.",
             "Route ID is the transit preferred default route.",
@@ -520,7 +649,25 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         (ParameterRule("ip-address", "ipv4-address"),),
         ("One candidate per relay server; no reviewed maximum is asserted.",),
         _DHCP_GUIDE,
-        "Configuring the DHCP Relay Agent",
+        "Specifying the Packet Forwarding Address",
+        classification=EvidenceClassification(
+            platform_documented=True,
+            generic_command_reference=False,
+            license_evidence=EvidenceStatus.UNRESOLVED,
+            license_source_url=None,
+            license_source_section=None,
+            renderer_safety_restriction=(
+                "one-candidate-per-server",
+                "eligible-svi-dependency",
+                "relay-allowed-required",
+                "no-cisco-dhcp-server",
+            ),
+            unverified_scope=(
+                "dhcp-relay-license",
+                "helper-address-command-reference",
+                "per-pid-release-support",
+            ),
+        ),
         exclusions=_DHCP_EXCLUSION,
         requirements=(
             "SVI exists with an address.",
@@ -544,8 +691,10 @@ __all__ = [
     "REGISTRY_ID",
     "CommandEvidenceRegistry",
     "CommandEvidenceRow",
+    "EvidenceClassification",
     "EvidenceReview",
     "EvidenceReviewState",
+    "EvidenceStatus",
     "L3CommandMode",
     "L3CommandTopic",
     "ParameterRule",

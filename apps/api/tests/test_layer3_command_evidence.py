@@ -15,6 +15,7 @@ from event_switch_manager.planning.layer3_command_evidence import (
     CommandEvidenceRegistry,
     EvidenceReview,
     EvidenceReviewState,
+    EvidenceStatus,
     L3CommandTopic,
 )
 from event_switch_manager.planning.layer3_command_evidence_reviews import (
@@ -31,19 +32,85 @@ def test_production_rows_are_pending_and_render_no_text() -> None:
 
 
 def test_every_row_has_exact_scope_and_sources() -> None:
+    expected_pids = {
+        "C9300-24T", "C9300-24P",
+        "C9300L-24T-4G", "C9300L-24T-4G-E",
+        "C9300L-24P-4X", "C9300L-24P-4X-E",
+        "C9300X-24Y", "C9300X-24Y-A",
+    }
     for row in ROWS:
         assert row.family is DeviceFamily.CATALYST_9300
-        assert len(row.pids) == 8
+        assert set(row.pids) == expected_pids
         assert row.releases == ("17.12.4",)
         assert row.source_url.startswith("https://www.cisco.com/")
         assert row.source_section
         assert row.command and row.grammar
         assert row.content_digest()
-        assert row.evidence_version == 1
+        assert row.evidence_version == 2
+        assert row.classification is not None
         if row.topic is L3CommandTopic.DHCP_HELPER_ADDRESS:
             assert row.licenses == ("Network Advantage",)
         else:
             assert row.licenses == ("Network Essentials", "Network Advantage")
+
+
+def test_platform_sections_are_the_real_section_names() -> None:
+    expected = {
+        L3CommandTopic.IP_ROUTING: "Enabling IP Unicast Routing",
+        L3CommandTopic.SVI_INTERFACE: "Configuration Guidelines for IP Routing",
+        L3CommandTopic.SVI_ADDRESS: "Assigning IP Addresses to Network Interfaces",
+        L3CommandTopic.STATIC_ROUTE: "Configuring Static Unicast Routes",
+        L3CommandTopic.DEFAULT_ROUTE: "Configuring Static Unicast Routes",
+        L3CommandTopic.DHCP_HELPER_ADDRESS: "Specifying the Packet Forwarding Address",
+    }
+    for row in ROWS:
+        assert row.source_section == expected[row.topic]
+
+
+def test_classification_separates_platform_generic_license_and_renderer_rules() -> None:
+    expected_generic = {
+        L3CommandTopic.IP_ROUTING: True,
+        L3CommandTopic.SVI_INTERFACE: False,
+        L3CommandTopic.SVI_ADDRESS: True,
+        L3CommandTopic.STATIC_ROUTE: True,
+        L3CommandTopic.DEFAULT_ROUTE: True,
+        L3CommandTopic.DHCP_HELPER_ADDRESS: False,
+    }
+    for row in ROWS:
+        classification = row.classification
+        assert classification is not None
+        assert classification.platform_documented is True
+        assert classification.generic_command_reference is expected_generic[row.topic]
+        assert classification.renderer_safety_restriction
+        assert classification.unverified_scope
+        if row.topic is L3CommandTopic.DHCP_HELPER_ADDRESS:
+            assert classification.license_evidence is EvidenceStatus.UNRESOLVED
+            assert classification.license_source_url is None
+            assert classification.license_source_section is None
+            assert "dhcp-relay-license" in classification.unverified_scope
+        else:
+            assert classification.license_evidence is EvidenceStatus.PARTIAL
+            assert classification.license_source_url is not None
+            assert classification.license_source_section == "Information About IP Routing"
+            assert "per-pid-release-support" in classification.unverified_scope
+
+
+def test_dhcp_license_remains_contract_consistent_but_unresolved() -> None:
+    dhcp = next(item for item in ROWS if item.topic is L3CommandTopic.DHCP_HELPER_ADDRESS)
+    assert dhcp.licenses == ("Network Advantage",)
+    assert dhcp.classification is not None
+    assert dhcp.classification.license_evidence is EvidenceStatus.UNRESOLVED
+    assert "dhcp-relay-license" in dhcp.classification.unverified_scope
+
+
+def test_default_route_excludes_ip_default_network() -> None:
+    default = next(item for item in ROWS if item.topic is L3CommandTopic.DEFAULT_ROUTE)
+    assert default.source_section == "Configuring Static Unicast Routes"
+    assert any("ip default-network" in item for item in default.exclusions)
+    assert default.classification is not None
+    assert "ip-default-network-excluded" in (
+        default.classification.renderer_safety_restriction
+    )
 
 
 def test_static_and_default_route_use_protocol_independent_features() -> None:
@@ -64,7 +131,7 @@ def test_static_and_default_route_use_protocol_independent_features() -> None:
 def test_dhcp_and_address_sources_are_exact() -> None:
     dhcp = next(item for item in ROWS if item.topic is L3CommandTopic.DHCP_HELPER_ADDRESS)
     assert dhcp.source_url.endswith("configuring_dhcp.html")
-    assert dhcp.source_section == "Configuring the DHCP Relay Agent"
+    assert dhcp.source_section == "Specifying the Packet Forwarding Address"
     address = next(item for item in ROWS if item.topic is L3CommandTopic.SVI_ADDRESS)
     assert "ip_addressing_services_commands.html" in (address.command_reference_url or "")
     assert address.command_reference_section == "ip address"
@@ -215,6 +282,14 @@ def test_registry_fingerprint_reflects_review_identity_and_findings() -> None:
     registry_a = CommandEvidenceRegistry((first,), production=False)
     registry_b = CommandEvidenceRegistry((second,), production=False)
     assert registry_a.fingerprint != registry_b.fingerprint
+
+
+def test_registry_fingerprint_is_content_sensitive_and_deterministic() -> None:
+    assert DEFAULT_REGISTRY.fingerprint == CommandEvidenceRegistry(ROWS).fingerprint
+    row = ROWS[0]
+    changed = replace(row, limits=(*row.limits, "R30 classification fingerprint probe"))
+    registry = CommandEvidenceRegistry((changed, *ROWS[1:]))
+    assert registry.fingerprint != DEFAULT_REGISTRY.fingerprint
 
 
 def test_test_registry_has_separate_identity_and_is_not_production() -> None:
