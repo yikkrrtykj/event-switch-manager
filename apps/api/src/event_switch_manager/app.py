@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .api import router
 from .database import create_database_engine, upgrade_database
+from .l2_validation_api import router as validation_router
 from .plan_api import router as plan_router
 from .security import LocalWebGuard
 from .settings import Settings
@@ -36,6 +37,7 @@ def create_app(settings: Settings) -> FastAPI:
     )
     app.include_router(router)
     app.include_router(plan_router)
+    app.include_router(validation_router)
 
     web_dist = settings.web_dist.resolve()
     assets = web_dist / "assets"
