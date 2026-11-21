@@ -265,7 +265,28 @@ def test_public_l2_candidate_routes_are_unchanged(tmp_path: Path) -> None:
             "/api/v1/events/{event_id}/plan-revisions/{revision_id}/assignments/"
             "{assignment_id}/l2-cli-candidates"
         ),
+        (
+            "/api/v1/events/{event_id}/plan-revisions/{revision_id}/assignments/"
+            "{assignment_id}/l2-cli-validation"
+        ),
     }
+
+
+def test_public_validation_route_is_added_without_changing_plan_api(
+    tmp_path: Path,
+) -> None:
+    """R19 adds exactly one read-only route; the frozen plan_api surface stays."""
+    settings = Settings(database_path=tmp_path / "public-validation-route.sqlite3")
+    app = create_app(settings)
+    paths = [getattr(route, "path", "") for route in app.routes]
+    validation_route = (
+        "/api/v1/events/{event_id}/plan-revisions/{revision_id}/assignments/"
+        "{assignment_id}/l2-cli-validation"
+    )
+    assert paths.count(validation_route) == 1
+    assert {getattr(route, "path", "") for route in router.routes} == set(
+        FROZEN_ROUTES
+    )
 
 
 def test_no_new_repository_markdown_artifact_is_added() -> None:
