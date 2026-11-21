@@ -75,6 +75,11 @@ _ADMIN_DISTANCE = (
     "https://www.cisco.com/c/en/us/support/docs/ip/"
     "border-gateway-protocol-bgp/15986-admin-distance.html"
 )
+_CTS_DEFAULT_ROUTE_GUIDE = (
+    "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
+    "software/release/17-12/configuration_guide/cts/b_1712_cts_9300_cg/"
+    "cisco_trustsec_sgt_mapping.html"
+)
 
 
 class L3CommandTopic(StrEnum):
@@ -206,6 +211,7 @@ class CommandEvidenceRow:
     command_reference_scope: str | None = None
     semantic_source_url: str | None = None
     semantic_source_section: str | None = None
+    supplemental_sources: tuple[SourceRef, ...] = ()
     classification: EvidenceClassification | None = None
     exclusions: tuple[str, ...] = ()
     requirements: tuple[str, ...] = ()
@@ -241,6 +247,10 @@ class CommandEvidenceRow:
             "command_reference_scope": self.command_reference_scope,
             "semantic_source_url": self.semantic_source_url,
             "semantic_source_section": self.semantic_source_section,
+            "supplemental_sources": [
+                {"url": item.url, "section": item.section}
+                for item in self.supplemental_sources
+            ],
             "classification": (
                 self.classification.as_payload()
                 if self.classification is not None else None
@@ -409,6 +419,7 @@ def _row(
     command_reference_scope: str | None = None,
     semantic_source_url: str | None = None,
     semantic_source_section: str | None = None,
+    supplemental_sources: tuple[SourceRef, ...] = (),
     classification: EvidenceClassification | None = None,
     exclusions: tuple[str, ...] = (),
     requirements: tuple[str, ...] = (),
@@ -436,6 +447,7 @@ def _row(
         command_reference_scope=command_reference_scope,
         semantic_source_url=semantic_source_url,
         semantic_source_section=semantic_source_section,
+        supplemental_sources=supplemental_sources,
         classification=classification,
         exclusions=exclusions,
         requirements=requirements,
@@ -672,6 +684,10 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         ),
         semantic_source_url=_ADMIN_DISTANCE,
         semantic_source_section="Understand Administrative Distance",
+        supplemental_sources=(
+            SourceRef(_STATIC_GUIDE, "Information About Default Routes and Networks"),
+            SourceRef(_CTS_DEFAULT_ROUTE_GUIDE, "Configuring Default Route SGT"),
+        ),
         classification=EvidenceClassification(
             platform_documented=True,
             generic_command_reference=True,
@@ -687,7 +703,6 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "eligible-svi-dependency",
             ),
             blocking_evidence_gaps=(
-                "explicit-default-0.0.0.0-platform-example",
                 "distance-1-255-command-reference",
                 "per-pid-release-support",
                 "pid-license-suffix-mapping",
@@ -695,6 +710,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             excluded_scope_notes=(
                 "ip-default-network-renderer-excluded",
                 "interface-only-next-hop-renderer-excluded",
+                "trustsec-page-confirms-0-0-0-0-route-existence-only",
             ),
         ),
         exclusions=_DEFAULT_ROUTE_EXCLUSION,

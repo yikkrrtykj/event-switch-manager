@@ -122,6 +122,14 @@ def test_default_route_excludes_ip_default_network() -> None:
     assert "ip-default-network-excluded" in (
         default.classification.renderer_safety_restriction
     )
+    assert any(
+        source.section == "Configuring Default Route SGT"
+        for source in default.supplemental_sources
+    )
+    assert not any(
+        gap == "explicit-default-0.0.0.0-platform-example"
+        for gap in default.classification.blocking_evidence_gaps
+    )
 
 
 def test_static_and_default_route_use_protocol_independent_features() -> None:
