@@ -128,18 +128,38 @@ def test_positive_six_categories_with_test_only_registry() -> None:
     assert all(not (item.candidate_text or "").startswith("no ") for item in document.candidates)
 
 
-def test_production_registry_renders_no_text() -> None:
-    revision = revision_for(make_l3_plan("00000000-0000-0000-0000-000000000099"))
+def test_production_registry_renders_base_candidates_and_blocks_helper() -> None:
+    revision = revision_for(make_l3_plan(
+        "00000000-0000-0000-0000-000000000099", static_route_count=1,
+    ))
     intent = build_layer3_intent(revision)
     document = build_l3_cli_candidates(
         revision, intent, _core_assignment(intent),
     )
-    assert document.render_state.value == "blocked"
-    assert document.summary.candidates == 0
-    assert all(item.candidate_text is None for item in document.candidates)
-    assert all("syntax-evidence-pending" in item.blocking_reasons
-               for item in document.candidates)
-    assert all(item.status is CandidateStatus.BLOCKED for item in document.candidates)
+    assert document.render_state.value == "review-candidates"
+    assert document.summary.candidates == 9
+    assert document.summary.blocked == 1
+    for category in (
+        CandidateCategory.IP_ROUTING,
+        CandidateCategory.SVI_INTERFACE,
+        CandidateCategory.SVI_ADDRESS,
+        CandidateCategory.STATIC_ROUTE,
+        CandidateCategory.DEFAULT_ROUTE,
+    ):
+        candidates = _by_category(document, category)
+        assert candidates
+        assert all(
+            item.status is CandidateStatus.CANDIDATE
+            and item.candidate_text is not None
+            and item.syntax_evidence
+            and item.syntax_evidence[0].review_state == "independently-reviewed"
+            for item in candidates
+        )
+    helper = _by_category(document, CandidateCategory.DHCP_HELPER_ADDRESS)[0]
+    assert helper.status is CandidateStatus.BLOCKED
+    assert helper.candidate_text is None
+    assert "syntax-evidence-pending" in helper.blocking_reasons
+    assert document.source.command_evidence_registry_id == DEFAULT_REGISTRY.registry_id
 
 
 def test_actual_base_evidence_generates_five_categories() -> None:
@@ -235,9 +255,10 @@ def test_nonblocking_excluded_scope_notes_do_not_globally_block() -> None:
 def test_missing_or_wrong_scope_evidence_blocks() -> None:
     revision = revision_for(make_l3_plan("00000000-0000-0000-0000-000000000099"))
     intent = build_layer3_intent(revision)
-    empty = CommandEvidenceRegistry(())
+    empty = CommandEvidenceRegistry((), production=False)
     document = build_l3_cli_candidates(
         revision, intent, _core_assignment(intent), empty,
+        test_only_registry=True,
     )
     assert all(item.candidate_text is None for item in document.candidates)
     assert all("syntax-evidence-missing" in item.blocking_reasons
@@ -783,6 +804,44 @@ def test_baseline_must_be_supplied_and_match() -> None:
         build_l3_cli_candidates(
             revision, intent, core, TEST_REGISTRY,
             baseline=tampered, test_only_registry=True,
+        )
+
+
+def _forged_production_registry() -> CommandEvidenceRegistry:
+    base = _synthetic_eligible_evidence_registry()
+    rows = tuple(
+        replace(row, review=replace(row.review, reviewer="synthetic-reviewer"))
+        for row in base.rows
+    )
+    return CommandEvidenceRegistry(
+        rows, registry_id=DEFAULT_REGISTRY.registry_id, production=True,
+    )
+
+
+def test_untrusted_production_registry_is_rejected() -> None:
+    forged = _forged_production_registry()
+    assert forged.production is True
+    assert forged.renderable_count == 6
+    revision = revision_for(make_l3_plan(
+        "00000000-0000-0000-0000-000000000099", static_route_count=1,
+    ))
+    intent = build_layer3_intent(revision)
+    with pytest.raises(
+        RenderBindingError, match="untrusted-production-registry",
+    ):
+        build_l3_cli_candidates(
+            revision, intent, _core_assignment(intent), forged,
+        )
+    identical_copy = CommandEvidenceRegistry(
+        DEFAULT_REGISTRY.rows,
+        registry_id=DEFAULT_REGISTRY.registry_id,
+        production=True,
+    )
+    with pytest.raises(
+        RenderBindingError, match="untrusted-production-registry",
+    ):
+        build_l3_cli_candidates(
+            revision, intent, _core_assignment(intent), identical_copy,
         )
 
 

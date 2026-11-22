@@ -27,11 +27,17 @@ from event_switch_manager.planning.layer3_command_evidence_reviews import (
 )
 
 
-def test_production_rows_are_pending_and_render_no_text() -> None:
+def test_production_rows_have_five_reviewed_and_one_pending() -> None:
     assert len(ROWS) == 6
-    assert DEFAULT_REGISTRY.renderable_count == 0
-    assert {row.review.state for row in ROWS} == {EvidenceReviewState.PENDING}
-    assert {row.topic for row in ROWS} == set(L3CommandTopic)
+    states = {row.topic: row.review.state for row in ROWS}
+    assert states[L3CommandTopic.DHCP_HELPER_ADDRESS] is EvidenceReviewState.PENDING
+    assert {
+        state for topic, state in states.items()
+        if topic is not L3CommandTopic.DHCP_HELPER_ADDRESS
+    } == {EvidenceReviewState.REVIEWED}
+    assert DEFAULT_REGISTRY.review_valid_count == 5
+    assert DEFAULT_REGISTRY.eligible_count == 5
+    assert DEFAULT_REGISTRY.renderable_count == 5
 
 
 def test_every_row_has_exact_scope_and_sources() -> None:
@@ -234,7 +240,7 @@ def test_digest_changes_when_content_changes() -> None:
     original = row.content_digest()
     changed = replace(row, command=f"{row.command} ")
     assert changed.content_digest() != original
-    assert row.renderable is False
+    assert changed.renderable is False
 
 
 def test_reviewed_registry_separates_review_valid_from_renderable() -> None:
@@ -368,11 +374,16 @@ def test_registry_fingerprint_is_content_sensitive_and_deterministic() -> None:
     assert DEFAULT_REGISTRY.fingerprint == CommandEvidenceRegistry(ROWS).fingerprint
     row = ROWS[0]
     changed = replace(row, limits=(*row.limits, "R30 classification fingerprint probe"))
-    registry = CommandEvidenceRegistry((changed, *ROWS[1:]))
+    registry = CommandEvidenceRegistry(
+        (changed, *ROWS[1:]), production=False,
+    )
     assert registry.fingerprint != DEFAULT_REGISTRY.fingerprint
 
 
 def test_review_valid_scope_eligible_and_renderable_counts_are_separate() -> None:
+    assert DEFAULT_REGISTRY.review_valid_count == 5
+    assert DEFAULT_REGISTRY.eligible_count == 5
+    assert DEFAULT_REGISTRY.renderable_count == 5
     actual = _test_only_evidence_registry()
     assert actual.review_valid_count == 6
     assert actual.eligible_count == 5
@@ -472,6 +483,50 @@ def test_registry_matching_scope_including_license_and_release() -> None:
     )
 
 
+def test_production_attestations_are_exact_and_dhcp_is_pending() -> None:
+    expected = {
+        "l3-9300-ip-routing-v1": "4bc17e044c45b5d823b596cd7bd74bbe20505eec50e9abebb5f265ad0c724f47",
+        "l3-9300-svi-interface-v1": (
+            "8c19d4f33d944b3230c8888ea0b70777"
+            "58ee56af8afbbb41da93132d8a03ec51"
+        ),
+        "l3-9300-svi-address-v1": (
+            "2540d35d2c4200cc67e9b3adfe070cb0"
+            "724aeddf40901552979ca18090f3a071"
+        ),
+        "l3-9300-static-route-v1": (
+            "647c4577cc5348f32cbdb3f974aeea9f"
+            "491c2e6080f21c06cc1b7f8cc7aa7ecc"
+        ),
+        "l3-9300-default-route-v1": (
+            "ab9ba793037ef8c66b13b6363a241113"
+            "4ec4e1dd82f1b290699628abb4ac307c"
+        ),
+    }
+    for row in ROWS:
+        if row.evidence_id in expected:
+            assert row.review.state is EvidenceReviewState.REVIEWED
+            assert row.review.reviewer == (
+                "ChatGPT (GPT-6) — independent read-only AI evidence reviewer"
+            )
+            assert row.review.reviewed_at == "2026-11-22"
+            assert row.review.findings
+            assert row.review.content_digest == expected[row.evidence_id]
+            assert row.content_digest() == expected[row.evidence_id]
+            assert row.renderable is True
+        elif row.evidence_id == "l3-9300-dhcp-helper-address-v1":
+            assert row.review.state is EvidenceReviewState.PENDING
+            assert row.renderable is False
+            assert row.evidence_id not in REVIEWED_RECORDS
+
+
 def test_no_production_review_attestation_exists() -> None:
-    assert REVIEWED_RECORDS == {}
+    assert set(REVIEWED_RECORDS) == {
+        "l3-9300-ip-routing-v1",
+        "l3-9300-svi-interface-v1",
+        "l3-9300-svi-address-v1",
+        "l3-9300-static-route-v1",
+        "l3-9300-default-route-v1",
+    }
+    assert "l3-9300-dhcp-helper-address-v1" not in REVIEWED_RECORDS
     assert REJECTED_RECORDS == {}

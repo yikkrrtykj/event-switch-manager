@@ -381,6 +381,13 @@ class CommandEvidenceRegistry:
             for row in self.rows:
                 if (
                     row.review.state is EvidenceReviewState.REVIEWED
+                    and not row.renderable
+                ):
+                    raise ValueError(
+                        "Reviewed evidence must be well-formed and digest-bound",
+                    )
+                if (
+                    row.review.state is EvidenceReviewState.REVIEWED
                     and row.review.reviewer.strip().casefold().startswith("test-only")
                 ):
                     raise ValueError(
@@ -855,6 +862,13 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
 )
 
 DEFAULT_REGISTRY = CommandEvidenceRegistry(ROWS)
+
+_ATTESTATION_IDS = set(_REVIEWS) | set(_REJECTIONS)
+_ROW_IDS = {row.evidence_id for row in ROWS}
+if not _ATTESTATION_IDS <= _ROW_IDS:
+    raise ValueError("Review record references unknown evidence ID")
+if set(_REVIEWS) & set(_REJECTIONS):
+    raise ValueError("Evidence ID cannot be both reviewed and rejected")
 
 
 def evidence_row_count() -> int:

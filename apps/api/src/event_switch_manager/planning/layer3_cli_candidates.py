@@ -877,6 +877,8 @@ def build_l3_cli_candidates(
     """Build one deterministic, read-only candidate document."""
     if not registry.production and not test_only_registry:
         raise RenderBindingError("non-production-registry-not-allowed")
+    if not test_only_registry and registry is not DEFAULT_REGISTRY:
+        raise RenderBindingError("untrusted-production-registry")
     if test_only_registry and registry.production:
         raise RenderBindingError("test-only-path-rejects-production-registry")
     intent = _verify_binding(revision, intent, baseline)
