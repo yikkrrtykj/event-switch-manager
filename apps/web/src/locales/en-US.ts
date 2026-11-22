@@ -704,6 +704,7 @@ export const enUS = {
   l3LoadingRevision: "Loading the saved revision…",
   l3LoadReviewError: "Unable to load the L3 review",
   l3ReasonCode: "Reason code",
+  l3NotAvailable: "Not available",
   l3DataInconsistent: "L3 data binding is inconsistent",
   l3DataInconsistentHelp: "The screen hid command text and will not treat this response as verified. This is a UI safety check only; the independent validator remains authoritative.",
   l3ValidationReport: "Independent validation report",

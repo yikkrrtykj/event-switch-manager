@@ -706,6 +706,7 @@ export const zhCN = {
   l3LoadingRevision: "正在加载已保存修订版本…",
   l3LoadReviewError: "无法加载三层审阅",
   l3ReasonCode: "原因代码",
+  l3NotAvailable: "不可用",
   l3DataInconsistent: "三层数据绑定不一致",
   l3DataInconsistentHelp: "页面已隐藏命令文本，且不会把该响应当作已验证结果。此检查仅是前端防护，独立验证器仍是权威来源。",
   l3ValidationReport: "独立验证报告",

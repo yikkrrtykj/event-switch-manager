@@ -177,14 +177,14 @@ export function L3ReviewWorkspace({ event, navigate }: { event: EventRecord; nav
     {revisions && revisions.length > 0 && <section className="panel l3-controls" aria-label={t('l3ReviewControls')}>
       <label className="field" htmlFor="l3-revision">{t('l3SelectRevision')}
         <Select id="l3-revision" value={revisionId} disabled={loading} onChange={(input) => setRevisionId(input.target.value)}>
-          {revisions.map((item) => <option value={item.id} key={item.id}>#{item.number} — {item.content_hash.slice(0, 12)}</option>)}
+          {revisions.map((item) => <option value={item.id} key={item.id}>#{item.number}: {item.content_hash.slice(0, 12)}</option>)}
         </Select>
       </label>
       <label className="field" htmlFor="l3-assignment">{t('l3SelectAssignment')}
         <Select id="l3-assignment" value={assignmentId} disabled={loading || !cores.length}
           onChange={(input) => setAssignmentId(input.target.value)}>
           {cores.length
-            ? cores.map((item) => <option value={item.assignmentId} key={item.assignmentId}>{item.hostname}{item.pid ? ' — ' + item.pid : ''}</option>)
+            ? cores.map((item) => <option value={item.assignmentId} key={item.assignmentId}>{item.hostname}{item.pid ? ' (' + item.pid + ')' : ''}</option>)
             : <option value="">{t('l3NoCiscoCore')}</option>}
         </Select>
       </label>
@@ -204,12 +204,12 @@ export function L3ReviewWorkspace({ event, navigate }: { event: EventRecord; nav
         <div><dt>{t('revision')}</dt><dd>#{revision.number}</dd></div>
         <div><dt>{t('revisionId')}</dt><dd><code>{revision.id}</code></dd></div>
         <div><dt>{t('l3RevisionHash')}</dt><dd><code>{revision.content_hash}</code></dd></div>
-        <div><dt>{t('device')}</dt><dd>{report?.device.hostname ?? selectedCore?.hostname ?? '—'}</dd></div>
-        <div><dt>{t('l3AssignmentId')}</dt><dd><code>{assignmentId || '—'}</code></dd></div>
-        <div><dt>{t('l3ExactPid')}</dt><dd><code>{report?.device.exact_pid ?? selectedCore?.pid ?? '—'}</code></dd></div>
-        <div><dt>{t('l3SoftwareImage')}</dt><dd>{report?.device.software_image ?? selectedCore?.image ?? '—'}</dd></div>
-        <div><dt>{t('l3SoftwareLicense')}</dt><dd>{report?.device.software_license ?? selectedCore?.license ?? '—'}</dd></div>
-        <div><dt>{t('l3StackIdentity')}</dt><dd>{report?.device.stack_identity ?? selectedCore?.stackIdentity ?? '—'}</dd></div>
+        <div><dt>{t('device')}</dt><dd>{report?.device.hostname ?? selectedCore?.hostname ?? t('l3NotAvailable')}</dd></div>
+        <div><dt>{t('l3AssignmentId')}</dt><dd><code>{assignmentId || t('l3NotAvailable')}</code></dd></div>
+        <div><dt>{t('l3ExactPid')}</dt><dd><code>{report?.device.exact_pid ?? selectedCore?.pid ?? t('l3NotAvailable')}</code></dd></div>
+        <div><dt>{t('l3SoftwareImage')}</dt><dd>{report?.device.software_image ?? selectedCore?.image ?? t('l3NotAvailable')}</dd></div>
+        <div><dt>{t('l3SoftwareLicense')}</dt><dd>{report?.device.software_license ?? selectedCore?.license ?? t('l3NotAvailable')}</dd></div>
+        <div><dt>{t('l3StackIdentity')}</dt><dd>{report?.device.stack_identity ?? selectedCore?.stackIdentity ?? t('l3NotAvailable')}</dd></div>
         <div><dt>{t('l3HardwareVerification')}</dt><dd><Badge tone="warning">{t('hardwareNotVerified')}</Badge></dd></div>
       </dl>
     </section>}
@@ -302,10 +302,10 @@ export function L3ReviewWorkspace({ event, navigate }: { event: EventRecord; nav
                 <td>{row.targetName}</td>
                 <td>{row.status
                   ? <Badge tone={row.status === 'candidate' ? 'success' : row.status === 'blocked' ? 'danger' : 'warning'}>{t(candidateStatusKeys[row.status])}</Badge>
-                  : <span className="muted">—</span>}</td>
+                  : <span className="muted">{t('l3NotAvailable')}</span>}</td>
                 <td><Badge tone={row.verdict === 'pass' ? 'success' : row.verdict === 'blocked' || row.verdict === 'fail' ? 'danger' : 'warning'}>{t(verdictKeys[row.verdict])}</Badge></td>
-                <td>{row.risk}</td><td>{row.capability}</td><td>{row.evidenceReview}</td>
-                <td>{row.blockingReasons.length ? row.blockingReasons.map((reason) => <code className="l3-reason" key={reason}>{reason}</code>) : <span className="muted">—</span>}</td>
+                <td>{row.risk}</td><td>{row.capability ?? t('l3NotAvailable')}</td><td>{row.evidenceReview ?? t('l3NotAvailable')}</td>
+                <td>{row.blockingReasons.length ? row.blockingReasons.map((reason) => <code className="l3-reason" key={reason}>{reason}</code>) : <span className="muted">{t('l3NotAvailable')}</span>}</td>
                 <td><code>{row.candidateId}</code></td>
                 <td><CandidateDetails row={row} /></td>
               </tr>)}

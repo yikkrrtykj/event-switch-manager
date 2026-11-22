@@ -291,8 +291,8 @@ export interface ReviewRow {
   status: L3CandidateStatus | null
   verdict: L3Verdict
   risk: string
-  capability: string
-  evidenceReview: string
+  capability: string | null
+  evidenceReview: string | null
   blockingReasons: string[]
   commandContext: L3CommandContext | null
   text: string | null
@@ -538,8 +538,8 @@ export function reviewRows(report: L3ValidationReport, document?: L3CandidateDoc
       status: rendered?.status ?? null,
       verdict: candidate.independent_verdict,
       risk: candidate.risk.independent_floor,
-      capability: candidate.target_capability.verdict ?? '—',
-      evidenceReview: candidate.evidence.review_state ?? '—',
+      capability: candidate.target_capability.verdict ?? null,
+      evidenceReview: candidate.evidence.review_state ?? null,
       blockingReasons: [...new Set(reasons)],
       commandContext: textAllowed ? rendered.command_context : null,
       text: textAllowed ? rendered.candidate_text : null,

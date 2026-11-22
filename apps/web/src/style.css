@@ -402,7 +402,7 @@ dialog:has(.port-editor) { width: min(68rem, calc(100% - 1rem)); }
   gap: .45rem .9rem; margin: .7rem 0 0;
 }
 .l3-metadata div { min-width: 0; }
-.l3-metadata dt, .l3-counts dt { color: var(--muted-foreground); font-size: var(--size-small); }
+.l3-metadata dt, .l3-counts dt { color: var(--muted-foreground); font-size: var(--size-small); font-variant-numeric: tabular-nums; }
 .l3-metadata dd, .l3-counts dd { margin: .15rem 0 0; min-width: 0; overflow-wrap: anywhere; }
 .l3-metadata code { overflow-wrap: anywhere; }
 .l3-counts {
@@ -414,7 +414,7 @@ dialog:has(.port-editor) { width: min(68rem, calc(100% - 1rem)); }
 .l3-candidate-error { border: 1px solid var(--border); border-radius: var(--radius); padding: .45rem .6rem; }
 .l3-partial-note, .l3-filter-note { color: var(--warning); background: var(--warning-surface); }
 .l3-filter-note { margin: .5rem 0 0; font-size: var(--size-small); }
-.l3-table-hint { display: none; margin: .4rem 0 0; font-size: var(--size-small); }
+.l3-table-hint { display: none; margin: .4rem 0 0; font-size: var(--size-small); font-variant-numeric: tabular-nums; }
 .l3-dhcp-blocked { margin-top: .65rem; background: var(--danger-surface); color: var(--danger); }
 .l3-dhcp-blocked p { margin: .35rem 0 0; font-size: var(--size-small); }
 .l3-filters select { max-width: 15rem; }
