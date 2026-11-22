@@ -379,3 +379,78 @@ dialog:has(.port-editor) { width: min(68rem, calc(100% - 1rem)); }
   .port-control-panel, .port-control-review { padding: .55rem; }
   .port-control-related dl { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* CIS-03-03D read-only L3 CLI review */
+.l3-review .status-strip { margin-top: .45rem; }
+.l3-scope-note {
+  margin: 0 0 .8rem; padding: .5rem .7rem; border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--muted-foreground);
+  background: var(--muted); font-size: var(--size-small);
+}
+.l3-controls {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: .75rem; margin-bottom: .75rem;
+}
+.l3-controls .field { display: grid; gap: .25rem; font-size: var(--size-small); font-weight: 600; }
+.l3-controls select { width: 100%; }
+.l3-revision, .l3-report, .l3-candidate-section, .l3-empty, .l3-error,
+.l3-candidate-error { margin-top: .8rem; }
+.l3-revision .section-head, .l3-report .section-head,
+.l3-candidate-section .section-head { align-items: flex-start; }
+.l3-metadata {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: .45rem .9rem; margin: .7rem 0 0;
+}
+.l3-metadata div { min-width: 0; }
+.l3-metadata dt, .l3-counts dt { color: var(--muted-foreground); font-size: var(--size-small); }
+.l3-metadata dd, .l3-counts dd { margin: .15rem 0 0; min-width: 0; overflow-wrap: anywhere; }
+.l3-metadata code { overflow-wrap: anywhere; }
+.l3-counts {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
+  gap: .4rem .8rem; margin: .7rem 0 0;
+}
+.l3-counts dd { font-weight: 700; font-variant-numeric: tabular-nums; }
+.l3-partial-note, .l3-filter-note, .l3-dhcp-blocked,
+.l3-candidate-error { border: 1px solid var(--border); border-radius: var(--radius); padding: .45rem .6rem; }
+.l3-partial-note, .l3-filter-note { color: var(--warning); background: var(--warning-surface); }
+.l3-filter-note { margin: .5rem 0 0; font-size: var(--size-small); }
+.l3-table-hint { display: none; margin: .4rem 0 0; font-size: var(--size-small); }
+.l3-dhcp-blocked { margin-top: .65rem; background: var(--danger-surface); color: var(--danger); }
+.l3-dhcp-blocked p { margin: .35rem 0 0; font-size: var(--size-small); }
+.l3-filters select { max-width: 15rem; }
+.l3-candidate-section table { min-width: 76rem; }
+.l3-candidate-section table th, .l3-candidate-section table td { vertical-align: top; }
+.l3-candidate-section table th:nth-child(2), .l3-candidate-section table td:nth-child(2) { min-width: 9rem; }
+.l3-candidate-section table th:nth-child(3), .l3-candidate-section table td:nth-child(3),
+.l3-candidate-section table th:nth-child(4), .l3-candidate-section table td:nth-child(4),
+.l3-candidate-section table th:nth-child(5), .l3-candidate-section table td:nth-child(5),
+.l3-candidate-section table th:nth-child(6), .l3-candidate-section table td:nth-child(6),
+.l3-candidate-section table th:nth-child(7), .l3-candidate-section table td:nth-child(7) {
+  min-width: 7rem;
+}
+.l3-candidate-section [data-slot="badge"] { white-space: nowrap; }
+.l3-candidate-section .l3-reason, .l3-candidate-section td > code { white-space: normal; overflow-wrap: anywhere; }
+.l3-candidate-details summary { min-height: 2rem; padding-block: .3rem; white-space: nowrap; }
+.l3-details-list {
+  display: grid; gap: .25rem; min-width: 17rem; max-width: 32rem;
+  margin: .25rem 0 .35rem; white-space: normal;
+}
+.l3-details-list div { display: grid; grid-template-columns: minmax(6rem, max-content) minmax(0, 1fr); gap: .45rem; }
+.l3-details-list dt { font-weight: 650; }
+.l3-details-list dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.l3-command { margin: .2rem 0; max-height: 10rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.l3-reason { display: inline-block; margin: 0 .25rem .2rem 0; padding: .05rem .25rem; background: var(--muted); border-radius: 2px; }
+.l3-error ul { margin: .4rem 0; padding-inline-start: 1.2rem; }
+.l3-error li { margin-bottom: .2rem; }
+.l3-error code, .l3-candidate-error code { overflow-wrap: anywhere; }
+@media (max-width: 38rem) {
+  .l3-controls { grid-template-columns: minmax(0, 1fr); }
+  .l3-details-list div { grid-template-columns: minmax(0, 1fr); gap: .1rem; }
+  .l3-candidate-section table { width: max-content; min-width: 0; }
+  .l3-table-hint { display: block; }
+  .l3-candidate-section table th, .l3-candidate-section table td { white-space: nowrap; }
+  .l3-candidate-section table th:nth-child(2), .l3-candidate-section table td:nth-child(2),
+  .l3-candidate-section table th:nth-child(8), .l3-candidate-section table td:nth-child(8) {
+    white-space: normal;
+  }
+}
