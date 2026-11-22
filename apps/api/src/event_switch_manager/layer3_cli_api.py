@@ -1,0 +1,455 @@
+"""CIS-03-03C read-only L3 candidate and validation API.
+
+Both routes use one server-side trust pipeline.  The client supplies only the
+three UUID path identifiers; the Event, Saved Revision, baseline, Layer3Intent,
+Candidate Document, production Evidence Registry and ExpectedSource are all
+rebuilt from trusted database and frozen production objects.
+
+The Candidate route returns a document only after the complete independent
+validation has succeeded (no candidate FAIL).  The Validation route returns the
+frozen ``L3ValidationReport``; an integrity-gate failure is a 409 and never a
+trusted report.  Neither route reads a device, connects to one, or exposes a
+deployment artefact.
+"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+from sqlalchemy.orm import Session
+
+from .api import DatabaseSession, find_event
+from .domain import DeviceRole
+from .plan_api import revision_and_baseline
+from .planning.layer3_cli_candidates import (
+    CandidateStatus,
+    L3CandidateDocument,
+    RenderBindingError,
+    RenderTargetNotFound,
+    build_l3_cli_candidates,
+)
+from .planning.layer3_cli_validation import (
+    ExpectedSource,
+    IndependentVerdict,
+    L3ValidationReport,
+    ValidationIntegrityError,
+    independent_candidate_fingerprint,
+    independent_render_fingerprint,
+    independent_report_fingerprint,
+    validate_l3_candidates,
+)
+from .planning.layer3_command_evidence import DEFAULT_REGISTRY
+from .planning.layer3_intent import L3DeviceIntent, Layer3Intent, build_layer3_intent
+from .planning.plan import PlanRevision, canonical_plan, plan_hash
+
+router = APIRouter(prefix="/api/v1/events/{event_id}")
+
+VALIDATION_SCOPE_HEADER = "X-Validation-Scope"
+_FULL_SCOPE = "full"
+_EVENT_NOT_FOUND_DETAIL = "Event not found"
+_REVISION_NOT_FOUND_DETAIL = "Plan revision not found"
+_REFUSED_HEADERS = ("if-match", "if-none-match")
+
+
+def _error(
+    status_code: int,
+    *,
+    reason_code: str,
+    stage: str,
+    **extra: object,
+) -> HTTPException:
+    detail: dict[str, object] = {"reason_code": reason_code, "stage": stage}
+    detail.update(extra)
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+def _not_found(reason_code: str, stage: str) -> HTTPException:
+    return _error(404, reason_code=reason_code, stage=stage)
+
+
+def _conflict(
+    reason_code: str,
+    stage: str,
+    **extra: object,
+) -> HTTPException:
+    return _error(409, reason_code=reason_code, stage=stage, **extra)
+
+
+def _reject_undeclared(request: Request, body: bytes) -> None:
+    fields = sorted(request.query_params.keys())
+    fields.extend(
+        name for name in _REFUSED_HEADERS if name in request.headers
+    )
+    if body:
+        fields.append("request-body")
+    if fields:
+        raise HTTPException(
+            status_code=400,
+            detail={"reason_code": "undeclared-input", "fields": fields},
+        )
+
+
+def _require_event(session: Session, event_id: UUID) -> None:
+    try:
+        find_event(session, event_id)
+    except HTTPException as exc:
+        if exc.status_code == 404 and exc.detail == _EVENT_NOT_FOUND_DETAIL:
+            raise _not_found("event-not-found", "event") from None
+        raise
+
+
+def _load_revisions(
+    session: Session,
+    event_id: UUID,
+    revision_id: UUID,
+) -> tuple[PlanRevision, PlanRevision | None]:
+    try:
+        revision, baseline = revision_and_baseline(event_id, revision_id, session)
+    except HTTPException as exc:
+        if exc.status_code == 404 and exc.detail == _REVISION_NOT_FOUND_DETAIL:
+            raise _not_found("saved-revision-not-found", "revision") from None
+        raise
+    except ValidationError:
+        raise _conflict("revision-document-invalid", "revision") from None
+    return revision, baseline
+
+
+def _verify_revision(revision: PlanRevision, event_id: UUID, stage: str) -> None:
+    if plan_hash(canonical_plan(revision.plan)) != revision.content_hash:
+        raise _conflict("revision-canonical-hash-mismatch", stage)
+    if revision.plan.event_id != event_id:
+        raise _conflict("revision-event-mismatch", stage)
+
+
+def _rebuild_intent(
+    revision: PlanRevision,
+    baseline: PlanRevision | None,
+) -> Layer3Intent:
+    try:
+        return build_layer3_intent(revision, baseline)
+    except ValidationError:
+        raise _conflict("layer3-intent-build-failed", "intent") from None
+
+
+def _eligible_device(
+    intent: Layer3Intent,
+    assignment_id: UUID,
+) -> L3DeviceIntent:
+    device = next(
+        (
+            item for item in intent.devices
+            if item.identity.assignment_id == assignment_id
+        ),
+        None,
+    )
+    if device is None:
+        raise _not_found("assignment-not-found", "assignment")
+    identity = device.identity
+    if identity.role is not DeviceRole.CORE or identity.vendor != "cisco":
+        raise _conflict(
+            "assignment-not-eligible-for-l3-cli", "assignment",
+        )
+    return device
+
+
+def _build_document(
+    revision: PlanRevision,
+    intent: Layer3Intent,
+    baseline: PlanRevision | None,
+    assignment_id: UUID,
+) -> L3CandidateDocument:
+    try:
+        return build_l3_cli_candidates(
+            revision,
+            intent,
+            assignment_id,
+            DEFAULT_REGISTRY,
+            baseline=baseline,
+        )
+    except RenderBindingError as exc:
+        raise _conflict(
+            "renderer-binding-failure",
+            "renderer",
+            failures=[exc.reason_code],
+        ) from None
+    except RenderTargetNotFound:
+        raise _not_found("assignment-not-found", "renderer") from None
+
+
+def _expected_source(
+    revision: PlanRevision,
+    intent: Layer3Intent,
+    document: L3CandidateDocument,
+    assignment_id: UUID,
+) -> ExpectedSource:
+    return ExpectedSource(
+        event_id=revision.plan.event_id,
+        saved_revision_uuid=revision.id,
+        revision_number=revision.number,
+        revision_canonical_hash=revision.content_hash,
+        l3_intent_schema_version=intent.l3_intent_schema_version,
+        l3_intent_fingerprint=intent.intent_fingerprint,
+        l3_render_contract_id=document.contract_id,
+        l3_render_contract_version=document.l3_render_schema_version,
+        l3_render_fingerprint=document.l3_render_fingerprint,
+        command_evidence_registry_id=DEFAULT_REGISTRY.registry_id,
+        command_evidence_registry_fingerprint=DEFAULT_REGISTRY.fingerprint,
+        assignment_id=assignment_id,
+        baseline_revision_uuid=intent.baseline.revision_id,
+        baseline_revision_hash=intent.baseline.revision_hash,
+    )
+
+
+def _validate(
+    revision: PlanRevision,
+    intent: Layer3Intent,
+    document: L3CandidateDocument,
+    expected: ExpectedSource,
+    baseline: PlanRevision | None,
+    assignment_id: UUID,
+) -> L3ValidationReport:
+    try:
+        report = validate_l3_candidates(
+            revision,
+            intent,
+            document,
+            expected,
+            assignment_id,
+            baseline=baseline,
+        )
+    except ValidationIntegrityError as exc:
+        failures = [exc.reason_code, *exc.reasons]
+        raise _conflict(
+            "validation-integrity-failure",
+            "validation",
+            failures=failures,
+        ) from None
+    _require_report_integrity(report, expected, document, revision, assignment_id)
+    return report
+
+
+def _require_report_integrity(
+    report: L3ValidationReport,
+    expected: ExpectedSource,
+    document: L3CandidateDocument,
+    revision: PlanRevision,
+    assignment_id: UUID,
+) -> None:
+    problems: list[str] = []
+    if report.validation_scope != "production":
+        problems.append("validation-scope-not-production")
+    if report.expected_source != expected:
+        problems.append("expected-source-mismatch")
+    if report.assignment_id != assignment_id:
+        problems.append("assignment-mismatch")
+    if report.source.event_id != revision.plan.event_id:
+        problems.append("source-event-mismatch")
+    if report.source.saved_revision_uuid != revision.id:
+        problems.append("source-revision-mismatch")
+    if report.source.revision_canonical_hash != revision.content_hash:
+        problems.append("source-revision-hash-mismatch")
+    if report.source.l3_intent_schema_version != expected.l3_intent_schema_version:
+        problems.append("source-intent-schema-mismatch")
+    if report.source.l3_intent_fingerprint != expected.l3_intent_fingerprint:
+        problems.append("source-intent-fingerprint-mismatch")
+    if report.source.l3_render_contract_id != expected.l3_render_contract_id:
+        problems.append("source-render-contract-mismatch")
+    if report.source.l3_render_contract_version != expected.l3_render_contract_version:
+        problems.append("source-render-contract-version-mismatch")
+    if report.source.command_evidence_registry_id != DEFAULT_REGISTRY.registry_id:
+        problems.append("source-registry-mismatch")
+    if report.source.command_evidence_registry_fingerprint != DEFAULT_REGISTRY.fingerprint:
+        problems.append("source-registry-fingerprint-mismatch")
+    if report.source.assignment_id != assignment_id:
+        problems.append("source-assignment-mismatch")
+    if report.source.l3_render_fingerprint != document.l3_render_fingerprint:
+        problems.append("source-render-fingerprint-mismatch")
+    if report.source.baseline_revision_uuid != expected.baseline_revision_uuid:
+        problems.append("source-baseline-uuid-mismatch")
+    if report.source.baseline_revision_hash != expected.baseline_revision_hash:
+        problems.append("source-baseline-hash-mismatch")
+    integrity_values = (
+        report.integrity.revision_canonical_hash,
+        report.integrity.baseline_canonical_hash,
+        report.integrity.intent_rebuilt,
+        report.integrity.intent_fingerprint,
+        report.integrity.expected_source,
+        report.integrity.document_source,
+        report.integrity.document_fingerprint,
+        report.integrity.candidate_fingerprints,
+        report.integrity.candidate_ids_unique,
+        report.integrity.candidate_set,
+        report.integrity.summary,
+        report.integrity.safety,
+    )
+    if not all(integrity_values):
+        problems.append("integrity-flag-false")
+    if report.report_fingerprint != independent_report_fingerprint(report):
+        problems.append("report-fingerprint-mismatch")
+    if document.l3_render_fingerprint != independent_render_fingerprint(document):
+        problems.append("document-fingerprint-mismatch")
+    for candidate in document.candidates:
+        if candidate.candidate_fingerprint != independent_candidate_fingerprint(candidate):
+            problems.append("candidate-fingerprint-mismatch")
+            break
+    if report.safety.candidate_only is not True:
+        problems.append("safety-candidate-only")
+    if report.safety.executable is not False:
+        problems.append("safety-executable")
+    if report.safety.deployable is not False:
+        problems.append("safety-deployable")
+    if report.safety.deployment_allowed is not False:
+        problems.append("safety-deployment-allowed")
+    if report.safety.hardware_verified is not False:
+        problems.append("safety-hardware-verified")
+    if report.safety.device_connection != "none":
+        problems.append("safety-device-connection")
+    if report.safety.running_config_read is not False:
+        problems.append("safety-running-config-read")
+    if report.safety.device_writes_enabled is not False:
+        problems.append("safety-device-writes")
+    if report.safety.cli is not None:
+        problems.append("safety-cli")
+    if report.safety.deployment_artifact is not None:
+        problems.append("safety-deployment-artifact")
+    if problems:
+        raise _conflict(
+            "validation-integrity-failure",
+            "validation",
+            failures=sorted(set(problems)),
+        )
+    document_ids = [item.candidate_id for item in document.candidates]
+    report_ids = [item.candidate_id for item in report.candidates]
+    if document_ids != report_ids:
+        raise _conflict(
+            "validation-integrity-failure",
+            "validation",
+            failures=["candidate-set-mismatch"],
+        )
+
+
+def _candidate_document_allowed(
+    document: L3CandidateDocument,
+    report: L3ValidationReport,
+) -> None:
+    if document.summary.total == 0:
+        raise _conflict(
+            "candidate-document-not-reviewable",
+            "candidate",
+            failures=["empty-candidate-document"],
+        )
+    by_id = {item.candidate_id: item for item in report.candidates}
+    if len(by_id) != len(report.candidates):
+        raise _conflict(
+            "candidate-document-not-reviewable",
+            "candidate",
+            failures=["duplicate-report-candidate"],
+        )
+    for candidate in document.candidates:
+        validation = by_id.get(candidate.candidate_id)
+        if validation is None:
+            raise _conflict(
+                "candidate-document-not-reviewable",
+                "candidate",
+                failures=["candidate-not-in-report"],
+            )
+        if validation.independent_verdict is IndependentVerdict.FAIL:
+            raise _conflict(
+                "candidate-document-not-reviewable",
+                "candidate",
+                failures=[f"candidate-failed:{candidate.candidate_id}"],
+            )
+        if candidate.status is CandidateStatus.CANDIDATE:
+            if (
+                validation.independent_verdict is not IndependentVerdict.PASS
+                or candidate.candidate_text is None
+            ):
+                raise _conflict(
+                    "candidate-document-not-reviewable",
+                    "candidate",
+                    failures=["candidate-text-not-validated"],
+                )
+        elif candidate.candidate_text is not None:
+            raise _conflict(
+                "candidate-document-not-reviewable",
+                "candidate",
+                failures=["blocked-candidate-has-text"],
+            )
+
+
+async def _trusted_response(
+    event_id: UUID,
+    revision_id: UUID,
+    assignment_id: UUID,
+    request: Request,
+    session: Session,
+) -> tuple[L3CandidateDocument, L3ValidationReport]:
+    _reject_undeclared(request, await request.body())
+    _require_event(session, event_id)
+    revision, baseline = _load_revisions(session, event_id, revision_id)
+    _verify_revision(revision, event_id, "revision")
+    if baseline is not None:
+        _verify_revision(baseline, event_id, "baseline")
+    intent = _rebuild_intent(revision, baseline)
+    _eligible_device(intent, assignment_id)
+    document = _build_document(revision, intent, baseline, assignment_id)
+    if document.summary.total == 0:
+        raise _conflict(
+            "candidate-document-not-reviewable",
+            "candidate",
+            failures=["empty-candidate-document"],
+        )
+    expected = _expected_source(revision, intent, document, assignment_id)
+    report = _validate(
+        revision, intent, document, expected, baseline, assignment_id,
+    )
+    return document, report
+
+
+@router.get(
+    "/plan-revisions/{revision_id}/assignments/{assignment_id}/l3-cli-candidates",
+)
+async def read_l3_cli_candidates(
+    event_id: UUID,
+    revision_id: UUID,
+    assignment_id: UUID,
+    request: Request,
+    session: DatabaseSession,
+) -> JSONResponse:
+    """Return the complete reviewed candidate document, or fail closed."""
+    document, report = await _trusted_response(
+        event_id, revision_id, assignment_id, request, session,
+    )
+    _candidate_document_allowed(document, report)
+    return JSONResponse(content=document.model_dump(mode="json"))
+
+
+@router.get(
+    "/plan-revisions/{revision_id}/assignments/{assignment_id}/l3-cli-validation",
+)
+async def read_l3_cli_validation(
+    event_id: UUID,
+    revision_id: UUID,
+    assignment_id: UUID,
+    request: Request,
+    session: DatabaseSession,
+) -> JSONResponse:
+    """Return the complete independent validation report."""
+    _document, report = await _trusted_response(
+        event_id, revision_id, assignment_id, request, session,
+    )
+    return JSONResponse(
+        content=report.model_dump(mode="json"),
+        headers={VALIDATION_SCOPE_HEADER: _FULL_SCOPE},
+    )
+
+
+__all__ = [
+    "VALIDATION_SCOPE_HEADER",
+    "read_l3_cli_candidates",
+    "read_l3_cli_validation",
+    "router",
+]
