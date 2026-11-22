@@ -488,6 +488,132 @@ def _candidate_server(candidate: Candidate) -> str | None:
     return None
 
 
+def _trusted_candidate_metadata(
+    device: L3DeviceIntent,
+    candidate: Candidate,
+) -> tuple[
+    dict[str, JsonValue],
+    tuple[tuple[str, str, str], ...],
+    tuple[UUID | None, UUID | None, UUID | None],
+] | None:
+    category = candidate.category
+    capability = _CATEGORY_CAPABILITY[category]
+    check = next(
+        (item for item in device.capability_checks
+         if item.capability is capability),
+        None,
+    )
+    expected_capability: tuple[tuple[str, str, str], ...] = (
+        ((check.capability.value, check.verdict.value, check.reason_code),)
+        if check is not None else ()
+    )
+    if category is CandidateCategory.IP_ROUTING:
+        return {}, expected_capability, (None, None, None)
+    if category in {
+        CandidateCategory.SVI_INTERFACE,
+        CandidateCategory.SVI_ADDRESS,
+    }:
+        interface = next(
+            (item for item in device.interfaces
+             if item.interface_id == candidate.target.stable_id),
+            None,
+        )
+        if interface is None:
+            return None
+        if category is CandidateCategory.SVI_INTERFACE:
+            parameters: dict[str, JsonValue] = {"vlan_id": interface.vlan}
+        else:
+            if interface.address is None:
+                return None
+            parameters = {
+                "address": str(interface.address.ip),
+                "mask": str(interface.address.netmask),
+            }
+        return (
+            parameters,
+            expected_capability,
+            (interface.interface_id, None, interface.subnet_id),
+        )
+    if category in {
+        CandidateCategory.STATIC_ROUTE,
+        CandidateCategory.DEFAULT_ROUTE,
+    }:
+        route = next(
+            (item for item in device.routes
+             if item.route_id == candidate.target.stable_id),
+            None,
+        )
+        if route is None:
+            return None
+        return (
+            {
+                "destination": str(route.destination),
+                "next_hop": str(route.next_hop),
+                "distance": route.distance,
+            },
+            expected_capability,
+            (None, route.route_id, None),
+        )
+    if category is CandidateCategory.DHCP_HELPER_ADDRESS:
+        relay = next(
+            (item for item in device.dhcp_relays
+             if item.svi_id == candidate.target.stable_id),
+            None,
+        )
+        if relay is None:
+            return None
+        server = _candidate_server(candidate)
+        if server is None or server not in {str(item) for item in relay.servers}:
+            return None
+        return (
+            {"server": server, "subnet_id": str(relay.subnet_id)},
+            expected_capability,
+            (None, None, relay.subnet_id),
+        )
+    return None
+
+
+def _planned_metadata_mismatches(
+    device: L3DeviceIntent,
+    candidate: Candidate,
+    intent_fingerprint: str,
+) -> tuple[str, ...]:
+    expected = _trusted_candidate_metadata(device, candidate)
+    if expected is None:
+        return ("metadata-target-not-found",)
+    expected_parameters, expected_capability, expected_provenance = expected
+    reasons: list[str] = []
+    if {
+        key: value for key, value in candidate.parameters.items()
+    } != expected_parameters:
+        reasons.append("candidate-parameters-mismatch")
+    actual_capability = tuple(
+        (item.capability, item.verdict, item.reason_code)
+        for item in candidate.capability_evidence
+    )
+    if actual_capability != expected_capability:
+        reasons.append("candidate-capability-evidence-mismatch")
+    provenance = candidate.provenance
+    expected_interface_id, expected_route_id, expected_subnet_id = expected_provenance
+    if (
+        provenance.intent_interface_id != expected_interface_id
+        or provenance.intent_route_id != expected_route_id
+        or provenance.intent_subnet_id != expected_subnet_id
+    ):
+        reasons.append("candidate-provenance-mismatch")
+    if provenance.intent_fingerprint != intent_fingerprint:
+        reasons.append("candidate-provenance-intent-mismatch")
+    return _dedupe(tuple(reasons))
+
+    if candidate.candidate_text is not None:
+        parsed = parse_l3_command(candidate.candidate_text)
+        if parsed.ok and parsed.parameter("server") is not None:
+            return str(parsed.parameter("server"))
+    if " -> " in candidate.target.name:
+        return candidate.target.name.rsplit(" -> ", 1)[1]
+    return None
+
+
 def _candidate_id(
     assignment_id: UUID,
     category: CandidateCategory,
@@ -670,6 +796,13 @@ def _assert_integrity(
         )
         if candidate.candidate_id != expected_candidate_id:
             raise ValidationIntegrityError("candidate-id-mismatch")
+        metadata_mismatches = _planned_metadata_mismatches(
+            device, candidate, trusted.intent_fingerprint,
+        )
+        if metadata_mismatches:
+            raise ValidationIntegrityError(
+                "candidate-metadata-mismatch", metadata_mismatches,
+            )
     reasons.extend(_source_mismatches(
         expected, revision, intent, document, assignment_id, registry,
     ))
@@ -1357,9 +1490,14 @@ def _semantic_blocker_is_legitimate(code: str) -> bool:
     return code.startswith(_LEGIT_SEMANTIC_PREFIXES)
 
 
+def _is_legitimate_evidence_reason(code: str) -> bool:
+    return code in _LEGIT_EVIDENCE_REASONS or code.startswith("scope-gap-")
+
+
 def _is_legitimate_blocked(
     *,
     evidence: ValidationEvidence,
+    evidence_reference_count: int,
     capability: ValidationCapability,
     device_reasons: tuple[str, ...],
     context_reasons: tuple[str, ...],
@@ -1370,14 +1508,19 @@ def _is_legitimate_blocked(
         return False
     if any(not _semantic_blocker_is_legitimate(item) for item in semantics_reasons):
         return False
+    if evidence_reference_count:
+        if any(
+            not _is_legitimate_evidence_reason(item)
+            for item in evidence.reason_codes
+        ):
+            return False
     if device_reasons:
         return True
     if not capability.documented or capability.reason_codes:
         return True
     if evidence.evidence_id is not None and evidence.reason_codes:
         if all(
-            item in _LEGIT_EVIDENCE_REASONS
-            or item.startswith("scope-gap-")
+            _is_legitimate_evidence_reason(item)
             for item in evidence.reason_codes
         ):
             return True
@@ -1560,6 +1703,7 @@ def _validate_candidate(
     if candidate.status in {CandidateStatus.BLOCKED, CandidateStatus.UNSUPPORTED}:
         blocked_legitimate = _is_legitimate_blocked(
             evidence=evidence,
+            evidence_reference_count=len(candidate.syntax_evidence),
             capability=capability,
             device_reasons=device_reasons,
             context_reasons=context.reason_codes,

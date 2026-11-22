@@ -27,6 +27,7 @@ from event_switch_manager.planning.layer3_cli_candidates import (
     CandidateStatus,
     L3CandidateDocument,
     RiskClass,
+    SyntaxEvidence,
 )
 from event_switch_manager.planning.layer3_cli_validation import (
     ExpectedSource,
@@ -446,14 +447,13 @@ def test_wrong_mode_context_and_parameters_fail() -> None:
         revision, intent, document,
         document.candidates.index(candidate), changed,
     )
-    report = _report(
-        revision, intent, new_document, new_expected, core.identity.assignment_id,
-    )
-    item = next(
-        item for item in report.candidates
-        if item.candidate_id == candidate.candidate_id
-    )
-    assert "candidate-parameters-mismatch" in item.semantics.reason_codes
+    with pytest.raises(ValidationIntegrityError) as caught:
+        _report(
+            revision, intent, new_document, new_expected,
+            core.identity.assignment_id,
+        )
+    assert caught.value.reason_code == "candidate-metadata-mismatch"
+    assert "candidate-parameters-mismatch" in caught.value.reasons
 
 
 def test_low_risk_and_parser_verified_are_fail_closed() -> None:
@@ -924,6 +924,220 @@ def test_dhcp_only_service_blocker_does_not_block_forwarding() -> None:
         if item.category == CandidateCategory.DHCP_HELPER_ADDRESS.value
     )
     assert helper.independent_verdict is IndependentVerdict.BLOCKED
+
+
+def _helper_document() -> tuple[
+    PlanRevision, Layer3Intent, L3DeviceIntent, L3CandidateDocument,
+    ExpectedSource, int,
+]:
+    revision, intent, core, document, expected = _fixture()
+    index = next(
+        index for index, item in enumerate(document.candidates)
+        if item.category is CandidateCategory.DHCP_HELPER_ADDRESS
+    )
+    return revision, intent, core, document, expected, index
+
+
+def _rehash_helper(
+    revision: PlanRevision,
+    intent: Layer3Intent,
+    document: L3CandidateDocument,
+    index: int,
+    changed: Candidate,
+) -> tuple[L3CandidateDocument, ExpectedSource]:
+    return replace_candidate_and_refresh_source(
+        revision, intent, document, index, changed,
+    )
+
+
+def test_forged_blocked_helper_metadata_fails_closed() -> None:
+    revision, intent, core, document, expected, index = _helper_document()
+    candidate = document.candidates[index]
+    base_parameters = dict(candidate.parameters)
+    base_provenance = candidate.provenance
+    base_capability = candidate.capability_evidence[0]
+    mutations = (
+        {
+            "parameters": {
+                **base_parameters,
+                "server": "192.168.99.9",
+            },
+        },
+        {
+            "parameters": {
+                **base_parameters,
+                "subnet_id": "00000000-0000-0000-0000-000000000001",
+            },
+        },
+        {
+            "provenance": base_provenance.model_copy(
+                update={"intent_fingerprint": "0" * 64},
+            ),
+        },
+        {
+            "provenance": base_provenance.model_copy(
+                update={"intent_subnet_id": uuid4()},
+            ),
+        },
+        {
+            "capability_evidence": (
+                base_capability.model_copy(update={"verdict": "unsupported"}),
+            ),
+        },
+    )
+    for mutation in mutations:
+        changed = candidate.model_copy(update=mutation)
+        forged, forged_expected = _rehash_helper(
+            revision, intent, document, index, changed,
+        )
+        with pytest.raises(ValidationIntegrityError) as caught:
+            _report(
+                revision, intent, forged, forged_expected,
+                core.identity.assignment_id,
+            )
+        assert caught.value.reason_code == "candidate-metadata-mismatch"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("content_digest", "0" * 64),
+        ("evidence_id", "l3-9300-ip-routing-v1"),
+        ("topic", "ip-routing"),
+        ("source_url", "https://forged.invalid"),
+        ("source_section", "forged"),
+        ("review_state", "independently-reviewed"),
+    ),
+)
+def test_forged_helper_evidence_is_not_masked_by_pending_blocker(
+    field: str, value: str,
+) -> None:
+    revision, intent, core, document, expected, index = _helper_document()
+    candidate = document.candidates[index]
+    ref = candidate.syntax_evidence[0].model_copy(update={field: value})
+    changed = candidate.model_copy(update={"syntax_evidence": (ref,)})
+    forged, forged_expected = _rehash_helper(
+        revision, intent, document, index, changed,
+    )
+    report = _report(
+        revision, intent, forged, forged_expected, core.identity.assignment_id,
+    )
+    item = next(
+        item for item in report.candidates
+        if item.candidate_id == candidate.candidate_id
+    )
+    assert item.independent_verdict is IndependentVerdict.FAIL
+    assert report.overall_status is ReportOverall.FAIL
+    assert any("evidence" in reason for reason in item.evidence.reason_codes)
+
+
+def test_forged_evidence_with_capability_blocker_is_not_masked() -> None:
+    revision, intent, core, document, expected = _fixture(
+        plan_kwargs={"core_license": "Network Essentials"},
+    )
+    candidate = _category(document, CandidateCategory.DHCP_HELPER_ADDRESS)
+    assert candidate.syntax_evidence == ()
+    forged_ref = SyntaxEvidence(
+        evidence_id="l3-9300-dhcp-helper-address-v1",
+        topic="dhcp-helper-address",
+        release="17.12.4",
+        review_state="independently-reviewed",
+        content_digest="0" * 64,
+        source_url="https://forged.invalid",
+        source_section="forged",
+    )
+    changed = candidate.model_copy(update={"syntax_evidence": (forged_ref,)})
+    forged, forged_expected = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), changed,
+    )
+    report = _report(
+        revision, intent, forged, forged_expected, core.identity.assignment_id,
+    )
+    item = next(
+        item for item in report.candidates
+        if item.candidate_id == candidate.candidate_id
+    )
+    assert item.independent_verdict is IndependentVerdict.FAIL
+    assert report.overall_status is ReportOverall.FAIL
+
+
+def test_forged_evidence_with_unsupported_device_is_not_masked() -> None:
+    revision, intent, core, document, expected = _fixture(
+        plan_kwargs={"core_pid": "C9200L-24P-4X", "core_family": "catalyst-9200"},
+    )
+    candidate = _category(document, CandidateCategory.STATIC_ROUTE)
+    assert candidate.syntax_evidence == ()
+    forged_ref = SyntaxEvidence(
+        evidence_id="l3-9300-static-route-v1",
+        topic="static-route",
+        release="17.12.4",
+        review_state="independently-reviewed",
+        content_digest="0" * 64,
+        source_url="https://forged.invalid",
+        source_section="forged",
+    )
+    changed = candidate.model_copy(update={"syntax_evidence": (forged_ref,)})
+    forged, forged_expected = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), changed,
+    )
+    report = _report(
+        revision, intent, forged, forged_expected, core.identity.assignment_id,
+    )
+    item = next(
+        item for item in report.candidates
+        if item.candidate_id == candidate.candidate_id
+    )
+    assert item.independent_verdict is IndependentVerdict.FAIL
+
+
+def test_unsupported_device_without_evidence_reference_remains_blocked() -> None:
+    revision, intent, core, document, expected = _fixture(
+        plan_kwargs={"core_pid": "C9200L-24P-4X", "core_family": "catalyst-9200"},
+    )
+    report = _report(revision, intent, document, expected, core.identity.assignment_id)
+    base = [
+        item for item in report.candidates
+        if item.category != CandidateCategory.DHCP_HELPER_ADDRESS.value
+    ]
+    assert base and all(
+        item.independent_verdict is IndependentVerdict.BLOCKED
+        for item in base
+    )
+
+
+def test_multiple_relay_servers_keep_distinct_bindings() -> None:
+    payload = make_l3_plan(
+        "00000000-0000-0000-0000-000000000099", static_route_count=1,
+    )
+    payload["dhcp_relays"][0]["servers"] = [
+        "192.168.10.5", "192.168.10.6",
+    ]
+    revision = revision_for(payload)
+    intent = build_layer3_intent(revision)
+    core = next(item for item in intent.devices if item.identity.hostname == "L3-Core")
+    document = build_document(revision, intent, core.identity.assignment_id)
+    expected = expected_source(revision, intent, document)
+    helpers = [
+        item for item in document.candidates
+        if item.category is CandidateCategory.DHCP_HELPER_ADDRESS
+    ]
+    assert len(helpers) == 2
+    assert len({item.candidate_id for item in helpers}) == 2
+    assert {item.parameters["server"] for item in helpers} == {
+        "192.168.10.5", "192.168.10.6",
+    }
+    report = _report(revision, intent, document, expected, core.identity.assignment_id)
+    report_helpers = [
+        item for item in report.candidates
+        if item.category == CandidateCategory.DHCP_HELPER_ADDRESS.value
+    ]
+    assert len(report_helpers) == 2
+    assert all(
+        item.independent_verdict is IndependentVerdict.BLOCKED
+        for item in report_helpers
+    )
 
 
 def test_unknown_plan_pid_and_bad_transit_route_are_blocked() -> None:

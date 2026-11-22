@@ -299,6 +299,56 @@ def test_network_essentials_service_blocker_does_not_break_base_forwarding() -> 
     assert helper.independent_verdict is IndependentVerdict.BLOCKED
 
 
+def test_forged_blocked_helper_metadata_after_renderer_is_rejected() -> None:
+    revision, intent, core, document, _ = _fixture()
+    candidate = next(
+        item for item in document.candidates
+        if item.category is CandidateCategory.DHCP_HELPER_ADDRESS
+    )
+    forged = candidate.model_copy(update={
+        "parameters": {
+            **candidate.parameters,
+            "server": "192.168.99.9",
+        },
+    })
+    changed, changed_expected = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), forged,
+    )
+    with pytest.raises(ValidationIntegrityError) as caught:
+        validate_l3_candidates(
+            revision, intent, changed, changed_expected,
+            core.identity.assignment_id,
+        )
+    assert caught.value.reason_code == "candidate-metadata-mismatch"
+
+
+def test_forged_blocked_helper_evidence_after_renderer_is_not_masked() -> None:
+    revision, intent, core, document, _ = _fixture()
+    candidate = next(
+        item for item in document.candidates
+        if item.category is CandidateCategory.DHCP_HELPER_ADDRESS
+    )
+    ref = candidate.syntax_evidence[0].model_copy(update={
+        "content_digest": "0" * 64,
+    })
+    forged = candidate.model_copy(update={"syntax_evidence": (ref,)})
+    changed, changed_expected = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), forged,
+    )
+    report = validate_l3_candidates(
+        revision, intent, changed, changed_expected,
+        core.identity.assignment_id,
+    )
+    item = next(
+        item for item in report.candidates
+        if item.candidate_id == candidate.candidate_id
+    )
+    assert item.independent_verdict is IndependentVerdict.FAIL
+    assert report.overall_status is ReportOverall.FAIL
+
+
 def test_report_does_not_embed_renderer_text_or_commands() -> None:
     revision, intent, core, document, expected = _fixture()
     report = validate_l3_candidates(
