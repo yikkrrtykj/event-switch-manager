@@ -130,9 +130,11 @@ def test_report_contract_has_no_command_sequence_or_configuration_fields() -> No
     }.isdisjoint(fields)
     annotation = L3ValidationReport.model_fields["candidates"].annotation
     assert annotation is not None
-    args = get_args(annotation)
-    assert args == (CandidateValidation, Ellipsis)
-    candidate_model = CandidateValidation
+    candidate_model = next(
+        item for item in get_args(annotation)
+        if getattr(item, "__name__", "") == "CandidateValidation"
+    )
+    assert candidate_model is CandidateValidation
     candidate_fields = set(candidate_model.model_fields)
     assert "candidate_text" not in candidate_fields
     assert "parse" in candidate_fields

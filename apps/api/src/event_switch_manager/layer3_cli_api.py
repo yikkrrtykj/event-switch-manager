@@ -17,14 +17,12 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from .api import DatabaseSession, find_event
 from .domain import DeviceRole
 from .plan_api import revision_and_baseline
-from .planning import layer3_cli_candidates as _candidate_models
-from .planning import layer3_cli_validation as _validation_models
 from .planning.layer3_cli_candidates import (
     CandidateStatus,
     L3CandidateDocument,
@@ -45,43 +43,6 @@ from .planning.layer3_cli_validation import (
 from .planning.layer3_command_evidence import DEFAULT_REGISTRY
 from .planning.layer3_intent import L3DeviceIntent, Layer3Intent, build_layer3_intent
 from .planning.plan import PlanRevision, canonical_plan, plan_hash
-
-
-def _isolate_openapi_component_names() -> None:
-    """Keep L2 and L3 schemas in separate OpenAPI component namespaces.
-
-    Several frozen L3 response model class names intentionally match existing
-    L2 validation model names (for example ``ValidationSafety``). FastAPI's
-    schema generator uses Python class names as component keys; when both
-    documents are exposed by one app it otherwise renames the *L2* components
-    and breaks the frozen L2 OpenAPI contract. Prefix only the L3 component
-    classes, leaving the two L3 response roots unchanged. Model fields,
-    validation and wire payloads are untouched.
-    """
-    response_roots = {"L3CandidateDocument", "L3ValidationReport"}
-    modules = (_candidate_models, _validation_models)
-    for module in modules:
-        for item in tuple(vars(module).values()):
-            if not isinstance(item, type):
-                continue
-            if item.__module__ != module.__name__:
-                continue
-            if item.__name__ in response_roots:
-                continue
-            prefixed = f"L3Cli{item.__name__}"
-            item.__name__ = prefixed
-            item.__qualname__ = prefixed
-    for module in modules:
-        for item in tuple(vars(module).values()):
-            if (
-                isinstance(item, type)
-                and item.__module__ == module.__name__
-                and issubclass(item, BaseModel)
-            ):
-                item.model_rebuild(force=True)
-
-
-_isolate_openapi_component_names()
 
 router = APIRouter(prefix="/api/v1/events/{event_id}")
 
