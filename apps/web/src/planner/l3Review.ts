@@ -38,6 +38,13 @@ export interface L3Integrity {
   safety: boolean
 }
 
+export const integrityFields = [
+  'revision_canonical_hash', 'baseline_canonical_hash', 'intent_rebuilt',
+  'intent_fingerprint', 'expected_source', 'document_source', 'document_fingerprint',
+  'candidate_fingerprints', 'candidate_ids_unique', 'candidate_set', 'summary', 'safety',
+] as const
+export type L3IntegrityField = (typeof integrityFields)[number]
+
 export interface L3Safety {
   candidate_only: boolean
   executable: boolean
@@ -388,34 +395,97 @@ function objectArray(value: unknown): RecordValue[] {
     : []
 }
 
-const same = (left: unknown, right: unknown) =>
-  JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
+function ordinaryRecord(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+    ? value as Record<string, unknown> : null
+}
+
+export function integrityComplete(value: unknown): value is L3Integrity {
+  const record = ordinaryRecord(value)
+  if (!record) return false
+  return integrityFields.every((field) =>
+    Object.hasOwn(record, field) && record[field] === true)
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const HASH_PATTERN = /^[a-f0-9]{64}$/
+
+export function sourceComplete(value: unknown): value is L3Source {
+  const record = ordinaryRecord(value)
+  if (!record) return false
+  if (!sourceFields.every((field) => Object.hasOwn(record, field))) return false
+  const eventId = record.event_id
+  const revisionUuid = record.saved_revision_uuid
+  const assignmentId = record.assignment_id
+  if (
+    typeof eventId !== 'string' || !UUID_PATTERN.test(eventId) ||
+    typeof revisionUuid !== 'string' || !UUID_PATTERN.test(revisionUuid) ||
+    typeof assignmentId !== 'string' || !UUID_PATTERN.test(assignmentId)
+  ) return false
+  const revisionNumber = record.revision_number
+  if (typeof revisionNumber !== 'number' || !Number.isInteger(revisionNumber) || revisionNumber < 1) {
+    return false
+  }
+  for (const field of [
+    'revision_canonical_hash', 'l3_intent_fingerprint',
+    'l3_render_fingerprint', 'command_evidence_registry_fingerprint',
+  ] as const) {
+    const value = record[field]
+    if (typeof value !== 'string' || !HASH_PATTERN.test(value)) return false
+  }
+  const contractId = record.l3_render_contract_id
+  const registryId = record.command_evidence_registry_id
+  const intentSchema = record.l3_intent_schema_version
+  const renderVersion = record.l3_render_contract_version
+  if (
+    typeof contractId !== 'string' || contractId.length === 0 ||
+    typeof registryId !== 'string' || registryId.length === 0 ||
+    typeof intentSchema !== 'number' || !Number.isInteger(intentSchema) || intentSchema < 1 ||
+    typeof renderVersion !== 'number' || !Number.isInteger(renderVersion) || renderVersion < 1
+  ) return false
+  const baselineUuid = record.baseline_revision_uuid
+  const baselineHash = record.baseline_revision_hash
+  if (baselineUuid === null) return baselineHash === null
+  return typeof baselineUuid === 'string' &&
+    UUID_PATTERN.test(baselineUuid) &&
+    typeof baselineHash === 'string' &&
+    HASH_PATTERN.test(baselineHash)
+}
 
 export function validateReport(report: L3ValidationReport, binding: ReviewBinding): ReviewProblem[] {
   const problems: ReviewProblem[] = []
+  const actualSource = ordinaryRecord(report.source)
+  const expectedSource = ordinaryRecord(report.expected_source)
+  const actualComplete = sourceComplete(report.source)
+  const expectedComplete = sourceComplete(report.expected_source)
+  if (!actualComplete) problems.push('actual-source')
+  if (!expectedComplete) problems.push('expected-source')
   if (report.validation_scope !== 'production' || report.validation_schema_version !== 1) {
     problems.push('validation-scope')
   }
   if (report.validation_contract_id !== L3_VALIDATION_CONTRACT) problems.push('validation-contract')
+  if (actualSource && (
+    actualSource.event_id !== binding.eventId ||
+    actualSource.saved_revision_uuid !== binding.revision.id ||
+    actualSource.revision_number !== binding.revision.number ||
+    actualSource.revision_canonical_hash !== binding.revision.content_hash ||
+    actualSource.assignment_id !== binding.assignmentId ||
+    actualSource.command_evidence_registry_id !== L3_REGISTRY_ID ||
+    actualSource.command_evidence_registry_fingerprint !== L3_REGISTRY_FINGERPRINT ||
+    actualSource.l3_render_contract_id !== L3_CONTRACT ||
+    actualSource.l3_render_contract_version !== 1
+  )) problems.push('source-binding')
   if (
-    report.source.event_id !== binding.eventId ||
-    report.source.saved_revision_uuid !== binding.revision.id ||
-    report.source.revision_number !== binding.revision.number ||
-    report.source.revision_canonical_hash !== binding.revision.content_hash ||
-    report.source.assignment_id !== binding.assignmentId ||
-    report.source.command_evidence_registry_id !== L3_REGISTRY_ID ||
-    report.source.command_evidence_registry_fingerprint !== L3_REGISTRY_FINGERPRINT ||
-    report.source.l3_render_contract_id !== L3_CONTRACT ||
-    report.source.l3_render_contract_version !== 1
-  ) problems.push('source-binding')
-  if (sourceFields.some((field) => !same(report.source[field], report.expected_source[field]))) {
-    problems.push('expected-source')
-  }
+    actualComplete && expectedComplete &&
+    sourceFields.some((field) => actualSource![field] !== expectedSource![field])
+  ) problems.push('expected-source')
   if (report.assignment_id !== binding.assignmentId) problems.push('report-assignment')
   if (report.device.assignment_id !== binding.assignmentId || report.device.role !== 'core') {
     problems.push('report-device')
   }
-  if (!Object.values(report.integrity).every((value) => value === true)) problems.push('report-integrity')
+  if (!integrityComplete(report.integrity)) problems.push('report-integrity')
   if (
     report.safety.candidate_only !== true || report.safety.executable !== false ||
     report.safety.deployable !== false || report.safety.deployment_allowed !== false ||
@@ -441,7 +511,9 @@ export function validateReport(report: L3ValidationReport, binding: ReviewBindin
 export function canLoadCandidates(report: L3ValidationReport) {
   return report.overall_status !== 'fail' &&
     !report.candidates.some((candidate) => candidate.independent_verdict === 'fail') &&
-    Object.values(report.integrity).every((value) => value === true)
+    integrityComplete(report.integrity) &&
+    sourceComplete(report.source) &&
+    sourceComplete(report.expected_source)
 }
 
 export function validateDocument(

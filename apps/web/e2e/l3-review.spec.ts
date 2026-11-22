@@ -145,6 +145,35 @@ async function preparedEvent(request: APIRequestContext, name: string) {
   return { eventId, plan, revision }
 }
 
+async function injectValidationResponse(
+  page: Page, mutate: (report: JsonRecord) => void,
+): Promise<() => number> {
+  let candidateCalls = 0
+  await page.route('**/l3-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const report = await response.json() as JsonRecord
+    mutate(report)
+    await route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'X-Validation-Scope': 'full' },
+      body: JSON.stringify(report),
+    })
+  })
+  await page.route('**/l3-cli-candidates', async (route) => {
+    candidateCalls += 1
+    await route.fulfill({ status: 500, json: { detail: 'candidate endpoint must not be called' } })
+  })
+  return () => candidateCalls
+}
+
+async function openInjectedReview(page: Page, eventId: string) {
+  await page.goto('/#l3-review')
+  await page.getByLabel('Event', { exact: true }).selectOption(eventId)
+  await expect(page.getByRole('heading', { name: 'L3 data binding is inconsistent' })).toBeVisible()
+  await expect(page.locator('pre.l3-command')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i })).toHaveCount(0)
+}
+
 test('shows a saved revision read-only 9 PASS / 1 BLOCKED review', async ({ page, request }) => {
   const { eventId } = await preparedEvent(request, 'R44 L3 UI')
   await openReview(page, eventId)
@@ -232,6 +261,26 @@ test('shows an explicit state when the saved revision has no Cisco Core', async 
   await page.getByLabel('Event', { exact: true }).selectOption(eventId)
   await expect(page.getByRole('heading', { name: 'No Cisco Core assignment', exact: true })).toBeVisible()
   await expect(page.getByRole('table', { name: 'Candidates' })).toHaveCount(0)
+})
+
+test('rejects a validation response missing an integrity field', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R45 integrity injection')
+  const candidateCalls = await injectValidationResponse(page, (report) => {
+    delete (report.integrity as JsonRecord).candidate_set
+  })
+  await openInjectedReview(page, eventId)
+  await expect(page.getByText('One or more report integrity checks are not true.')).toBeVisible()
+  await expect.poll(candidateCalls).toBe(0)
+})
+
+test('rejects source fields missing from both ExpectedSource and ActualSource', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R45 source injection')
+  const candidateCalls = await injectValidationResponse(page, (report) => {
+    delete (report.expected_source as JsonRecord).baseline_revision_hash
+    delete (report.source as JsonRecord).baseline_revision_hash
+  })
+  await openInjectedReview(page, eventId)
+  await expect.poll(candidateCalls).toBe(0)
 })
 
 test('shows a stable reason code when validation is rejected', async ({ page, request }) => {

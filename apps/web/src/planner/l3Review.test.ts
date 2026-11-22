@@ -7,7 +7,8 @@ import {
   reviewErrorKey, reviewRows, validateDocument, validateReport, verdictKeys,
 } from './l3Review'
 import type {
-  L3CandidateDocument, L3CandidateValidation, L3ValidationReport, ReviewBinding,
+  L3CandidateDocument, L3CandidateValidation, L3Integrity, L3Source, L3SourceField,
+  L3ValidationReport, ReviewBinding,
 } from './l3Review'
 
 const eventId = '11111111-1111-4111-8111-111111111111'
@@ -180,6 +181,92 @@ describe('L3 review data contracts', () => {
     failed.candidates = [candidate('c1', 'ip-routing', 'fail')]
     failed.summary = { ...failed.summary, total: 1, passed: 0, failed: 1, blocked: 0, not_run: 0 }
     expect(canLoadCandidates(failed)).toBe(false)
+  })
+
+  it('requires every fixed integrity field to be present and strictly true', () => {
+    const complete = report()
+    expect(validateReport(complete, binding)).toEqual([])
+    expect(canLoadCandidates(complete)).toBe(true)
+
+    const missingCandidateSet = report().integrity
+    delete (missingCandidateSet as Partial<L3Integrity>).candidate_set
+    const missingRevisionHash = report().integrity
+    delete (missingRevisionHash as Partial<L3Integrity>).revision_canonical_hash
+    const missingSafety = report().integrity
+    delete (missingSafety as Partial<L3Integrity>).safety
+    const falseField = { ...report().integrity, summary: false }
+    const nullField = { ...report().integrity, candidate_set: null }
+    const stringTrue = { ...report().integrity, safety: 'true' }
+    const empty = {}
+    const arrayInsteadOfObject: unknown = []
+    const extraInsteadOfMissing = { ...report().integrity, extra: true }
+    delete (extraInsteadOfMissing as Partial<L3Integrity>).candidate_set
+    for (const integrity of [
+      missingCandidateSet, missingRevisionHash, missingSafety,
+      falseField, nullField, stringTrue, empty, arrayInsteadOfObject, extraInsteadOfMissing,
+    ]) {
+      const forged = report()
+      forged.integrity = integrity as L3Integrity
+      expect(validateReport(forged, binding), JSON.stringify(integrity)).toContain('report-integrity')
+      expect(canLoadCandidates(forged)).toBe(false)
+    }
+  })
+
+  it('requires all fourteen source fields instead of normalizing missing values to null', () => {
+    const missing = (source: L3Source, field: L3SourceField): L3Source => {
+      const copy = { ...source } as Record<string, unknown>
+      delete copy[field]
+      return copy as L3Source
+    }
+    const legalEmpty = report()
+    expect(validateReport(legalEmpty, binding)).toEqual([])
+
+    const actualMissingHash = report()
+    actualMissingHash.source = missing(actualMissingHash.source, 'baseline_revision_hash')
+    expect(validateReport(actualMissingHash, binding)).toContain('actual-source')
+    expect(canLoadCandidates(actualMissingHash)).toBe(false)
+
+    const expectedMissingHash = report()
+    expectedMissingHash.expected_source = missing(
+      expectedMissingHash.expected_source, 'baseline_revision_hash',
+    )
+    expect(validateReport(expectedMissingHash, binding)).toContain('expected-source')
+    expect(canLoadCandidates(expectedMissingHash)).toBe(false)
+
+    const bothMissingHash = report()
+    bothMissingHash.source = missing(bothMissingHash.source, 'baseline_revision_hash')
+    bothMissingHash.expected_source = missing(
+      bothMissingHash.expected_source, 'baseline_revision_hash',
+    )
+    const bothHashProblems = validateReport(bothMissingHash, binding)
+    expect(bothHashProblems).toContain('actual-source')
+    expect(bothHashProblems).toContain('expected-source')
+    expect(canLoadCandidates(bothMissingHash)).toBe(false)
+
+    const bothMissingIntent = report()
+    bothMissingIntent.source = missing(bothMissingIntent.source, 'l3_intent_fingerprint')
+    bothMissingIntent.expected_source = missing(
+      bothMissingIntent.expected_source, 'l3_intent_fingerprint',
+    )
+    expect(validateReport(bothMissingIntent, binding)).toContain('actual-source')
+    expect(validateReport(bothMissingIntent, binding)).toContain('expected-source')
+    expect(canLoadCandidates(bothMissingIntent)).toBe(false)
+
+    const undefinedBaselineHash = report()
+    undefinedBaselineHash.source = {
+      ...undefinedBaselineHash.source, baseline_revision_uuid: null, baseline_revision_hash: undefined,
+    } as unknown as L3Source
+    expect(validateReport(undefinedBaselineHash, binding)).toContain('actual-source')
+    expect(canLoadCandidates(undefinedBaselineHash)).toBe(false)
+
+    const legalRevision2 = report()
+    const baselineUuid = '99999999-9999-4999-8999-999999999999'
+    const baselineHash = 'd'.repeat(64)
+    for (const frame of [legalRevision2.source, legalRevision2.expected_source]) {
+      frame.baseline_revision_uuid = baselineUuid
+      frame.baseline_revision_hash = baselineHash
+    }
+    expect(validateReport(legalRevision2, binding)).toEqual([])
   })
 
   it('keeps BLOCKED command text null and requires matching candidate IDs', () => {
