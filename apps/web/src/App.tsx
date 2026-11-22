@@ -6,16 +6,19 @@ import { Dashboard } from './Dashboard'
 import type { MessageKey } from './messages'
 import { LanguageSelect, useMessages } from './locale'
 import { sections } from './planner/catalog'
+import { L3ReviewWorkspace } from './planner/L3ReviewWorkspace'
 import { Workspace } from './planner/Workspace'
 
 const destinations = [
   ['dashboard', 'dashboard'], ['events', 'events'], ['planner/addressing', 'planner'],
-  ['devices', 'devices'], ['ports', 'ports'],
+  ['devices', 'devices'], ['ports', 'ports'], ['l3-review', 'l3Review'],
 ] as const
 const workspace = (route: string) => route.startsWith('planner/') || route === 'devices' || route === 'ports'
+const eventContext = (route: string) => workspace(route) || route === 'l3-review'
 function hashRoute() {
   const route = window.location.hash.slice(1)
   if (route === 'planner') return 'planner/addressing'
+  if (route === 'l3-review') return route
   if (route.startsWith('planner/') && Object.hasOwn(sections, route.slice(8)) && !['topology', 'ports'].includes(route.slice(8))) return route
   return destinations.some(([key]) => key === route) ? route : 'dashboard'
 }
@@ -37,6 +40,7 @@ export function App() {
   })
   const selected = events?.find((event) => event.id === selectedId)
   const inWorkspace = workspace(route)
+  const inEventContext = eventContext(route)
   const section = route === 'devices' ? 'topology' : route === 'ports' ? 'ports' : route.slice(8)
 
   useEffect(() => {
@@ -106,7 +110,7 @@ export function App() {
             aria-current={route === key || key.startsWith('planner/') && route.startsWith('planner/') ? 'page' : undefined}
             onClick={(event) => { event.preventDefault(); navigate(key) }}>{t(label)}</a>)}
         </nav>
-        {inWorkspace && events && events.length > 0 ? <div className="event-context">
+        {inEventContext && events && events.length > 0 ? <div className="event-context">
           <label htmlFor="workspace-event">{t('event')}</label>
           <Select id="workspace-event" value={selectedId} onChange={(event) => select(event.target.value)}>
             {events.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
@@ -122,7 +126,13 @@ export function App() {
           ? <><p role="alert">{t(error)}</p><Button onClick={retryEvents}>{t('retryEvents')}</Button></>
           : events ? <><p className="empty">{t('selectEventPrompt')}</p><Button primary onClick={() => navigate('events')}>{t('goToEvents')}</Button></>
             : <Loading>{t('loadingEvents')}</Loading>}</div></main>
-      : <Dashboard events={events} setEvents={setEvents} eventError={error} selectedId={selectedId} setSelectedId={select}
-        eventsOnly={route === 'events'} retryEvents={retryEvents} navigate={navigate} />}
+      : route === 'l3-review' ? selected
+        ? <L3ReviewWorkspace key={selected.id} event={selected} navigate={navigate} />
+        : <main id="main" className="shell screen"><h1>{t('l3Review')}</h1><div className="panel">
+          {error ? <><p role="alert">{t(error)}</p><Button onClick={retryEvents}>{t('retryEvents')}</Button></>
+            : events ? <><p className="empty">{t('selectEventPrompt')}</p><Button primary onClick={() => navigate('events')}>{t('goToEvents')}</Button></>
+              : <Loading>{t('loadingEvents')}</Loading>}</div></main>
+        : <Dashboard events={events} setEvents={setEvents} eventError={error} selectedId={selectedId} setSelectedId={select}
+          eventsOnly={route === 'events'} retryEvents={retryEvents} navigate={navigate} />}
   </>
 }
