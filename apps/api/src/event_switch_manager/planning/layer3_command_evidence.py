@@ -93,6 +93,32 @@ _CTS_DEFAULT_ROUTE_GUIDE = (
     "software/release/17-12/configuration_guide/cts/b_1712_cts_9300_cg/"
     "cisco_trustsec_sgt_mapping.html"
 )
+_R165 = (
+    "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
+    "software/release/16-5/release_notes/ol-16-5-9300.html"
+)
+_R1611 = (
+    "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
+    "software/release/16-11/release_notes/ol-16-11-9300.html"
+)
+_R175 = (
+    "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
+    "software/release/17-5/release_notes/ol-17-5-9300.html"
+)
+_R1712 = (
+    "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
+    "software/release/17-12/release_notes/ol-17-12-9300/introduction.html"
+)
+_R17124 = (
+    "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
+    "software/release/17-12/release_notes/ol-17-12-9300/"
+    "whats_new_in_cisco_ios_dublin_1712x.html"
+)
+_LIMITATIONS = (
+    "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
+    "software/release/17-12/release_notes/ol-17-12-9300/"
+    "limitations_and_restrictions.html"
+)
 
 
 class L3CommandTopic(StrEnum):
@@ -155,6 +181,21 @@ class EvidenceClassification:
 class SourceRef:
     url: str
     section: str
+
+
+_RELEASE_EVIDENCE: tuple[SourceRef, ...] = (
+    SourceRef(_R165, "Cisco Catalyst 9300 Series Switches—Model Numbers"),
+    SourceRef(_R1611, "Hardware Features in Cisco IOS XE Gibraltar 16.11.1c"),
+    SourceRef(_R175, "Hardware Features in Cisco IOS XE Bengaluru 17.5.1"),
+    SourceRef(_R1712, "Supported Hardware"),
+    SourceRef(_R17124, "Hardware Features in Cisco IOS XE Dublin 17.12.4"),
+    SourceRef(_R17124, "Software Features in Cisco IOS XE Dublin 17.12.4"),
+    SourceRef(
+        _R17124,
+        "Hardware and Software Behavior Changes in Cisco IOS XE Dublin 17.12.4",
+    ),
+    SourceRef(_LIMITATIONS, "Limitations and Restrictions"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +345,21 @@ class CommandEvidenceRow:
             blockers.append(
                 f"evidence-license-{classification.license_evidence.value}",
             )
+        elif not (
+            classification.license_source_url
+            and classification.license_source_section
+        ):
+            blockers.append("evidence-license-source-missing")
+        hardware = {item.upper() for item in classification.hardware_pids}
+        ordering = {item.upper() for item in classification.ordering_skus}
+        verified = {item.upper() for item in classification.verified_pids}
+        row_pids = {item.upper() for item in self.pids}
+        if not verified:
+            blockers.append("evidence-pid-scope-empty")
+        if not verified <= row_pids:
+            blockers.append("evidence-pid-scope-outside-row")
+        if hardware & ordering or hardware | ordering != verified:
+            blockers.append("evidence-pid-scope-inconsistent")
         blockers.extend(
             f"evidence-scope-gap-{gap}"
             for gap in classification.blocking_evidence_gaps
@@ -513,6 +569,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         "Enabling IP Unicast Routing",
         command_reference_url=_CR_IP_ROUTING,
         command_reference_section="ip routing",
+        supplemental_sources=_RELEASE_EVIDENCE,
         classification=EvidenceClassification(
             platform_documented=True,
             generic_command_reference=True,
@@ -526,9 +583,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "planned-cisco-core-only",
                 "at-least-one-svi-required",
             ),
-            blocking_evidence_gaps=(
-                "per-pid-release-support",
-            ),
+            blocking_evidence_gaps=(),
             excluded_scope_notes=(
                 "no-no-form-renderer-excluded",
                 "actual-active-license-not-hardware-verified",
@@ -559,6 +614,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 _SYS_MGMT_GUIDE,
                 "Manually Assigning IP Information to Multiple SVIs",
             ),
+            *_RELEASE_EVIDENCE,
         ),
         classification=EvidenceClassification(
             platform_documented=True,
@@ -575,9 +631,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "one-svi-per-vlan",
                 "planned-carrier-required",
             ),
-            blocking_evidence_gaps=(
-                "per-pid-release-support",
-            ),
+            blocking_evidence_gaps=(),
             excluded_scope_notes=(
                 "vlan-1-1002-1005-renderer-excluded",
                 "exact-vlan-name-renderer-canonical",
@@ -610,6 +664,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         "Assigning IP Addresses to Network Interfaces",
         command_reference_url=_CR_IP_ADDRESS,
         command_reference_section="ip address",
+        supplemental_sources=_RELEASE_EVIDENCE,
         classification=EvidenceClassification(
             platform_documented=True,
             generic_command_reference=False,
@@ -624,9 +679,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "primary-address-only",
                 "gateway-subnet-match",
             ),
-            blocking_evidence_gaps=(
-                "per-pid-release-support",
-            ),
+            blocking_evidence_gaps=(),
             excluded_scope_notes=(
                 "slash31-slash32-renderer-excluded",
                 "secondary-address-renderer-excluded",
@@ -665,6 +718,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         ),
         semantic_source_url=_ADMIN_DISTANCE,
         semantic_source_section="Understand Administrative Distance",
+        supplemental_sources=_RELEASE_EVIDENCE,
         classification=EvidenceClassification(
             platform_documented=True,
             generic_command_reference=True,
@@ -680,9 +734,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "distance-255-blocked",
                 "eligible-svi-dependency",
             ),
-            blocking_evidence_gaps=(
-                "per-pid-release-support",
-            ),
+            blocking_evidence_gaps=(),
             excluded_scope_notes=(
                 "generic-ios-command-reference-used",
                 "interface-only-next-hop-renderer-excluded",
@@ -725,6 +777,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         supplemental_sources=(
             SourceRef(_STATIC_GUIDE, "Information About Default Routes and Networks"),
             SourceRef(_CTS_DEFAULT_ROUTE_GUIDE, "Configuring Default Route SGT"),
+            *_RELEASE_EVIDENCE,
         ),
         classification=EvidenceClassification(
             platform_documented=True,
@@ -742,9 +795,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
                 "ip-default-network-excluded",
                 "eligible-svi-dependency",
             ),
-            blocking_evidence_gaps=(
-                "per-pid-release-support",
-            ),
+            blocking_evidence_gaps=(),
             excluded_scope_notes=(
                 "ip-default-network-renderer-excluded",
                 "interface-only-next-hop-renderer-excluded",
@@ -769,6 +820,7 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
         ("One candidate per relay server; no reviewed maximum is asserted.",),
         _DHCP_GUIDE,
         "Specifying the Packet Forwarding Address",
+        supplemental_sources=_RELEASE_EVIDENCE,
         classification=EvidenceClassification(
             platform_documented=True,
             generic_command_reference=False,
@@ -786,7 +838,6 @@ ROWS: tuple[CommandEvidenceRow, ...] = (
             ),
             blocking_evidence_gaps=(
                 "dhcp-relay-license",
-                "per-pid-release-support",
             ),
             excluded_scope_notes=(
                 "helper-address-command-reference-not-in-9300-cr",

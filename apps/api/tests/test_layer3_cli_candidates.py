@@ -34,6 +34,7 @@ from event_switch_manager.planning.layer3_cli_candidates import (
     render_fingerprint,
 )
 from event_switch_manager.planning.layer3_command_evidence import (
+    DEFAULT_REGISTRY,
     PENDING_REVIEW,
     CommandEvidenceRegistry,
     L3CommandTopic,
@@ -139,6 +140,32 @@ def test_production_registry_renders_no_text() -> None:
     assert all("syntax-evidence-pending" in item.blocking_reasons
                for item in document.candidates)
     assert all(item.status is CandidateStatus.BLOCKED for item in document.candidates)
+
+
+def test_actual_base_evidence_generates_five_categories() -> None:
+    _, _, document = _build(
+        make_l3_plan(
+            "00000000-0000-0000-0000-000000000099", static_route_count=1,
+        ),
+        registry=ACTUAL_TEST_REGISTRY,
+    )
+    for category in (
+        CandidateCategory.IP_ROUTING,
+        CandidateCategory.SVI_INTERFACE,
+        CandidateCategory.SVI_ADDRESS,
+        CandidateCategory.STATIC_ROUTE,
+        CandidateCategory.DEFAULT_ROUTE,
+    ):
+        candidates = _by_category(document, category)
+        assert candidates
+        assert all(
+            item.status is CandidateStatus.CANDIDATE
+            and item.candidate_text is not None
+            for item in candidates
+        )
+    helper = _by_category(document, CandidateCategory.DHCP_HELPER_ADDRESS)[0]
+    assert helper.status is CandidateStatus.BLOCKED
+    assert helper.candidate_text is None
 
 
 def test_actual_scope_gaps_block_even_with_test_review() -> None:
@@ -767,6 +794,13 @@ def test_test_only_registry_requires_explicit_test_flag() -> None:
     ):
         build_l3_cli_candidates(
             revision, intent, _core_assignment(intent), TEST_REGISTRY,
+        )
+    with pytest.raises(
+        RenderBindingError, match="test-only-path-rejects-production-registry",
+    ):
+        build_l3_cli_candidates(
+            revision, intent, _core_assignment(intent), DEFAULT_REGISTRY,
+            test_only_registry=True,
         )
 
 

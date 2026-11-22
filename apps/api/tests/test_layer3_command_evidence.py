@@ -85,23 +85,35 @@ def test_classification_separates_platform_generic_license_and_renderer_rules() 
         assert classification.platform_documented is True
         assert classification.generic_command_reference is expected_generic[row.topic]
         assert classification.renderer_safety_restriction
-        assert classification.blocking_evidence_gaps
         assert classification.excluded_scope_notes
         assert set(classification.hardware_pids) | set(classification.ordering_skus) == (
             set(classification.verified_pids)
         )
         assert set(classification.verified_pids) <= set(row.pids)
-        assert "per-pid-release-support" in classification.blocking_evidence_gaps
+        assert "per-pid-release-support" not in classification.blocking_evidence_gaps
         assert "pid-license-suffix-mapping" not in classification.blocking_evidence_gaps
+        release_sections = {source.section for source in row.supplemental_sources}
+        assert "Cisco Catalyst 9300 Series Switches—Model Numbers" in release_sections
+        assert "Hardware Features in Cisco IOS XE Gibraltar 16.11.1c" in release_sections
+        assert "Hardware Features in Cisco IOS XE Bengaluru 17.5.1" in release_sections
+        assert "Supported Hardware" in release_sections
+        assert "Hardware Features in Cisco IOS XE Dublin 17.12.4" in release_sections
+        assert "Limitations and Restrictions" in release_sections
         if row.topic is L3CommandTopic.DHCP_HELPER_ADDRESS:
             assert classification.license_evidence is EvidenceStatus.UNRESOLVED
             assert classification.license_source_url is None
             assert classification.license_source_section is None
-            assert "dhcp-relay-license" in classification.blocking_evidence_gaps
+            assert classification.blocking_evidence_gaps == ("dhcp-relay-license",)
+            assert row.scope_blockers() == (
+                "evidence-license-unresolved",
+                "evidence-scope-gap-dhcp-relay-license",
+            )
         else:
             assert classification.license_evidence is EvidenceStatus.VERIFIED
             assert classification.license_source_url is not None
             assert classification.license_source_section == "Information About IP Routing"
+            assert classification.blocking_evidence_gaps == ()
+            assert row.scope_blockers() == ()
             assert "actual-active-license-not-hardware-verified" in (
                 classification.excluded_scope_notes
             )
@@ -116,12 +128,38 @@ def test_dhcp_license_remains_contract_consistent_but_unresolved() -> None:
 
 
 def test_scope_blockers_are_independent_of_review_metadata() -> None:
+    for row in ROWS:
+        if row.topic is L3CommandTopic.DHCP_HELPER_ADDRESS:
+            assert row.scope_blockers() == (
+                "evidence-license-unresolved",
+                "evidence-scope-gap-dhcp-relay-license",
+            )
+        else:
+            assert row.scope_blockers() == ()
     dhcp = next(item for item in ROWS if item.topic is L3CommandTopic.DHCP_HELPER_ADDRESS)
-    blockers = dhcp.scope_blockers()
-    assert "evidence-license-unresolved" in blockers
-    assert "evidence-scope-gap-dhcp-relay-license" in blockers
     missing = replace(dhcp, classification=None)
     assert missing.scope_blockers() == ("evidence-classification-missing",)
+
+
+def test_invalid_scope_metadata_fails_closed() -> None:
+    row = ROWS[0]
+    classification = row.classification
+    assert classification is not None
+    cases = (
+        replace(classification, verified_pids=()),
+        replace(classification, verified_pids=("BOGUS-PID",)),
+        replace(classification, hardware_pids=("C9300-24T",), verified_pids=("C9300-24T",)),
+        replace(classification, license_source_url=None),
+    )
+    expected = (
+        "evidence-pid-scope-empty",
+        "evidence-pid-scope-outside-row",
+        "evidence-pid-scope-inconsistent",
+        "evidence-license-source-missing",
+    )
+    for changed, reason in zip(cases, expected, strict=True):
+        changed_row = replace(row, classification=changed)
+        assert reason in changed_row.scope_blockers()
 
 
 def test_default_route_excludes_ip_default_network() -> None:
@@ -202,7 +240,7 @@ def test_digest_changes_when_content_changes() -> None:
 def test_reviewed_registry_separates_review_valid_from_renderable() -> None:
     registry = _test_only_evidence_registry()
     assert registry.review_valid_count == 6
-    assert registry.eligible_count == 0
+    assert registry.eligible_count == 5
     assert registry.renderable_count == 0
     assert registry.fingerprint != DEFAULT_REGISTRY.fingerprint
     assert all(
@@ -337,7 +375,7 @@ def test_registry_fingerprint_is_content_sensitive_and_deterministic() -> None:
 def test_review_valid_scope_eligible_and_renderable_counts_are_separate() -> None:
     actual = _test_only_evidence_registry()
     assert actual.review_valid_count == 6
-    assert actual.eligible_count == 0
+    assert actual.eligible_count == 5
     assert actual.renderable_count == 0
     synthetic = _synthetic_eligible_evidence_registry()
     assert synthetic.review_valid_count == 6
@@ -354,6 +392,24 @@ def test_review_valid_scope_eligible_and_renderable_counts_are_separate() -> Non
     assert production.review_valid_count == 6
     assert production.eligible_count == 6
     assert production.renderable_count == 6
+    invalid_rows = list(production_rows)
+    classification = invalid_rows[0].classification
+    assert classification is not None
+    invalid_rows[0] = replace(
+        invalid_rows[0],
+        classification=replace(classification, verified_pids=()),
+    )
+    invalid_rows[0] = replace(
+        invalid_rows[0],
+        review=replace(
+            invalid_rows[0].review,
+            content_digest=invalid_rows[0].content_digest(),
+        ),
+    )
+    invalid = CommandEvidenceRegistry(tuple(invalid_rows), production=True)
+    assert invalid.review_valid_count == 6
+    assert invalid.eligible_count == 5
+    assert invalid.renderable_count == 5
 
 
 def test_test_registry_has_separate_identity_and_is_not_production() -> None:
