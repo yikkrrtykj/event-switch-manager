@@ -708,6 +708,224 @@ def test_rejected_evidence_never_passes() -> None:
     assert report.overall_status is not ReportOverall.PASS
 
 
+def test_candidate_id_is_derived_from_trusted_target() -> None:
+    revision, intent, core, document, expected = _fixture()
+    candidate = _category(document, CandidateCategory.STATIC_ROUTE)
+    assert candidate.candidate_id.startswith("l3cand-")
+    forged = candidate.model_copy(update={"candidate_id": "l3cand-0000000000000000"})
+    changed, changed_expected = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), forged,
+    )
+    with pytest.raises(ValidationIntegrityError) as caught:
+        _report(
+            revision, intent, changed, changed_expected,
+            core.identity.assignment_id,
+        )
+    assert caught.value.reason_code == "candidate-id-mismatch"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("hostname", "FORGED-CORE"),
+        ("role", "access"),
+        ("family", "catalyst-9200"),
+        ("exact_pid", "C9300X-24Y"),
+        ("software_image", "17.12.5"),
+        ("software_license", "Network Essentials"),
+        ("stack_identity", "unresolved"),
+    ),
+)
+def test_document_device_identity_is_bound_to_trusted_intent(
+    field: str, value: str,
+) -> None:
+    revision, intent, core, document, expected = _fixture()
+    bad_device = document.device.model_copy(update={field: value})
+    changed = rebuild_document(document, updates={"device": bad_device})
+    changed_expected = expected_source(revision, intent, changed)
+    with pytest.raises(ValidationIntegrityError) as caught:
+        _report(
+            revision, intent, changed, changed_expected,
+            core.identity.assignment_id,
+        )
+    assert caught.value.reason_code == "device-identity-mismatch"
+
+
+def test_report_device_identity_comes_from_trusted_intent() -> None:
+    revision, intent, core, document, expected = _fixture()
+    report = _report(revision, intent, document, expected, core.identity.assignment_id)
+    assert report.device.assignment_id == core.identity.assignment_id
+    assert report.device.hostname == core.identity.hostname
+    assert report.device.role == core.identity.role.value
+    assert core.identity.family is not None
+    assert report.device.family == core.identity.family.value
+    assert report.device.exact_pid == core.identity.exact_pid
+    assert report.device.software_image == core.identity.software_image
+    assert report.device.software_license == core.identity.software_license
+    assert report.device.stack_identity == core.identity.stack_identity
+
+
+def test_resolved_stack_identity_regression() -> None:
+    revision, intent, core, document, expected = _fixture(stack=True)
+    report = _report(revision, intent, document, expected, core.identity.assignment_id)
+    assert report.device.stack_identity == "resolved"
+    base = [
+        item for item in report.candidates
+        if item.category != CandidateCategory.DHCP_HELPER_ADDRESS.value
+    ]
+    assert all(item.independent_verdict is IndependentVerdict.PASS for item in base)
+
+
+def test_forged_blocked_status_without_blocker_fails() -> None:
+    revision, intent, core, document, expected = _fixture()
+    candidate = _category(document, CandidateCategory.STATIC_ROUTE)
+    forged = candidate.model_copy(update={
+        "status": CandidateStatus.BLOCKED,
+        "candidate_text": None,
+    })
+    changed, _ = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), forged,
+    )
+    summary = document.summary.model_copy(update={"candidates": 8, "blocked": 2})
+    changed = rebuild_document(changed, updates={"summary": summary})
+    changed_expected = expected_source(revision, intent, changed)
+    report = _report(
+        revision, intent, changed, changed_expected, core.identity.assignment_id,
+    )
+    item = next(
+        item for item in report.candidates
+        if item.candidate_id == candidate.candidate_id
+    )
+    assert item.independent_verdict is IndependentVerdict.FAIL
+    assert "blocked-verdict-not-supported" in item.semantics.reason_codes
+    assert report.overall_status is ReportOverall.FAIL
+    assert report.summary.failed == 1
+
+
+def test_forged_unsupported_status_without_unsupported_capability_fails() -> None:
+    revision, intent, core, document, expected = _fixture()
+    candidate = _category(document, CandidateCategory.STATIC_ROUTE)
+    forged = candidate.model_copy(update={
+        "status": CandidateStatus.UNSUPPORTED,
+        "candidate_text": None,
+    })
+    changed, _ = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), forged,
+    )
+    summary = document.summary.model_copy(update={"candidates": 8, "unsupported": 1})
+    changed = rebuild_document(changed, updates={"summary": summary})
+    changed_expected = expected_source(revision, intent, changed)
+    report = _report(
+        revision, intent, changed, changed_expected, core.identity.assignment_id,
+    )
+    item = next(
+        item for item in report.candidates
+        if item.candidate_id == candidate.candidate_id
+    )
+    assert item.independent_verdict is IndependentVerdict.FAIL
+    assert "blocked-verdict-not-supported" in item.semantics.reason_codes
+
+
+def test_blocked_candidate_with_invalid_context_fails() -> None:
+    revision, intent, core, document, expected = _fixture()
+    candidate = _category(document, CandidateCategory.STATIC_ROUTE)
+    bad_context = candidate.command_context.model_copy(update={
+        "mode": "interface", "mode_header": "interface Vlan10",
+    })
+    forged = candidate.model_copy(update={
+        "status": CandidateStatus.BLOCKED,
+        "candidate_text": None,
+        "command_context": bad_context,
+    })
+    changed, _ = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), forged,
+    )
+    summary = document.summary.model_copy(update={"candidates": 8, "blocked": 2})
+    changed = rebuild_document(changed, updates={"summary": summary})
+    changed_expected = expected_source(revision, intent, changed)
+    report = _report(
+        revision, intent, changed, changed_expected, core.identity.assignment_id,
+    )
+    item = next(
+        item for item in report.candidates
+        if item.candidate_id == candidate.candidate_id
+    )
+    assert item.independent_verdict is IndependentVerdict.FAIL
+
+
+def test_blocked_candidate_with_forged_evidence_fails() -> None:
+    revision, intent, core, document, expected = _fixture()
+    candidate = _category(document, CandidateCategory.STATIC_ROUTE)
+    forged_ref = candidate.syntax_evidence[0].model_copy(update={
+        "evidence_id": "l3-9300-ip-routing-v1",
+        "content_digest": "0" * 64,
+    })
+    forged = candidate.model_copy(update={
+        "status": CandidateStatus.BLOCKED,
+        "candidate_text": None,
+        "syntax_evidence": (forged_ref,),
+    })
+    changed, _ = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), forged,
+    )
+    summary = document.summary.model_copy(update={"candidates": 8, "blocked": 2})
+    changed = rebuild_document(changed, updates={"summary": summary})
+    changed_expected = expected_source(revision, intent, changed)
+    report = _report(
+        revision, intent, changed, changed_expected, core.identity.assignment_id,
+    )
+    item = next(
+        item for item in report.candidates
+        if item.candidate_id == candidate.candidate_id
+    )
+    assert item.independent_verdict is IndependentVerdict.FAIL
+
+
+def test_legitimate_route_block_and_unsupported_device_remain_blocked() -> None:
+    revision, intent, core, document, expected = _fixture(
+        plan_kwargs={"default_distance": 255},
+    )
+    report = _report(revision, intent, document, expected, core.identity.assignment_id)
+    default = next(
+        item for item in report.candidates
+        if item.category == CandidateCategory.DEFAULT_ROUTE.value
+    )
+    assert default.independent_verdict is IndependentVerdict.BLOCKED
+
+    revision, intent, core, document, expected = _fixture(
+        plan_kwargs={"core_pid": "C9200L-24P-4X", "core_family": "catalyst-9200"},
+    )
+    report = _report(revision, intent, document, expected, core.identity.assignment_id)
+    base = [
+        item for item in report.candidates
+        if item.category != CandidateCategory.DHCP_HELPER_ADDRESS.value
+    ]
+    assert base and all(
+        item.independent_verdict is IndependentVerdict.BLOCKED for item in base
+    )
+
+
+def test_dhcp_only_service_blocker_does_not_block_forwarding() -> None:
+    revision, intent, core, document, expected = _fixture(
+        plan_kwargs={"core_license": "Network Essentials"},
+    )
+    assert core.service_blockers == ("l3-license-unmatched",)
+    report = _report(revision, intent, document, expected, core.identity.assignment_id)
+    assert report.overall_status is ReportOverall.PARTIAL
+    assert report.summary.base_categories_passed == 5
+    assert report.summary.base_candidates_passed == 9
+    helper = next(
+        item for item in report.candidates
+        if item.category == CandidateCategory.DHCP_HELPER_ADDRESS.value
+    )
+    assert helper.independent_verdict is IndependentVerdict.BLOCKED
+
+
 def test_unknown_plan_pid_and_bad_transit_route_are_blocked() -> None:
     revision, intent, core, document, expected = _fixture(
         plan_kwargs={"core_pid": "C9300-24T-A"},

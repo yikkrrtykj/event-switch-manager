@@ -6,10 +6,15 @@ import json
 
 import pytest
 from layer3_helpers import make_l3_plan, revision_for
-from layer3_parser_helpers import expected_source, replace_candidate_and_refresh_source
+from layer3_parser_helpers import (
+    expected_source,
+    rebuild_document,
+    replace_candidate_and_refresh_source,
+)
 
 from event_switch_manager.planning.layer3_cli_candidates import (
     CandidateCategory,
+    CandidateStatus,
     L3CandidateDocument,
     build_l3_cli_candidates,
 )
@@ -19,6 +24,7 @@ from event_switch_manager.planning.layer3_cli_validation import (
     ExpectedSource,
     IndependentVerdict,
     ReportOverall,
+    ValidationIntegrityError,
     independent_candidate_fingerprint,
     independent_render_fingerprint,
     validate_l3_candidates,
@@ -198,6 +204,99 @@ def test_parser_detects_wrong_text_after_fingerprint_recompute(
     )
     assert item.independent_verdict is IndependentVerdict.FAIL
     assert report.overall_status is ReportOverall.FAIL
+
+
+def test_forged_candidate_id_after_renderer_and_full_rehash_is_rejected() -> None:
+    revision, intent, core, document, _ = _fixture()
+    candidate = next(
+        item for item in document.candidates
+        if item.category is CandidateCategory.STATIC_ROUTE
+    )
+    forged = candidate.model_copy(update={
+        "candidate_id": "l3cand-0000000000000000",
+    })
+    changed, changed_expected = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), forged,
+    )
+    with pytest.raises(ValidationIntegrityError) as caught:
+        validate_l3_candidates(
+            revision, intent, changed, changed_expected,
+            core.identity.assignment_id,
+        )
+    assert caught.value.reason_code == "candidate-id-mismatch"
+
+
+def test_forged_device_identity_after_renderer_and_full_rehash_is_rejected() -> None:
+    revision, intent, core, document, _ = _fixture()
+    bad_device = document.device.model_copy(update={
+        "hostname": "FORGED-CORE",
+        "exact_pid": "C9300X-24Y",
+    })
+    changed = rebuild_document(document, updates={"device": bad_device})
+    changed_expected = expected_source(revision, intent, changed)
+    with pytest.raises(ValidationIntegrityError) as caught:
+        validate_l3_candidates(
+            revision, intent, changed, changed_expected,
+            core.identity.assignment_id,
+        )
+    assert caught.value.reason_code == "device-identity-mismatch"
+
+
+def test_forged_blocked_status_after_renderer_and_full_rehash_fails() -> None:
+    revision, intent, core, document, _ = _fixture()
+    candidate = next(
+        item for item in document.candidates
+        if item.category is CandidateCategory.STATIC_ROUTE
+    )
+    forged = candidate.model_copy(update={
+        "status": CandidateStatus.BLOCKED,
+        "candidate_text": None,
+    })
+    changed, _ = replace_candidate_and_refresh_source(
+        revision, intent, document,
+        document.candidates.index(candidate), forged,
+    )
+    summary = document.summary.model_copy(update={"candidates": 8, "blocked": 2})
+    changed = rebuild_document(changed, updates={"summary": summary})
+    changed_expected = expected_source(revision, intent, changed)
+    report = validate_l3_candidates(
+        revision, intent, changed, changed_expected,
+        core.identity.assignment_id,
+    )
+    item = next(
+        item for item in report.candidates
+        if item.candidate_id == candidate.candidate_id
+    )
+    assert item.independent_verdict is IndependentVerdict.FAIL
+    assert "blocked-verdict-not-supported" in item.semantics.reason_codes
+    assert report.overall_status is ReportOverall.FAIL
+
+
+def test_network_essentials_service_blocker_does_not_break_base_forwarding() -> None:
+    revision = revision_for(make_l3_plan(
+        "00000000-0000-0000-0000-000000000099",
+        static_route_count=1,
+        core_license="Network Essentials",
+    ))
+    intent = build_layer3_intent(revision)
+    core = next(item for item in intent.devices if item.identity.hostname == "L3-Core")
+    assert core.service_blockers == ("l3-license-unmatched",)
+    document = build_l3_cli_candidates(
+        revision, intent, core.identity.assignment_id,
+    )
+    expected = expected_source(revision, intent, document)
+    report = validate_l3_candidates(
+        revision, intent, document, expected, core.identity.assignment_id,
+    )
+    assert report.summary.base_categories_passed == 5
+    assert report.summary.base_candidates_passed == 9
+    assert report.summary.failed == 0
+    helper = next(
+        item for item in report.candidates
+        if item.category == CandidateCategory.DHCP_HELPER_ADDRESS.value
+    )
+    assert helper.independent_verdict is IndependentVerdict.BLOCKED
 
 
 def test_report_does_not_embed_renderer_text_or_commands() -> None:

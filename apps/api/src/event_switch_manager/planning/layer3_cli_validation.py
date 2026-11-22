@@ -423,6 +423,99 @@ def _expected_candidate_keys(device: L3DeviceIntent) -> tuple[tuple[str, str, st
     return tuple(keys)
 
 
+def _trusted_target_name(
+    device: L3DeviceIntent,
+    candidate: Candidate,
+) -> tuple[str, UUID, str] | None:
+    category = candidate.category
+    if category is CandidateCategory.IP_ROUTING:
+        return "device", device.identity.assignment_id, device.identity.hostname
+    if category in {
+        CandidateCategory.SVI_INTERFACE,
+        CandidateCategory.SVI_ADDRESS,
+    }:
+        interface = next(
+            (item for item in device.interfaces
+             if item.interface_id == candidate.target.stable_id),
+            None,
+        )
+        if interface is None:
+            return None
+        return "svi", interface.interface_id, interface.name
+    if category in {
+        CandidateCategory.STATIC_ROUTE,
+        CandidateCategory.DEFAULT_ROUTE,
+    }:
+        route = next(
+            (item for item in device.routes
+             if item.route_id == candidate.target.stable_id),
+            None,
+        )
+        if route is None:
+            return None
+        return "route", route.route_id, str(route.destination)
+    if category is CandidateCategory.DHCP_HELPER_ADDRESS:
+        relay = next(
+            (item for item in device.dhcp_relays
+             if item.svi_id == candidate.target.stable_id),
+            None,
+        )
+        if relay is None:
+            return None
+        interface = next(
+            (item for item in device.interfaces
+             if item.interface_id == relay.svi_id),
+            None,
+        )
+        if interface is None:
+            return None
+        server = _candidate_server(candidate)
+        if server is None:
+            return None
+        if server not in {str(item) for item in relay.servers}:
+            return None
+        return "svi", relay.svi_id, f"{interface.name} -> {server}"
+    return None
+
+
+def _candidate_server(candidate: Candidate) -> str | None:
+    if candidate.candidate_text is not None:
+        parsed = parse_l3_command(candidate.candidate_text)
+        if parsed.ok and parsed.parameter("server") is not None:
+            return str(parsed.parameter("server"))
+    if " -> " in candidate.target.name:
+        return candidate.target.name.rsplit(" -> ", 1)[1]
+    return None
+
+
+def _candidate_id(
+    assignment_id: UUID,
+    category: CandidateCategory,
+    target_kind: str,
+    target_stable_id: UUID,
+    target_name: str,
+) -> str:
+    digest = hashlib.sha256(
+        f"{assignment_id}|{category.value}|"
+        f"{target_kind}:{target_stable_id}|{target_name}".encode(),
+    ).hexdigest()[:16]
+    return f"l3cand-{digest}"
+
+
+def _trusted_device_ref(device: L3DeviceIntent) -> ValidationDevice:
+    identity = device.identity
+    return ValidationDevice(
+        assignment_id=identity.assignment_id,
+        hostname=identity.hostname,
+        role=identity.role.value,
+        family=identity.family.value if identity.family else None,
+        exact_pid=identity.exact_pid,
+        software_image=identity.software_image,
+        software_license=identity.software_license,
+        stack_identity=identity.stack_identity,
+    )
+
+
 def _actual_candidate_keys(document: L3CandidateDocument) -> tuple[tuple[str, str, str, str], ...]:
     return tuple(_candidate_key(candidate) for candidate in document.candidates)
 
@@ -470,19 +563,6 @@ def _source_mismatches(
     if document.assignment_id != assignment_id:
         reasons.append("document-assignment-mismatch")
     return tuple(reasons)
-
-
-def _device_ref(document: L3CandidateDocument, assignment_id: UUID) -> ValidationDevice:
-    return ValidationDevice(
-        assignment_id=document.device.assignment_id,
-        hostname=document.device.hostname,
-        role=document.device.role,
-        family=document.device.family,
-        exact_pid=document.device.exact_pid,
-        software_image=document.device.software_image,
-        software_license=document.device.software_license,
-        stack_identity=document.device.stack_identity,
-    )
 
 
 def _assert_integrity(
@@ -558,6 +638,38 @@ def _assert_integrity(
     )
     if device is None:
         raise ValidationIntegrityError("assignment-not-in-intent")
+    expected_device = _trusted_device_ref(device)
+    if (
+        document.device.assignment_id != expected_device.assignment_id
+        or document.device.hostname != expected_device.hostname
+        or document.device.role != expected_device.role
+        or document.device.family != expected_device.family
+        or document.device.exact_pid != expected_device.exact_pid
+        or document.device.software_image != expected_device.software_image
+        or document.device.software_license != expected_device.software_license
+        or document.device.stack_identity != expected_device.stack_identity
+    ):
+        raise ValidationIntegrityError("device-identity-mismatch")
+    for candidate in document.candidates:
+        identity = _trusted_target_name(device, candidate)
+        if identity is None:
+            raise ValidationIntegrityError("candidate-id-mismatch")
+        target_kind, target_stable_id, target_name = identity
+        if (
+            candidate.target.kind != target_kind
+            or candidate.target.stable_id != target_stable_id
+            or candidate.target.name != target_name
+        ):
+            raise ValidationIntegrityError("candidate-id-mismatch")
+        expected_candidate_id = _candidate_id(
+            assignment_id,
+            candidate.category,
+            target_kind,
+            target_stable_id,
+            target_name,
+        )
+        if candidate.candidate_id != expected_candidate_id:
+            raise ValidationIntegrityError("candidate-id-mismatch")
     reasons.extend(_source_mismatches(
         expected, revision, intent, document, assignment_id, registry,
     ))
@@ -867,8 +979,8 @@ def _check_device(device: L3DeviceIntent) -> tuple[str, ...]:
         "svi-removal",
     }:
         reasons.append("blocked-operation")
-    if device.service_blockers:
-        reasons.append("service-blocker")
+    # DHCP service blockers are category-specific and are evaluated by the
+    # Relay semantics below.  They must not become a global forwarding block.
     return _dedupe(tuple(reasons))
 
 
@@ -1224,6 +1336,152 @@ def _check_candidate_metadata(
     )
 
 
+_LEGIT_EVIDENCE_REASONS = frozenset({
+    "evidence-review-pending",
+    "evidence-not-renderable",
+    "license-unresolved",
+    "license-partial",
+})
+_LEGIT_SEMANTIC_PREFIXES = (
+    "no-svi-",
+    "route-",
+    "svi-",
+    "transit-",
+    "dhcp-",
+    "default-",
+    "l3-license-",
+)
+
+
+def _semantic_blocker_is_legitimate(code: str) -> bool:
+    return code.startswith(_LEGIT_SEMANTIC_PREFIXES)
+
+
+def _is_legitimate_blocked(
+    *,
+    evidence: ValidationEvidence,
+    capability: ValidationCapability,
+    device_reasons: tuple[str, ...],
+    context_reasons: tuple[str, ...],
+    semantics_reasons: tuple[str, ...],
+    risk_reasons: tuple[str, ...],
+) -> bool:
+    if context_reasons or risk_reasons:
+        return False
+    if any(not _semantic_blocker_is_legitimate(item) for item in semantics_reasons):
+        return False
+    if device_reasons:
+        return True
+    if not capability.documented or capability.reason_codes:
+        return True
+    if evidence.evidence_id is not None and evidence.reason_codes:
+        if all(
+            item in _LEGIT_EVIDENCE_REASONS
+            or item.startswith("scope-gap-")
+            for item in evidence.reason_codes
+        ):
+            return True
+    return any(
+        _semantic_blocker_is_legitimate(item) for item in semantics_reasons
+    )
+
+
+def _planned_semantic_blockers(
+    candidate: Candidate,
+    device: L3DeviceIntent,
+) -> tuple[str, ...]:
+    """Independent blockers that exist even when no command text was emitted."""
+    reasons: list[str] = []
+    if candidate.category is CandidateCategory.IP_ROUTING:
+        if not any(item.kind == "svi" for item in device.interfaces):
+            reasons.append("no-svi-for-ip-routing")
+        return _dedupe(tuple(reasons))
+    if candidate.category in {
+        CandidateCategory.SVI_INTERFACE,
+        CandidateCategory.SVI_ADDRESS,
+    }:
+        interface = next(
+            (item for item in device.interfaces
+             if item.interface_id == candidate.target.stable_id),
+            None,
+        )
+        if interface is None:
+            return ("target-interface-missing",)
+        return _check_svi(interface, device)
+    if candidate.category in {
+        CandidateCategory.STATIC_ROUTE,
+        CandidateCategory.DEFAULT_ROUTE,
+    }:
+        route = next(
+            (item for item in device.routes
+             if item.route_id == candidate.target.stable_id),
+            None,
+        )
+        if route is None:
+            return ("target-route-missing",)
+        if route.owner_assignment_id != device.identity.assignment_id:
+            reasons.append("route-owner-mismatch")
+        if route.distance > SAFE_DISTANCE_MAX:
+            reasons.append("route-distance-not-installed")
+        dependencies = _on_link_svis(device, route.next_hop)
+        if not dependencies:
+            reasons.append("route-next-hop-not-on-link")
+        elif len(dependencies) != 1:
+            reasons.append("route-next-hop-ambiguous")
+        else:
+            reasons.extend(_check_svi(dependencies[0], device))
+        if candidate.category is CandidateCategory.STATIC_ROUTE:
+            if route.kind != "static":
+                reasons.append("static-route-kind-mismatch")
+            if route.destination.prefixlen == 0:
+                reasons.append("static-route-default-destination")
+        else:
+            if route.kind != "default":
+                reasons.append("default-route-kind-mismatch")
+            if device.transit is None:
+                reasons.append("transit-missing")
+            else:
+                if route.route_id != device.transit.default_route_id:
+                    reasons.append("default-route-not-preferred")
+                if route.next_hop != device.transit.hillstone_ip:
+                    reasons.append("default-route-next-hop-mismatch")
+                if route.next_hop not in device.transit.network:
+                    reasons.append("default-route-next-hop-not-in-transit")
+                transit_interface = next(
+                    (item for item in device.interfaces
+                     if item.interface_id == device.transit.core_svi_id),
+                    None,
+                )
+                if transit_interface is None:
+                    reasons.append("transit-svi-missing")
+                else:
+                    reasons.extend(_check_svi(transit_interface, device))
+        return _dedupe(tuple(reasons))
+    if candidate.category is CandidateCategory.DHCP_HELPER_ADDRESS:
+        relay = next(
+            (item for item in device.dhcp_relays
+             if item.svi_id == candidate.target.stable_id),
+            None,
+        )
+        if relay is None:
+            return ("dhcp-relay-binding-mismatch",)
+        if not relay.allowed:
+            reasons.append("dhcp-relay-not-allowed")
+        if relay.capability is not L3Verdict.DOCUMENTED:
+            reasons.append(f"dhcp-relay-capability-{relay.capability.value}")
+        reasons.extend(relay.blockers)
+        interface = next(
+            (item for item in device.interfaces if item.interface_id == relay.svi_id),
+            None,
+        )
+        if interface is None:
+            reasons.append("dhcp-relay-svi-missing")
+        else:
+            reasons.extend(_check_svi(interface, device))
+        return _dedupe(tuple(reasons))
+    return ()
+
+
 def _parse_candidate(candidate: Candidate) -> ValidationParse:
     if candidate.candidate_text is None:
         return ValidationParse(status="not-run")
@@ -1268,7 +1526,8 @@ def _validate_candidate(
     reasons.extend(evidence.reason_codes)
     reasons.extend(context.reason_codes)
     reasons.extend(capability.reason_codes)
-    reasons.extend(_check_device(device))
+    device_reasons = _check_device(device)
+    reasons.extend(device_reasons)
     semantics_reasons: list[str] = []
     if parsed is not None and parsed.ok:
         semantics_reasons.extend(_semantic_for_candidate(candidate, device, parsed))
@@ -1279,6 +1538,8 @@ def _validate_candidate(
         )
     elif parsed is not None:
         semantics_reasons.extend(parsed.failure_codes)
+    else:
+        semantics_reasons.extend(_planned_semantic_blockers(candidate, device))
     reasons.extend(semantics_reasons)
     if candidate.status is CandidateStatus.CANDIDATE:
         if candidate.candidate_text is None:
@@ -1295,14 +1556,32 @@ def _validate_candidate(
             reasons.append("blocked-without-independent-reason")
     risk = _check_risk(candidate)
     reasons.extend(risk.reason_codes)
+    blocked_legitimate = False
+    if candidate.status in {CandidateStatus.BLOCKED, CandidateStatus.UNSUPPORTED}:
+        blocked_legitimate = _is_legitimate_blocked(
+            evidence=evidence,
+            capability=capability,
+            device_reasons=device_reasons,
+            context_reasons=context.reason_codes,
+            semantics_reasons=tuple(semantics_reasons),
+            risk_reasons=risk.reason_codes,
+        )
+        if not blocked_legitimate:
+            semantics_reasons.append("blocked-verdict-not-supported")
+            reasons.append("blocked-verdict-not-supported")
     reasons = list(_dedupe(tuple(reasons)))
+    semantics_reasons = list(_dedupe(tuple(semantics_reasons)))
     verdict: IndependentVerdict
     if candidate.status is CandidateStatus.CANDIDATE:
         verdict = (
             IndependentVerdict.PASS if not reasons else IndependentVerdict.FAIL
         )
     elif candidate.status in {CandidateStatus.BLOCKED, CandidateStatus.UNSUPPORTED}:
-        verdict = IndependentVerdict.BLOCKED
+        verdict = (
+            IndependentVerdict.BLOCKED
+            if blocked_legitimate
+            else IndependentVerdict.FAIL
+        )
     else:
         verdict = IndependentVerdict.FAIL
     fail_closed_action = {
@@ -1493,7 +1772,7 @@ def validate_l3_candidates(
         expected_source=expected_source,
         source=source,
         assignment_id=assignment_id,
-        device=_device_ref(document, assignment_id),
+        device=_trusted_device_ref(device),
         integrity=ValidationIntegrity(
             revision_canonical_hash=True,
             baseline_canonical_hash=True,
