@@ -16,14 +16,15 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
-from pydantic import ValidationError
+from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from .api import DatabaseSession, find_event
 from .domain import DeviceRole
 from .plan_api import revision_and_baseline
+from .planning import layer3_cli_candidates as _candidate_models
+from .planning import layer3_cli_validation as _validation_models
 from .planning.layer3_cli_candidates import (
     CandidateStatus,
     L3CandidateDocument,
@@ -44,6 +45,43 @@ from .planning.layer3_cli_validation import (
 from .planning.layer3_command_evidence import DEFAULT_REGISTRY
 from .planning.layer3_intent import L3DeviceIntent, Layer3Intent, build_layer3_intent
 from .planning.plan import PlanRevision, canonical_plan, plan_hash
+
+
+def _isolate_openapi_component_names() -> None:
+    """Keep L2 and L3 schemas in separate OpenAPI component namespaces.
+
+    Several frozen L3 response model class names intentionally match existing
+    L2 validation model names (for example ``ValidationSafety``). FastAPI's
+    schema generator uses Python class names as component keys; when both
+    documents are exposed by one app it otherwise renames the *L2* components
+    and breaks the frozen L2 OpenAPI contract. Prefix only the L3 component
+    classes, leaving the two L3 response roots unchanged. Model fields,
+    validation and wire payloads are untouched.
+    """
+    response_roots = {"L3CandidateDocument", "L3ValidationReport"}
+    modules = (_candidate_models, _validation_models)
+    for module in modules:
+        for item in tuple(vars(module).values()):
+            if not isinstance(item, type):
+                continue
+            if item.__module__ != module.__name__:
+                continue
+            if item.__name__ in response_roots:
+                continue
+            prefixed = f"L3Cli{item.__name__}"
+            item.__name__ = prefixed
+            item.__qualname__ = prefixed
+    for module in modules:
+        for item in tuple(vars(module).values()):
+            if (
+                isinstance(item, type)
+                and item.__module__ == module.__name__
+                and issubclass(item, BaseModel)
+            ):
+                item.model_rebuild(force=True)
+
+
+_isolate_openapi_component_names()
 
 router = APIRouter(prefix="/api/v1/events/{event_id}")
 
@@ -245,32 +283,23 @@ def _require_report_integrity(
         problems.append("expected-source-mismatch")
     if report.assignment_id != assignment_id:
         problems.append("assignment-mismatch")
-    if report.source.event_id != revision.plan.event_id:
-        problems.append("source-event-mismatch")
-    if report.source.saved_revision_uuid != revision.id:
-        problems.append("source-revision-mismatch")
-    if report.source.revision_canonical_hash != revision.content_hash:
-        problems.append("source-revision-hash-mismatch")
-    if report.source.l3_intent_schema_version != expected.l3_intent_schema_version:
-        problems.append("source-intent-schema-mismatch")
-    if report.source.l3_intent_fingerprint != expected.l3_intent_fingerprint:
-        problems.append("source-intent-fingerprint-mismatch")
-    if report.source.l3_render_contract_id != expected.l3_render_contract_id:
-        problems.append("source-render-contract-mismatch")
-    if report.source.l3_render_contract_version != expected.l3_render_contract_version:
-        problems.append("source-render-contract-version-mismatch")
-    if report.source.command_evidence_registry_id != DEFAULT_REGISTRY.registry_id:
-        problems.append("source-registry-mismatch")
-    if report.source.command_evidence_registry_fingerprint != DEFAULT_REGISTRY.fingerprint:
-        problems.append("source-registry-fingerprint-mismatch")
-    if report.source.assignment_id != assignment_id:
-        problems.append("source-assignment-mismatch")
-    if report.source.l3_render_fingerprint != document.l3_render_fingerprint:
-        problems.append("source-render-fingerprint-mismatch")
-    if report.source.baseline_revision_uuid != expected.baseline_revision_uuid:
-        problems.append("source-baseline-uuid-mismatch")
-    if report.source.baseline_revision_hash != expected.baseline_revision_hash:
-        problems.append("source-baseline-hash-mismatch")
+    expected_source_values = expected.model_dump(mode="json")
+    actual_source_values = report.source.model_dump(mode="json")
+    for field_name, expected_value in expected_source_values.items():
+        if actual_source_values.get(field_name) != expected_value:
+            problems.append(
+                f"source-{field_name.replace('_', '-')}-mismatch",
+            )
+    if not all(
+        field_name in expected_source_values
+        for field_name in actual_source_values
+    ):
+        problems.append("source-unknown-field")
+    if not all(
+        field_name in actual_source_values
+        for field_name in expected_source_values
+    ):
+        problems.append("source-missing-field")
     integrity_values = (
         report.integrity.revision_canonical_hash,
         report.integrity.baseline_canonical_hash,
@@ -411,6 +440,7 @@ async def _trusted_response(
 
 @router.get(
     "/plan-revisions/{revision_id}/assignments/{assignment_id}/l3-cli-candidates",
+    response_model=L3CandidateDocument,
 )
 async def read_l3_cli_candidates(
     event_id: UUID,
@@ -418,33 +448,33 @@ async def read_l3_cli_candidates(
     assignment_id: UUID,
     request: Request,
     session: DatabaseSession,
-) -> JSONResponse:
+) -> L3CandidateDocument:
     """Return the complete reviewed candidate document, or fail closed."""
     document, report = await _trusted_response(
         event_id, revision_id, assignment_id, request, session,
     )
     _candidate_document_allowed(document, report)
-    return JSONResponse(content=document.model_dump(mode="json"))
+    return document
 
 
 @router.get(
     "/plan-revisions/{revision_id}/assignments/{assignment_id}/l3-cli-validation",
+    response_model=L3ValidationReport,
 )
 async def read_l3_cli_validation(
     event_id: UUID,
     revision_id: UUID,
     assignment_id: UUID,
     request: Request,
+    response: Response,
     session: DatabaseSession,
-) -> JSONResponse:
+) -> L3ValidationReport:
     """Return the complete independent validation report."""
     _document, report = await _trusted_response(
         event_id, revision_id, assignment_id, request, session,
     )
-    return JSONResponse(
-        content=report.model_dump(mode="json"),
-        headers={VALIDATION_SCOPE_HEADER: _FULL_SCOPE},
-    )
+    response.headers[VALIDATION_SCOPE_HEADER] = _FULL_SCOPE
+    return report
 
 
 __all__ = [

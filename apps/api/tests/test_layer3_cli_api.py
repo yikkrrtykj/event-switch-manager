@@ -743,16 +743,103 @@ def test_candidate_document_has_no_execution_schema_keys(client: TestClient) -> 
         assert field not in serialized
 
 
+def test_actual_source_revision_number_mismatch_returns_409(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_id, assignment_id, revision = _save_core(client)
+    real_validate = real_validate_l3_candidates
+
+    def forged_report(*args: Any, **kwargs: Any) -> L3ValidationReport:
+        report = real_validate(*args, **kwargs)
+        source = report.source.model_copy(update={
+            "revision_number": report.source.revision_number + 1,
+        })
+        changed = report.model_copy(update={
+            "source": source,
+            "report_fingerprint": "",
+        })
+        return changed.model_copy(update={
+            "report_fingerprint": independent_report_fingerprint(changed),
+        })
+
+    monkeypatch.setattr(layer3_cli_api, "validate_l3_candidates", forged_report)
+    candidate_response = _get_candidates(client, event_id, revision, assignment_id)
+    _assert_error(candidate_response, 409, "validation-integrity-failure")
+    validation_response = _get_validation(client, event_id, revision, assignment_id)
+    _assert_error(validation_response, 409, "validation-integrity-failure")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("event_id", uuid4()),
+        ("saved_revision_uuid", uuid4()),
+        ("revision_number", 99),
+        ("revision_canonical_hash", "0" * 64),
+        ("l3_intent_schema_version", 99),
+        ("l3_intent_fingerprint", "0" * 64),
+        ("l3_render_contract_id", "forged-contract"),
+        ("l3_render_contract_version", 99),
+        ("l3_render_fingerprint", "0" * 64),
+        ("command_evidence_registry_id", "forged-registry"),
+        ("command_evidence_registry_fingerprint", "0" * 64),
+        ("assignment_id", uuid4()),
+        ("baseline_revision_uuid", uuid4()),
+        ("baseline_revision_hash", "0" * 64),
+    ),
+)
+def test_each_actual_source_field_mismatch_fails_both_endpoints(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    field: str, value: object,
+) -> None:
+    event_id, assignment_id, revision = _save_core(client)
+    real_validate = real_validate_l3_candidates
+
+    def forged_report(*args: Any, **kwargs: Any) -> L3ValidationReport:
+        report = real_validate(*args, **kwargs)
+        source = report.source.model_copy(update={field: value})
+        changed = report.model_copy(update={
+            "source": source,
+            "report_fingerprint": "",
+        })
+        return changed.model_copy(update={
+            "report_fingerprint": independent_report_fingerprint(changed),
+        })
+
+    monkeypatch.setattr(layer3_cli_api, "validate_l3_candidates", forged_report)
+    expected_failure = f"source-{field.replace('_', '-')}-mismatch"
+    for response in (
+        _get_candidates(client, event_id, revision, assignment_id),
+        _get_validation(client, event_id, revision, assignment_id),
+    ):
+        _assert_error(response, 409, "validation-integrity-failure")
+        assert expected_failure in _detail(response)["failures"]
+
+
 def test_openapi_exposes_only_two_new_get_routes(client: TestClient) -> None:
     schema = client.get("/api/v1/openapi.json").json()
-    for suffix in ("l3-cli-candidates", "l3-cli-validation"):
+    for suffix, model in (
+        ("l3-cli-candidates", "L3CandidateDocument"),
+        ("l3-cli-validation", "L3ValidationReport"),
+    ):
         path = (
             "/api/v1/events/{event_id}/plan-revisions/{revision_id}"
             f"/assignments/{{assignment_id}}/{suffix}"
         )
         assert path in schema["paths"]
         assert set(schema["paths"][path]) == {"get"}
-        parameters = schema["paths"][path]["get"].get("parameters", [])
+        operation = schema["paths"][path]["get"]
+        assert set(schema["paths"][path]) == {"get"}
+        assert operation["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ] == {"$ref": f"#/components/schemas/{model}"}
+        assert model in schema["components"]["schemas"]
+        parameters = operation.get("parameters", [])
+        assert [(item["name"], item["in"]) for item in parameters] == [
+            ("event_id", "path"),
+            ("revision_id", "path"),
+            ("assignment_id", "path"),
+        ]
         assert all(item["in"] == "path" for item in parameters)
         assert all(item["name"] != "category" for item in parameters)
     assert "execution_order" not in json.dumps(schema)
