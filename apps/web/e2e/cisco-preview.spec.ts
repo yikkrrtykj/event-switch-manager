@@ -1,0 +1,434 @@
+import { randomUUID } from 'node:crypto'
+
+import { expect, test } from '@playwright/test'
+import type { APIRequestContext, Page } from '@playwright/test'
+
+const origin = 'http://127.0.0.1:8765'
+const headers = { Origin: origin }
+const events = '/api/v1/events'
+const revisions = (eventId: string) => events + '/' + eventId + '/plan-revisions'
+
+type JsonRecord = Record<string, unknown>
+type SavedRevision = { id: string; number: number; content_hash: string }
+
+function id() { return randomUUID() }
+
+async function createEvent(request: APIRequestContext, name: string) {
+  const response = await request.post(events, { headers, data: { name, management_vlan: 10 } })
+  expect(response.status()).toBe(201)
+  return (await response.json() as { id: string }).id
+}
+
+function ciscoPlan(eventId: string, withDhcp = true): JsonRecord {
+  const coreAssignment = id()
+  const accessAssignment = id()
+  const firewallAssignment = id()
+  const coreDevice = id()
+  const accessDevice = id()
+  const firewallDevice = id()
+  const coreTransitPort = id()
+  const coreTrunkPort = id()
+  const accessPort = id()
+  const firewallTransitPort = id()
+  const firewallRoutedPort = id()
+  const vlan9Svi = id()
+  const vlan10Svi = id()
+  const vlan20Svi = id()
+  const subnet10 = id()
+  const subnet20 = id()
+  const pool20 = id()
+  const defaultRoute = id()
+  const returnGateway = id()
+  const returnPlayers = id()
+  const link = id()
+  const serialSuffix = id().slice(0, 8)
+  const plan: JsonRecord = {
+    schema_version: 1,
+    event_id: eventId,
+    management_vlan: 10,
+    physical_devices: [
+      { id: coreDevice, vendor: 'cisco', model: 'C9300L-24P-4X', verified_serial: 'R49-CORE-' + serialSuffix },
+      { id: accessDevice, vendor: 'cisco', model: 'C9300L-24T-4G', verified_serial: 'R49-ACCESS-' + serialSuffix },
+      { id: firewallDevice, vendor: 'hillstone', model: 'SG6000', verified_serial: 'R49-FW-' + serialSuffix },
+    ],
+    assignments: [
+      { id: coreAssignment, hostname: 'L3-Core', role: 'core', family: 'catalyst-9300',
+        physical_device_id: coreDevice, software: { image: '17.12.4', license: 'Network Advantage' } },
+      { id: accessAssignment, hostname: 'L2-Access', role: 'access', family: 'catalyst-9300',
+        physical_device_id: accessDevice, software: { image: '17.12.4', license: 'Network Advantage' },
+        management_ip: '192.168.10.2' },
+      { id: firewallAssignment, hostname: 'L3-FW', role: 'external-distribution',
+        physical_device_id: firewallDevice },
+    ],
+    physical_interfaces: [
+      { id: coreTransitPort, assignment_id: coreAssignment, physical_device_id: coreDevice,
+        name: 'Gi1/0/1', settings: { mode: 'access', access_vlan: 9, admin_state: 'up' } },
+      { id: coreTrunkPort, assignment_id: coreAssignment, physical_device_id: coreDevice,
+        name: 'Gi1/0/2', settings: { mode: 'trunk', allowed_vlans: [9, 10, 20], admin_state: 'up' } },
+      { id: accessPort, assignment_id: accessAssignment, physical_device_id: accessDevice,
+        name: 'Gi1/0/1', settings: { mode: 'access', access_vlan: 20, admin_state: 'up' } },
+      { id: firewallTransitPort, assignment_id: firewallAssignment, physical_device_id: firewallDevice,
+        name: 'ethernet0/0', settings: { mode: 'access', access_vlan: 9, admin_state: 'up' } },
+      { id: firewallRoutedPort, assignment_id: firewallAssignment, physical_device_id: firewallDevice,
+        name: 'ethernet0/1', settings: { mode: 'routed', address: '198.51.100.2/30' } },
+    ],
+    logical_interfaces: [
+      { id: vlan9Svi, assignment_id: coreAssignment, name: 'Vlan9', kind: 'svi', vlan: 9, address: '10.0.0.1/30' },
+      { id: vlan10Svi, assignment_id: coreAssignment, name: 'Vlan10', kind: 'svi', vlan: 10, address: '192.168.10.1/24' },
+      { id: vlan20Svi, assignment_id: coreAssignment, name: 'Vlan20', kind: 'svi', vlan: 20, address: '192.168.20.1/24' },
+    ],
+    vlans: [
+      { id: 9, name: 'Transit', purpose: 'transit' },
+      { id: 10, name: 'Management', purpose: 'management' },
+      { id: 20, name: 'Players' },
+    ],
+    subnets: [
+      { id: subnet10, vlan: 10, network: '192.168.10.0/24' },
+      { id: subnet20, vlan: 20, network: '192.168.20.0/24' },
+    ],
+    gateways: [
+      { subnet_id: subnet10, address: '192.168.10.1', svi_id: vlan10Svi },
+      { subnet_id: subnet20, address: '192.168.20.1', svi_id: vlan20Svi },
+    ],
+    dhcp_pools: withDhcp ? [{ id: pool20, subnet_id: subnet20, start: '192.168.20.100', end: '192.168.20.150' }] : [],
+    dhcp_relays: withDhcp ? [{ subnet_id: subnet20, svi_id: vlan20Svi, servers: ['192.168.10.5'] }] : [],
+    vlan_access_policies: [],
+    links: [{ id: link, endpoints: [coreTransitPort, firewallTransitPort] }],
+    static_routes: [
+      { id: returnGateway, assignment_id: firewallAssignment, destination: '192.168.10.0/24',
+        next_hop: { kind: 'ip', address: '10.0.0.1' } },
+      { id: returnPlayers, assignment_id: firewallAssignment, destination: '192.168.20.0/24',
+        next_hop: { kind: 'ip', address: '10.0.0.1' } },
+      { id: id(), assignment_id: coreAssignment, destination: '10.200.0.0/24',
+        next_hop: { kind: 'ip', address: '10.0.0.2' }, preference: 1 },
+    ],
+    default_routes: [{ id: defaultRoute, assignment_id: coreAssignment,
+      next_hop: { kind: 'ip', address: '10.0.0.2' }, preference: 1 }],
+    transit: {
+      core_assignment_id: coreAssignment, hillstone_assignment_id: firewallAssignment,
+      core_port_id: coreTransitPort, hillstone_port_id: firewallTransitPort,
+      core_svi_id: vlan9Svi, vlan: 9, network: '10.0.0.0/30',
+      core_ip: '10.0.0.1', hillstone_ip: '10.0.0.2',
+    },
+  }
+  return plan
+}
+
+async function savePlan(request: APIRequestContext, plan: JsonRecord) {
+  const response = await request.post(revisions(plan.event_id as string), { headers, data: plan })
+  expect(response.status(), await response.text()).toBe(200)
+  return await response.json() as SavedRevision
+}
+
+async function preparedEvent(request: APIRequestContext, name: string, withDhcp = true) {
+  const eventId = await createEvent(request, name)
+  const plan = ciscoPlan(eventId, withDhcp)
+  const revision = await savePlan(request, plan)
+  return { eventId, plan, revision }
+}
+
+async function openPreview(page: Page, eventId: string, name = 'Cisco Config Preview') {
+  await page.goto('/#cisco-preview')
+  const eventSelect = page.getByLabel('Event', { exact: true })
+  await expect(eventSelect).toBeVisible()
+  await eventSelect.selectOption(eventId)
+  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
+  const assignmentSelect = page.locator('#cisco-assignment')
+  await expect(assignmentSelect).toBeVisible({ timeout: 20_000 })
+  await expect(assignmentSelect.locator('option')).toHaveCount(2, { timeout: 20_000 })
+  await expect(assignmentSelect.locator('option:checked')).toContainText('L3-Core')
+}
+
+function candidateCount(page: Page) {
+  return page.getByRole('table', { name: 'Layer 2 candidates' }).locator('tbody tr')
+}
+
+test('shows a unified read-only L2 and L3 review bound to one saved revision', async ({ page, request }) => {
+  const { eventId, revision } = await preparedEvent(request, 'R49 unified preview')
+  await openPreview(page, eventId)
+  const assignmentSelect = page.locator('#cisco-assignment')
+  await expect(assignmentSelect).toBeVisible()
+  await expect(assignmentSelect.locator('option:checked')).toContainText('L3-Core')
+  await expect(page.locator('.cisco-metadata')).toContainText(revision.content_hash)
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'Overall review' })).toContainText('PARTIAL')
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'L2 review' })).toContainText('PARTIAL')
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'L3 review' })).toContainText('PARTIAL')
+
+  const l2Region = page.getByRole('region', { name: 'Layer 2 review' })
+  await expect(l2Region).toContainText('Planned Layer 2 intent')
+  await expect(l2Region).toContainText('DISPLAY ONLY')
+  const l2Table = page.getByRole('table', { name: 'Layer 2 candidates' })
+  await expect(l2Table).toBeVisible()
+  expect(await candidateCount(page).count()).toBeGreaterThan(0)
+  const l3Table = page.getByRole('table', { name: 'Layer 3 candidates' })
+  await expect(l3Table).toBeVisible()
+  expect(await l3Table.locator('tbody tr').count()).toBe(10)
+
+  const l2PassRow = l2Table.locator('tbody tr').filter({ hasText: 'access-vlan' }).first()
+  await l2PassRow.getByText('Details', { exact: true }).click()
+  await expect(l2PassRow.locator('pre.cisco-command')).toContainText('switchport access vlan')
+  const l3PassRow = l3Table.locator('tbody tr').filter({ hasText: 'ip-routing' }).first()
+  await l3PassRow.getByText('Details', { exact: true }).click()
+  await expect(l3PassRow.locator('pre.cisco-command')).toContainText('ip routing')
+
+  const dhcpRow = l3Table.locator('tbody tr').filter({ hasText: 'dhcp-helper-address' }).first()
+  await dhcpRow.getByText('Details', { exact: true }).click()
+  await expect(dhcpRow.getByText('Command text is withheld for this candidate.', { exact: true })).toBeVisible()
+  await expect(dhcpRow.locator('pre')).toHaveCount(0)
+  await expect(page.getByText('DHCP Helper blocked', { exact: true })).toBeVisible()
+  await expect(page.locator('.cisco-source-panel')).toContainText('27d9c46f610b974de5570fb13e115260e2d109475a8d967704de9bb9ca6ef00b')
+  await expect(page.locator('.cisco-source-panel')).toContainText('5abd0c57c0a825d77893e6287b76024517b5eb24d42bf061ab34c685b79c1ad8')
+  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /download|deploy|execute/i })).toHaveCount(0)
+  await expect(assignmentSelect.locator('option')).toHaveCount(2)
+})
+
+test('shows L3 as not applicable for a non-Core Cisco assignment', async ({ page, request }) => {
+  const { eventId, plan } = await preparedEvent(request, 'R49 non-core L3')
+  const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  await openPreview(page, eventId)
+  await page.locator('#cisco-assignment').selectOption(accessId)
+  const l3Card = page.locator('.cisco-status-card').filter({ hasText: 'L3 review' })
+  await expect(l3Card).toContainText('N/A')
+  await expect(page.getByRole('region', { name: 'Layer 3 review' })).toContainText('Layer 3 review is not applicable')
+  await expect(page.getByRole('table', { name: 'Layer 3 candidates' })).toHaveCount(0)
+})
+
+test('fails closed when L2 source or integrity fields are missing', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 L2 integrity')
+  let candidateCalls = 0
+  await page.route('**/l2-cli-candidates', (route) => {
+    candidateCalls += 1
+    return route.fulfill({ status: 500, json: { detail: 'candidate endpoint must not be called' } })
+  })
+  await page.route('**/l2-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    delete (body.integrity as JsonRecord).expected_source_match
+    await route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'X-Validation-Scope': 'full' },
+      body: JSON.stringify(body),
+    })
+  })
+  await openPreview(page, eventId)
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('Data binding is inconsistent')
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('l2-report-integrity')
+  await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toHaveCount(0)
+  await expect.poll(() => candidateCalls).toBe(0)
+})
+
+test('shows an N/A L2 state when the assignment is not applicable', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 L2 N/A', false)
+  let l3CandidateCalls = 0
+  await page.route('**/l2-cli-validation', (route) => route.fulfill({
+    status: 404,
+    json: { detail: { reason_code: 'assignment-not-found', stage: 'preview' } },
+  }))
+  await page.route('**/l3-cli-candidates', (route) => {
+    l3CandidateCalls += 1
+    return route.continue()
+  })
+  await openPreview(page, eventId)
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'L2 review' })).toContainText('N/A')
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'L3 review' })).toContainText('PASS')
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'Overall review' })).toContainText('PASS')
+  await expect.poll(() => l3CandidateCalls).toBeGreaterThan(0)
+})
+
+test('supports Chinese labels and three responsive viewports', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 i18n responsive')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await openPreview(page, eventId, 'Cisco Config Preview')
+  await page.getByLabel('Language').selectOption('zh-CN')
+  await expect(page.getByRole('heading', { name: 'Cisco 配置预览', exact: true })).toBeVisible()
+  await expect(page.locator('.cisco-status-card').filter({ hasText: '整体审阅' })).toContainText('部分通过')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+  const region = page.locator('.cisco-subsystem').first().locator('[data-slot="table-container"]')
+  await expect(region).toHaveAttribute('tabindex', '0')
+  await region.focus()
+  await expect(region).toBeFocused()
+  await page.screenshot({ path: 'test-results/cisco-preview-zh-390.png', fullPage: true })
+  for (const width of [1366, 1920]) {
+    await page.setViewportSize({ width, height: width === 1366 ? 900 : 1080 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+    await page.screenshot({ path: 'test-results/cisco-preview-zh-' + width + '.png', fullPage: true })
+  }
+})
+
+test('shows an L2 BLOCKED state with an L3 PASS without claiming overall PASS', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 L2 blocked L3 pass', false)
+  await openPreview(page, eventId)
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'L2 review' })).toContainText('PARTIAL')
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'L3 review' })).toContainText('PASS')
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'Overall review' })).toContainText('PARTIAL')
+  await expect(page.getByRole('table', { name: 'Layer 2 candidates' }).locator('tbody tr').filter({ hasText: 'BLOCKED' }).first()).toBeVisible()
+  await expect(page.getByRole('table', { name: 'Layer 3 candidates' })).toBeVisible()
+  await expect(page.getByText('DHCP Helper blocked', { exact: true })).toHaveCount(0)
+})
+
+test('rejects a missing L2 source field before requesting candidates', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 missing L2 source')
+  let candidateCalls = 0
+  await page.route('**/l2-cli-candidates', (route) => {
+    candidateCalls += 1
+    return route.fulfill({ status: 500, json: { detail: 'candidate endpoint must not be called' } })
+  })
+  await page.route('**/l2-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    delete (body.source as JsonRecord).saved_revision_uuid
+    await route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'X-Validation-Scope': 'full' },
+      body: JSON.stringify(body),
+    })
+  })
+  await openPreview(page, eventId)
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('Data binding is inconsistent')
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('l2-source-contract')
+  await expect.poll(() => candidateCalls).toBe(0)
+})
+
+test('rejects a revision or assignment mismatch before requesting candidates', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 binding mismatch')
+  let candidateCalls = 0
+  await page.route('**/l2-cli-candidates', (route) => {
+    candidateCalls += 1
+    return route.fulfill({ status: 500, json: { detail: 'candidate endpoint must not be called' } })
+  })
+  await page.route('**/l2-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    ;(body.source as JsonRecord).saved_revision_uuid = '99999999-9999-4999-8999-999999999999'
+    await route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'X-Validation-Scope': 'full' },
+      body: JSON.stringify(body),
+    })
+  })
+  await openPreview(page, eventId)
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('Data binding is inconsistent')
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('l2-source-binding')
+  await expect.poll(() => candidateCalls).toBe(0)
+})
+
+test('rejects an L3 registry mismatch before requesting L3 candidates', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 L3 registry mismatch')
+  let l3CandidateCalls = 0
+  await page.route('**/l3-cli-candidates', (route) => {
+    l3CandidateCalls += 1
+    return route.fulfill({ status: 500, json: { detail: 'L3 candidate endpoint must not be called' } })
+  })
+  await page.route('**/l3-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    ;(body.source as JsonRecord).command_evidence_registry_fingerprint = '0'.repeat(64)
+    await route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'X-Validation-Scope': 'full' },
+      body: JSON.stringify(body),
+    })
+  })
+  await openPreview(page, eventId)
+  await expect(page.getByRole('region', { name: 'Layer 3 review' })).toContainText('Data binding is inconsistent')
+  await expect(page.getByRole('region', { name: 'Layer 3 review' })).toContainText('source-binding')
+  await expect.poll(() => l3CandidateCalls).toBe(0)
+})
+
+test('shows a general 404 as an error instead of a fake PASS or N/A', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 404')
+  await page.route('**/l2-cli-validation', (route) => route.fulfill({
+    status: 404,
+    json: { detail: { reason_code: 'saved-revision-not-found', stage: 'revision' } },
+  }))
+  await openPreview(page, eventId)
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('Validation failed')
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('The Event, saved revision or assignment was not found.')
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'Overall review' })).toContainText('FAIL')
+})
+
+test('does not render an old L2 response after the assignment changes', async ({ page, request }) => {
+  const { eventId, plan } = await preparedEvent(request, 'R49 stale response')
+  const coreId = String((plan.assignments as JsonRecord[])[0]!.id)
+  const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  let release: (() => void) | null = null
+  let held = false
+  await page.route('**/l2-cli-validation', async (route) => {
+    const url = route.request().url()
+    if (!held && url.includes(coreId)) {
+      held = true
+      await new Promise<void>((resolve) => { release = resolve })
+    }
+    try { await route.continue() } catch { /* the page may have aborted the stale request */ }
+  })
+  await openPreview(page, eventId)
+  await expect.poll(() => release !== null).toBe(true)
+  await page.locator('#cisco-assignment').selectOption(accessId)
+  await expect(page.locator('.cisco-metadata')).toContainText(accessId)
+  await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toBeVisible()
+  release!()
+  await page.waitForTimeout(250)
+  await expect(page.locator('.cisco-metadata')).toContainText(accessId)
+  await expect(page.locator('.cisco-metadata')).not.toContainText(coreId)
+  await expect(page.getByRole('table', { name: 'Layer 2 candidates' }).locator('tbody tr').filter({ hasText: 'L3-Core' })).toHaveCount(0)
+})
+
+test('does not render an old revision response after the revision changes', async ({ page, request }) => {
+  const { eventId, plan, revision: first } = await preparedEvent(request, 'R49 stale revision')
+  const changed = structuredClone(plan)
+  const core = (changed.assignments as JsonRecord[]).find((item) => item.role === 'core')!
+  ;(changed.static_routes as JsonRecord[]).push({
+    id: id(), assignment_id: core.id, destination: '10.201.0.0/24',
+    next_hop: { kind: 'ip', address: '10.0.0.2' }, preference: 1,
+  })
+  const second = await savePlan(request, changed)
+  expect(second.id).not.toBe(first.id)
+  let release: (() => void) | null = null
+  let held = false
+  await page.route('**/l2-cli-validation', async (route) => {
+    if (!held && route.request().url().includes(second.id)) {
+      held = true
+      await new Promise<void>((resolve) => { release = resolve })
+    }
+    try { await route.continue() } catch { /* the page may have aborted the stale request */ }
+  })
+  await openPreview(page, eventId)
+  await expect.poll(() => release !== null).toBe(true)
+  await page.locator('#cisco-revision').selectOption(first.id)
+  await expect(page.locator('.cisco-metadata')).toContainText(first.id)
+  release!()
+  await page.waitForTimeout(250)
+  await expect(page.locator('#cisco-revision')).toHaveValue(first.id)
+  await expect(page.locator('.cisco-metadata')).toContainText(first.id)
+  await expect(page.locator('.cisco-metadata')).not.toContainText(second.id)
+})
+
+test('withholds command text from a tampered candidate document', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 tampered candidate')
+  await page.route('**/l2-cli-candidates', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    const candidate = (body.candidates as JsonRecord[]).find((item) => item.status === 'blocked')
+    expect(candidate).toBeDefined()
+    candidate!.candidate_text = 'switchport mode access'
+    await route.fulfill({ status: 200, json: body })
+  })
+  await openPreview(page, eventId)
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('Data binding is inconsistent')
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('l2-candidate-text')
+  await expect(page.getByRole('region', { name: 'Layer 2 review' }).locator('pre.cisco-command')).toHaveCount(0)
+})
+
+test('shows a stable 409 error and hides command text', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 409')
+  await page.route('**/l2-cli-validation', (route) => route.fulfill({
+    status: 409,
+    json: { detail: { reason_code: 'validation-integrity-failure', stage: 'validation', failures: ['source-mismatch'] } },
+  }))
+  await openPreview(page, eventId)
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('Validation failed')
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('validation-integrity-failure')
+  await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Layer 2 review' }).locator('pre.cisco-command')).toHaveCount(0)
+})
