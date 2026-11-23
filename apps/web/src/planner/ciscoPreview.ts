@@ -1,4 +1,4 @@
-﻿import { ApiError, request } from '../api'
+import { ApiError, request } from '../api'
 import type { MessageKey } from '../messages'
 import { records } from './model'
 import type { Plan, RecordValue, Revision } from './model'
@@ -725,16 +725,8 @@ export function parsePreviewError(error: unknown): PreviewError {
 }
 
 export function isAbort(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError'
-}
-
-export function isL2NotApplicable(error: PreviewError): boolean {
-  return error.status === 404 && error.stage === 'preview' &&
-    (error.reasonCode === 'assignment-not-found' || error.reasonCode === 'preview-target-not-found')
-}
-
-export function isL3NotApplicable(error: PreviewError): boolean {
-  return error.status === 409 && error.reasonCode === 'assignment-not-eligible-for-l3-cli'
+  return (error instanceof DOMException && error.name === 'AbortError') ||
+    (error instanceof Error && error.name === 'AbortError')
 }
 
 export function previewErrorKey(error: PreviewError): MessageKey {

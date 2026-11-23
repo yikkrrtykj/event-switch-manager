@@ -1,4 +1,4 @@
-﻿# R49 CIS-03-04B evidence
+# R49/R50 CIS-03-04B evidence
 
 ## Scope
 
@@ -60,7 +60,7 @@ Remaining warnings:
 Compare:
 
 ```text
-kept: links 8/8, fields 4/4, handlers 11/11, headings 6/6, figures 5/5;
+kept: links 8/8, fields 4/4, handlers 11/11, headings 6/6, figures 6/6;
 before 0 FAIL, 0 REFLEX, now 0 FAIL, 0 REFLEX
 ```
 
@@ -84,25 +84,62 @@ Web, from `apps/web`:
 ```text
 npm test                  59 passed
 npm run build             passed (typecheck + Vite)
-npm run test:e2e          70 passed
+npm run test:e2e          75 passed
 ESM_E2E_VITE=1            1 passed
 ```
 
-The 14 new Cisco preview E2E tests cover:
+The 19 Cisco preview E2E tests cover:
 
 - normal Event, latest saved Revision and Cisco Assignment selection;
 - one saved Revision binding for both L2 and L3;
 - L2 PARTIAL / L3 PARTIAL and L2 BLOCKED / L3 PASS;
-- L2 N/A / L3 PASS and non-Core L3 N/A;
+- Core L2 assignment-not-found is an error, never N/A;
+- Core L3 ineligible is an error, never N/A;
+- non-Core L3 N/A through trusted saved-revision role;
 - missing L2 Source and Integrity fields;
 - L3 Registry fingerprint mismatch;
 - Revision or Assignment mismatch;
 - general 404 and 409 errors;
 - stale responses after Assignment and Revision changes;
+- immediate invalidation of already-loaded candidate tables;
+- leaving during in-flight validation;
 - tampered candidate command text withheld;
 - DHCP Helper remains BLOCKED;
 - Chinese labels, 390/1366/1920 layouts, table focus;
 - absence of Copy All, Execute, Deploy or downloadable configuration controls.
+
+## R50 trust gate closure
+
+P1:
+
+- Removed the frontend inference that any `404 assignment-not-found` means L2 N/A.
+- A selected Cisco Assignment from the saved revision must fail closed when its
+  L2 review object cannot be resolved; the subsystem and overall status are
+  FAIL, with no L2 candidate request or text.
+- A Core L3 `assignment-not-eligible-for-l3-cli` response is treated as a
+  saved-identity/backend contradiction and fails closed.
+- The only L3 N/A path is the already-proven non-Core path derived from the
+  trusted saved Revision role; it does not call the L3 API.
+- The previous E2E assertion that expected L2 N/A plus Overall PASS for a Core
+  L2 404 was incorrect and has been replaced by two fail-closed regression
+  tests. No test was skipped or removed.
+
+P2:
+
+- `loadL2` and `loadL3` now return an aborted sentinel instead of rethrowing
+  `AbortError`.
+- The top-level request effect uses `Promise.allSettled` plus a terminal
+  catch; normal cancellation produces no unhandled rejection, while unexpected
+  errors become visible subsystem errors.
+- Selection handlers synchronously invalidate candidate state and advance the
+  monotonic request sequence before the next effect runs.
+- Revision changes clear the old revision, assignments and preview state;
+  Assignment changes clear both previews before loading.
+- Added regression tests for in-flight Assignment and Revision switches,
+  leaving the page during requests, post-load immediate invalidation, page
+  errors and `unhandledrejection`.
+
+CI evidence for R50 is recorded in the PR #34 body once the R50 workflow completes.
 
 ## Frozen boundaries
 

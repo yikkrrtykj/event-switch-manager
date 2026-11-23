@@ -12,8 +12,6 @@ import {
   fetchL2Intent,
   fetchL2Validation,
   isAbort,
-  isL2NotApplicable,
-  isL3NotApplicable,
   l2ErrorFields,
   l2ProblemKeys,
   l2ReviewRows,
@@ -54,7 +52,6 @@ import type {
 
 type L2View =
   | { kind: 'loading' }
-  | { kind: 'na' }
   | { kind: 'invalid'; problems: L2Problem[]; error?: PreviewError; report?: L2ValidationReport }
   | { kind: 'error'; error: PreviewError }
   | {
@@ -97,7 +94,6 @@ interface DeviceIdentity {
 
 function statusOfL2(view: L2View): SubsystemStatus | 'loading' {
   if (view.kind === 'loading') return 'loading'
-  if (view.kind === 'na') return 'na'
   if (view.kind === 'invalid' || view.kind === 'error') return 'fail'
   return view.status
 }
@@ -275,13 +271,25 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
     setL2({ kind: 'loading' })
     setL3(assignment.isCore ? { kind: 'loading' } : { kind: 'na', reason: 'non-core' })
     void (async () => {
-      const l2Promise = loadL2(binding, controller.signal)
-      const l3Promise = assignment.isCore ? loadL3(binding, controller.signal) : Promise.resolve<L3View>({ kind: 'na', reason: 'non-core' })
-      const [loadedL2, loadedL3] = await Promise.all([l2Promise, l3Promise])
+      const [l2Result, l3Result] = await Promise.allSettled([
+        loadL2(binding, controller.signal),
+        assignment.isCore ? loadL3(binding, controller.signal) : Promise.resolve<L3View>({ kind: 'na', reason: 'non-core' }),
+      ])
       if (controller.signal.aborted || sequence !== requestSequence.current) return
-      setL2(loadedL2)
-      setL3(loadedL3)
-    })()
+      if (l2Result.status === 'fulfilled' && l2Result.value) setL2(l2Result.value)
+      else if (l2Result.status === 'rejected' && !isAbort(l2Result.reason)) {
+        setL2({ kind: 'error', error: parsePreviewError(l2Result.reason) })
+      }
+      if (l3Result.status === 'fulfilled' && l3Result.value) setL3(l3Result.value)
+      else if (l3Result.status === 'rejected' && !isAbort(l3Result.reason)) {
+        setL3({ kind: 'error', error: parsePreviewError(l3Result.reason) })
+      }
+    })().catch((failure: unknown) => {
+      if (controller.signal.aborted || isAbort(failure) || sequence !== requestSequence.current) return
+      const error = parsePreviewError(failure)
+      setL2({ kind: 'error', error })
+      setL3({ kind: 'error', error })
+    })
     return () => controller.abort()
   }, [event.id, revision, assignments, assignmentId, previewAttempt])
 
@@ -304,7 +312,29 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
       }
       : null
 
+  function invalidatePreview() {
+    requestSequence.current += 1
+    setL2({ kind: 'loading' })
+    setL3({ kind: 'loading' })
+    setError(null)
+  }
+
+  function chooseRevision(next: string) {
+    invalidatePreview()
+    setRevisionId(next)
+    setRevision(null)
+    setAssignments([])
+    setAssignmentId('')
+    setStage('loading-revision')
+  }
+
+  function chooseAssignment(next: string) {
+    invalidatePreview()
+    setAssignmentId(next)
+  }
+
   function retry() {
+    invalidatePreview()
     if (stage !== 'ready' || !revisions) setBootAttempt((value) => value + 1)
     else if (!revision) setRevisionAttempt((value) => value + 1)
     else setPreviewAttempt((value) => value + 1)
@@ -332,15 +362,17 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
     <p className="cisco-scope-note" role="note">{t('ciscoScopeNote')}</p>
 
     {stage === 'loading-revisions' && <Loading>{t('ciscoLoadingRevisions')}</Loading>}
+    {stage === 'loading-revision' && revisions !== null && revisions.length > 0 &&
+      <Loading>{t('ciscoLoadingReview')}</Loading>}
     {revisions && revisions.length > 0 && <section className="panel cisco-controls" aria-label={t('ciscoPreviewControls')}>
       <label className="field" htmlFor="cisco-revision">{t('ciscoSelectRevision')}
-        <Select id="cisco-revision" value={revisionId} disabled={!revisions.length} onChange={(input) => setRevisionId(input.target.value)}>
+        <Select id="cisco-revision" value={revisionId} disabled={!revisions.length} onChange={(input) => chooseRevision(input.target.value)}>
           {revisions.map((item) => <option value={item.id} key={item.id}>#{item.number}: {item.content_hash.slice(0, 12)}</option>)}
         </Select>
       </label>
       <label className="field" htmlFor="cisco-assignment">{t('ciscoSelectAssignment')}
         <Select id="cisco-assignment" value={assignmentId} disabled={!assignments.length}
-          onChange={(input) => setAssignmentId(input.target.value)}>
+          onChange={(input) => chooseAssignment(input.target.value)}>
           {assignments.length
             ? assignments.map((item) => <option value={item.assignmentId} key={item.assignmentId}>
               {item.hostname} ({item.role}){item.pid ? ' · ' + item.pid : ''}
@@ -399,7 +431,7 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
         <Badge tone={statusTone(statusOfL2(l2))}>
           {statusLabel(t, statusOfL2(l2))}
         </Badge>
-        <p>{l2.kind === 'na' ? t('ciscoNotApplicableL2') : t('ciscoL2OverviewNote')}</p>
+        <p>{t('ciscoL2OverviewNote')}</p>
       </div>
       <div className="panel cisco-status-card">
         <span className="cisco-eyebrow">{t('ciscoL3Status')}</span>
@@ -437,7 +469,7 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
   </main>
 }
 
-async function loadL2(binding: PreviewBinding, signal: AbortSignal): Promise<L2View> {
+async function loadL2(binding: PreviewBinding, signal: AbortSignal): Promise<L2View | null> {
   try {
     const report = await fetchL2Validation(binding.eventId, binding.revision.id, binding.assignment.assignmentId, signal)
     const problems = validateL2Report(report, binding)
@@ -452,7 +484,7 @@ async function loadL2(binding: PreviewBinding, signal: AbortSignal): Promise<L2V
       intentError = validateL2Intent(preview, report, binding)
       if (!intentError.length) intent = preview
     } catch (failure) {
-      if (isAbort(failure)) throw failure
+      if (isAbort(failure)) return null
       intentFailure = parsePreviewError(failure)
     }
     if (canLoadL2Candidates(report)) {
@@ -462,7 +494,7 @@ async function loadL2(binding: PreviewBinding, signal: AbortSignal): Promise<L2V
         if (documentProblems.length) return { kind: 'invalid', problems: documentProblems, report }
         document = rendered
       } catch (failure) {
-        if (isAbort(failure)) throw failure
+        if (isAbort(failure)) return null
         candidateError = parsePreviewError(failure)
       }
     }
@@ -473,14 +505,12 @@ async function loadL2(binding: PreviewBinding, signal: AbortSignal): Promise<L2V
       kind: 'ready', report, document, intent, intentError, intentFailure, rows, status, candidateError,
     }
   } catch (failure) {
-    if (isAbort(failure)) throw failure
-    const error = parsePreviewError(failure)
-    if (isL2NotApplicable(error)) return { kind: 'na' }
-    return { kind: 'error', error }
+    if (isAbort(failure)) return null
+    return { kind: 'error', error: parsePreviewError(failure) }
   }
 }
 
-async function loadL3(binding: PreviewBinding, signal: AbortSignal): Promise<L3View> {
+async function loadL3(binding: PreviewBinding, signal: AbortSignal): Promise<L3View | null> {
   try {
     const report = await fetchL3Validation(binding.eventId, binding.revision.id, binding.assignment.assignmentId, signal)
     const reviewBinding: ReviewBinding = {
@@ -497,7 +527,7 @@ async function loadL3(binding: PreviewBinding, signal: AbortSignal): Promise<L3V
         if (documentProblems.length) return { kind: 'invalid', problems: documentProblems, report }
         document = rendered
       } catch (failure) {
-        if (isAbort(failure)) throw failure
+        if (isAbort(failure)) return null
         candidateError = parsePreviewError(failure)
       }
     }
@@ -506,10 +536,8 @@ async function loadL3(binding: PreviewBinding, signal: AbortSignal): Promise<L3V
       ? 'fail' : candidateError || !document ? 'partial' : report.overall_status
     return { kind: 'ready', report, document, rows, status, candidateError }
   } catch (failure) {
-    if (isAbort(failure)) throw failure
-    const error = parsePreviewError(failure)
-    if (isL3NotApplicable(error)) return { kind: 'na', reason: 'non-core' }
-    return { kind: 'error', error }
+    if (isAbort(failure)) return null
+    return { kind: 'error', error: parsePreviewError(failure) }
   }
 }
 
@@ -549,10 +577,11 @@ function IntentPanel({ view }: { view: Extract<L2View, { kind: 'ready' }> }) {
 function L2Section({ view }: { view: L2View }) {
   const { t } = useMessages()
   if (view.kind === 'loading') return <Loading>{t('ciscoLoadingL2')}</Loading>
-  if (view.kind === 'na') return <p className="cisco-na" role="status">{t('ciscoNotApplicableL2')}</p>
   if (view.kind === 'error') return <div className="cisco-error" role="alert">
     <h3>{t('ciscoValidationFailed')}</h3>
     <p>{t(previewErrorKey(view.error))}</p>
+    {view.error.reasonCode === 'assignment-not-found' &&
+      <p>{t('ciscoSelectedIdentityConflict')}</p>}
     {l2ErrorFields(view.error).map((field) => <p key={field}><span className="muted">{t('ciscoReasonCode')}</span> <code>{field}</code></p>)}
   </div>
   if (view.kind === 'invalid') return <div className="cisco-error" role="alert">
@@ -592,6 +621,8 @@ function L3Section({ view }: { view: L3View }) {
   if (view.kind === 'error') return <div className="cisco-error" role="alert">
     <h3>{t('ciscoValidationFailed')}</h3>
     <p>{t(previewErrorKey(view.error))}</p>
+    {view.error.reasonCode === 'assignment-not-eligible-for-l3-cli' &&
+      <p>{t('ciscoBackendIdentityConflict')}</p>}
     {l2ErrorFields(view.error).map((field) => <p key={field}><span className="muted">{t('ciscoReasonCode')}</span> <code>{field}</code></p>)}
   </div>
   if (view.kind === 'invalid') return <div className="cisco-error" role="alert">

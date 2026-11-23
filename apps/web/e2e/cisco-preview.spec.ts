@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { expect, test } from '@playwright/test'
-import type { APIRequestContext, Page } from '@playwright/test'
+import type { APIRequestContext, Page, Route } from '@playwright/test'
 
 const origin = 'http://127.0.0.1:8765'
 const headers = { Origin: origin }
@@ -143,6 +143,39 @@ function candidateCount(page: Page) {
   return page.getByRole('table', { name: 'Layer 2 candidates' }).locator('tbody tr')
 }
 
+async function watchBrowserErrors(page: Page) {
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => { pageErrors.push(String(error)) })
+  await page.addInitScript(() => {
+    const target = window as unknown as { __r50Unhandled?: string[] }
+    target.__r50Unhandled = []
+    window.addEventListener('unhandledrejection', (event) => {
+      target.__r50Unhandled!.push(String(event.reason))
+    })
+  })
+  return pageErrors
+}
+
+async function unhandledErrors(page: Page) {
+  return await page.evaluate(() => {
+    const target = window as unknown as { __r50Unhandled?: string[] }
+    return target.__r50Unhandled ?? []
+  })
+}
+
+async function holdCoreValidation(route: Route, coreId: string, releases: (() => void)[]) {
+  if (route.request().url().includes(coreId)) {
+    await new Promise<void>((resolve) => { releases.push(resolve) })
+  }
+  try { await route.continue() } catch { /* the page may have aborted this request */ }
+}
+
+async function hasL2CandidateTable(page: Page) {
+  return await page.evaluate(() =>
+    Boolean(document.querySelector('[aria-label="Layer 2 review"] table[aria-label="Layer 2 candidates"]')),
+  )
+}
+
 test('shows a unified read-only L2 and L3 review bound to one saved revision', async ({ page, request }) => {
   const { eventId, revision } = await preparedEvent(request, 'R49 unified preview')
   await openPreview(page, eventId)
@@ -218,22 +251,50 @@ test('fails closed when L2 source or integrity fields are missing', async ({ pag
   await expect.poll(() => candidateCalls).toBe(0)
 })
 
-test('shows an N/A L2 state when the assignment is not applicable', async ({ page, request }) => {
-  const { eventId } = await preparedEvent(request, 'R49 L2 N/A', false)
-  let l3CandidateCalls = 0
+test('fails closed when a selected Core L2 validation returns assignment-not-found', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 Core L2 404', false)
+  let l2CandidateCalls = 0
+  await page.route('**/l2-cli-candidates', (route) => {
+    l2CandidateCalls += 1
+    return route.fulfill({ status: 500, json: { detail: 'L2 candidate endpoint must not be called' } })
+  })
   await page.route('**/l2-cli-validation', (route) => route.fulfill({
     status: 404,
     json: { detail: { reason_code: 'assignment-not-found', stage: 'preview' } },
   }))
+  await openPreview(page, eventId)
+  const l2Region = page.getByRole('region', { name: 'Layer 2 review' })
+  await expect(l2Region).toContainText('Validation failed')
+  await expect(l2Region).toContainText('The Event, saved revision or assignment was not found.')
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'L2 review' })).toContainText('FAIL')
+  const overallCard = page.locator('.cisco-status-card').filter({ hasText: 'Overall review' })
+  await expect(overallCard.locator('[data-slot="badge"]')).toHaveText('FAIL')
+  await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toHaveCount(0)
+  await expect(l2Region.locator('pre.cisco-command')).toHaveCount(0)
+  await expect.poll(() => l2CandidateCalls).toBe(0)
+})
+
+test('fails closed when a saved Core L3 validation is ineligible', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R49 Core L3 409', false)
+  let l3CandidateCalls = 0
   await page.route('**/l3-cli-candidates', (route) => {
     l3CandidateCalls += 1
-    return route.continue()
+    return route.fulfill({ status: 500, json: { detail: 'L3 candidate endpoint must not be called' } })
   })
+  await page.route('**/l3-cli-validation', (route) => route.fulfill({
+    status: 409,
+    json: { detail: { reason_code: 'assignment-not-eligible-for-l3-cli', stage: 'assignment' } },
+  }))
   await openPreview(page, eventId)
-  await expect(page.locator('.cisco-status-card').filter({ hasText: 'L2 review' })).toContainText('N/A')
-  await expect(page.locator('.cisco-status-card').filter({ hasText: 'L3 review' })).toContainText('PASS')
-  await expect(page.locator('.cisco-status-card').filter({ hasText: 'Overall review' })).toContainText('PASS')
-  await expect.poll(() => l3CandidateCalls).toBeGreaterThan(0)
+  const l3Region = page.getByRole('region', { name: 'Layer 3 review' })
+  await expect(l3Region).toContainText('Validation failed')
+  await expect(l3Region).toContainText('assignment-not-eligible-for-l3-cli')
+  await expect(page.locator('.cisco-status-card').filter({ hasText: 'L3 review' })).toContainText('FAIL')
+  const overallCard = page.locator('.cisco-status-card').filter({ hasText: 'Overall review' })
+  await expect(overallCard.locator('[data-slot="badge"]')).toHaveText('FAIL')
+  await expect(page.getByRole('table', { name: 'Layer 3 candidates' })).toHaveCount(0)
+  await expect(l3Region.locator('pre.cisco-command')).toHaveCount(0)
+  await expect.poll(() => l3CandidateCalls).toBe(0)
 })
 
 test('supports Chinese labels and three responsive viewports', async ({ page, request }) => {
@@ -349,9 +410,10 @@ test('shows a general 404 as an error instead of a fake PASS or N/A', async ({ p
 })
 
 test('does not render an old L2 response after the assignment changes', async ({ page, request }) => {
-  const { eventId, plan } = await preparedEvent(request, 'R49 stale response')
+  const { eventId, plan } = await preparedEvent(request, 'R50 stale response')
   const coreId = String((plan.assignments as JsonRecord[])[0]!.id)
   const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  const pageErrors = await watchBrowserErrors(page)
   let release: (() => void) | null = null
   let held = false
   await page.route('**/l2-cli-validation', async (route) => {
@@ -368,14 +430,39 @@ test('does not render an old L2 response after the assignment changes', async ({
   await expect(page.locator('.cisco-metadata')).toContainText(accessId)
   await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toBeVisible()
   release!()
-  await page.waitForTimeout(250)
+  await page.waitForLoadState('networkidle')
+  expect(pageErrors).toEqual([])
+  expect(await unhandledErrors(page)).toEqual([])
   await expect(page.locator('.cisco-metadata')).toContainText(accessId)
   await expect(page.locator('.cisco-metadata')).not.toContainText(coreId)
   await expect(page.getByRole('table', { name: 'Layer 2 candidates' }).locator('tbody tr').filter({ hasText: 'L3-Core' })).toHaveCount(0)
 })
 
+test('immediately invalidates loaded candidates when the assignment changes', async ({ page, request }) => {
+  const { eventId, plan } = await preparedEvent(request, 'R50 post-load assignment')
+  const coreId = String((plan.assignments as JsonRecord[])[0]!.id)
+  const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  const pageErrors = await watchBrowserErrors(page)
+  const releases: (() => void)[] = []
+  await page.route('**/l2-cli-validation', (route) => holdCoreValidation(route, accessId, releases))
+  await page.route('**/l3-cli-validation', (route) => holdCoreValidation(route, accessId, releases))
+  await openPreview(page, eventId)
+  await expect(page.locator('.cisco-metadata')).toContainText(coreId)
+  await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toBeVisible()
+  await page.locator('#cisco-assignment').selectOption(accessId)
+  expect(await hasL2CandidateTable(page)).toBe(false)
+  await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('Loading L2 review')
+  await expect.poll(() => releases.length).toBe(1)
+  for (const release of releases) release()
+  await page.waitForLoadState('networkidle')
+  expect(pageErrors).toEqual([])
+  expect(await unhandledErrors(page)).toEqual([])
+  await expect(page.locator('.cisco-metadata')).toContainText(accessId)
+  await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toBeVisible()
+})
+
 test('does not render an old revision response after the revision changes', async ({ page, request }) => {
-  const { eventId, plan, revision: first } = await preparedEvent(request, 'R49 stale revision')
+  const { eventId, plan, revision: first } = await preparedEvent(request, 'R50 stale revision')
   const changed = structuredClone(plan)
   const core = (changed.assignments as JsonRecord[]).find((item) => item.role === 'core')!
   ;(changed.static_routes as JsonRecord[]).push({
@@ -384,6 +471,7 @@ test('does not render an old revision response after the revision changes', asyn
   })
   const second = await savePlan(request, changed)
   expect(second.id).not.toBe(first.id)
+  const pageErrors = await watchBrowserErrors(page)
   let release: (() => void) | null = null
   let held = false
   await page.route('**/l2-cli-validation', async (route) => {
@@ -398,10 +486,60 @@ test('does not render an old revision response after the revision changes', asyn
   await page.locator('#cisco-revision').selectOption(first.id)
   await expect(page.locator('.cisco-metadata')).toContainText(first.id)
   release!()
-  await page.waitForTimeout(250)
+  await page.waitForLoadState('networkidle')
+  expect(pageErrors).toEqual([])
+  expect(await unhandledErrors(page)).toEqual([])
   await expect(page.locator('#cisco-revision')).toHaveValue(first.id)
   await expect(page.locator('.cisco-metadata')).toContainText(first.id)
   await expect(page.locator('.cisco-metadata')).not.toContainText(second.id)
+})
+
+test('immediately invalidates loaded candidates when the revision changes', async ({ page, request }) => {
+  const { eventId, plan, revision: first } = await preparedEvent(request, 'R50 post-load revision')
+  const changed = structuredClone(plan)
+  const core = (changed.assignments as JsonRecord[]).find((item) => item.role === 'core')!
+  ;(changed.static_routes as JsonRecord[]).push({
+    id: id(), assignment_id: core.id, destination: '10.202.0.0/24',
+    next_hop: { kind: 'ip', address: '10.0.0.2' }, preference: 1,
+  })
+  const corePort = (changed.physical_interfaces as JsonRecord[]).find(
+    (port) => port.assignment_id === core.id && port.name === 'Gi1/0/1',
+  )!
+  corePort.settings = { ...(corePort.settings as JsonRecord), description: 'R50 post-load revision' }
+  const second = await savePlan(request, changed)
+  const pageErrors = await watchBrowserErrors(page)
+  const releases: (() => void)[] = []
+  await page.route('**/l2-cli-validation', (route) => holdCoreValidation(route, first.id, releases))
+  await page.route('**/l3-cli-validation', (route) => holdCoreValidation(route, first.id, releases))
+  await openPreview(page, eventId)
+  await expect(page.locator('.cisco-metadata')).toContainText(second.id)
+  await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toBeVisible()
+  await page.locator('#cisco-revision').selectOption(first.id)
+  expect(await hasL2CandidateTable(page)).toBe(false)
+  await expect.poll(() => releases.length).toBe(2)
+  for (const release of releases) release()
+  await page.waitForLoadState('networkidle')
+  expect(pageErrors).toEqual([])
+  expect(await unhandledErrors(page)).toEqual([])
+  await expect(page.locator('#cisco-revision')).toHaveValue(first.id)
+  await expect(page.locator('.cisco-metadata')).toContainText(first.id)
+})
+
+test('leaves the page during in-flight validation without unhandled errors', async ({ page, request }) => {
+  const { eventId, plan } = await preparedEvent(request, 'R50 leave page')
+  const coreId = String((plan.assignments as JsonRecord[])[0]!.id)
+  const pageErrors = await watchBrowserErrors(page)
+  const releases: (() => void)[] = []
+  await page.route('**/l2-cli-validation', (route) => holdCoreValidation(route, coreId, releases))
+  await page.route('**/l3-cli-validation', (route) => holdCoreValidation(route, coreId, releases))
+  await openPreview(page, eventId)
+  await expect.poll(() => releases.length).toBe(2)
+  await page.goto('/#planner/addressing')
+  for (const release of releases) release()
+  await page.waitForLoadState('networkidle')
+  expect(pageErrors).toEqual([])
+  expect(await unhandledErrors(page)).toEqual([])
+  await expect(page.getByRole('heading', { name: 'Network Planner', exact: true })).toBeVisible()
 })
 
 test('withholds command text from a tampered candidate document', async ({ page, request }) => {
@@ -418,6 +556,27 @@ test('withholds command text from a tampered candidate document', async ({ page,
   await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('Data binding is inconsistent')
   await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('l2-candidate-text')
   await expect(page.getByRole('region', { name: 'Layer 2 review' }).locator('pre.cisco-command')).toHaveCount(0)
+})
+
+test('switches assignment during in-flight L2 and L3 validation without unhandled errors', async ({ page, request }) => {
+  const { eventId, plan } = await preparedEvent(request, 'R50 in-flight assignment')
+  const coreId = String((plan.assignments as JsonRecord[])[0]!.id)
+  const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  const pageErrors = await watchBrowserErrors(page)
+  const releases: (() => void)[] = []
+  await page.route('**/l2-cli-validation', (route) => holdCoreValidation(route, coreId, releases))
+  await page.route('**/l3-cli-validation', (route) => holdCoreValidation(route, coreId, releases))
+  await openPreview(page, eventId)
+  await expect.poll(() => releases.length).toBe(2)
+  await page.locator('#cisco-assignment').selectOption(accessId)
+  await expect(page.locator('.cisco-metadata')).toContainText(accessId)
+  await expect(page.getByRole('region', { name: 'Layer 3 review' })).toContainText('not applicable')
+  for (const release of releases) release()
+  await page.waitForLoadState('networkidle')
+  expect(pageErrors).toEqual([])
+  expect(await unhandledErrors(page)).toEqual([])
+  await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Layer 2 review' }).locator('table').filter({ hasText: 'L3-Core' })).toHaveCount(0)
 })
 
 test('shows a stable 409 error and hides command text', async ({ page, request }) => {

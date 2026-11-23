@@ -9,7 +9,6 @@ import {
   L2_RENDER_CONTRACT,
   L2_VALIDATION_CONTRACT,
   ciscoAssignments,
-  isL2NotApplicable,
   l2ReviewRows,
   l2Status,
   overallStatus,
@@ -253,15 +252,13 @@ describe('L2 unified preview contracts', () => {
     expect(found[0]?.isCore).toBe(false)
   })
 
-  it('recognizes structured not-applicable errors without turning them into data failures', () => {
-    const notApplicable = parsePreviewError(new ApiError(404, {
+  it('keeps assignment-not-found and ineligible errors as structured errors', () => {
+    expect(parsePreviewError(new ApiError(404, {
       reason_code: 'assignment-not-found', stage: 'preview',
-    }))
-    expect(isL2NotApplicable(notApplicable)).toBe(true)
-    const otherNotFound = parsePreviewError(new ApiError(404, {
-      reason_code: 'saved-revision-not-found', stage: 'revision',
-    }))
-    expect(isL2NotApplicable(otherNotFound)).toBe(false)
+    }))).toMatchObject({ status: 404, reasonCode: 'assignment-not-found', stage: 'preview' })
+    expect(parsePreviewError(new ApiError(409, {
+      reason_code: 'assignment-not-eligible-for-l3-cli', stage: 'assignment',
+    }))).toMatchObject({ status: 409, reasonCode: 'assignment-not-eligible-for-l3-cli' })
     expect(parsePreviewError(new ApiError(409, {
       reason_code: 'validation-integrity-failure', stage: 'validation',
       failures: ['source-mismatch'],
