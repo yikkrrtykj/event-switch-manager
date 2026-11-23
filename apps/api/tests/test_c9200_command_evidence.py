@@ -33,6 +33,11 @@ from event_switch_manager.planning.layer3_c9200_command_evidence import (
     ROWS,
     pending_digests,
 )
+from event_switch_manager.planning.layer3_c9200_command_evidence_reviews import (
+    C9200_REVIEW_PROVENANCE,
+    C9200_REVIEWED_REGISTRY,
+    C9200_REVIEWED_REGISTRY_ID,
+)
 from event_switch_manager.planning.layer3_cli_candidates import (
     build_l3_cli_candidates,
 )
@@ -120,6 +125,39 @@ def _assignment(plan: dict[str, Any], hostname: str = "L3-Core") -> str:
         item["id"] for item in plan["assignments"]
         if item["hostname"] == hostname
     ))
+
+
+def c9200_candidate_plan(event_id: str) -> dict[str, Any]:
+    """A valid C9200 plan with base routing and no default route.
+
+    The site has a Core SVI on 192.168.10.0/24 and an access peer at
+    192.168.10.2.  Transit/default-route topology is removed so that the
+    four approved command classes can be evaluated without the explicit
+    Default Route capability gap.
+    """
+    plan = make_l3_plan(
+        event_id,
+        core_pid="C9200L-24P-4X",
+        core_family="catalyst-9200",
+        core_image="17.12.4",
+        core_license="Network Advantage",
+        with_relay=False,
+        with_default=False,
+        static_route_count=1,
+    )
+    core = next(
+        item for item in plan["assignments"]
+        if item["hostname"] == "L3-Core"
+    )
+    plan["transit"] = None
+    plan["default_routes"] = []
+    plan["static_routes"] = [
+        route for route in plan["static_routes"]
+        if route["assignment_id"] == core["id"]
+    ]
+    for route in plan["static_routes"]:
+        route["next_hop"] = {"kind": "ip", "address": "192.168.10.2"}
+    return plan
 
 
 def test_exactly_four_topics_have_independent_family_and_grammar() -> None:
@@ -289,22 +327,57 @@ def test_unreviewed_draft_registry_cannot_emit_cli_text() -> None:
     assert all(item.status.value == "blocked" for item in document.candidates)
 
 
-def test_c9200_production_selection_is_still_the_rowless_sentinel() -> None:
+def test_c9200_reviewed_registry_and_attestation_are_digest_bound() -> None:
+    assert C9200_REVIEWED_REGISTRY.registry_id == C9200_REVIEWED_REGISTRY_ID
+    assert C9200_REVIEWED_REGISTRY.production is True
+    assert len(C9200_REVIEWED_REGISTRY.rows) == 4
+    assert C9200_REVIEWED_REGISTRY.eligible_count == 4
+    assert C9200_REVIEWED_REGISTRY.renderable_count == 4
+    assert C9200_REVIEW_PROVENANCE.reviewer == (
+        "ChatGPT GPT-6 (AI independent read-only document reviewer)"
+    )
+    assert C9200_REVIEW_PROVENANCE.review_type == (
+        "AI-independent-read-only-document-review"
+    )
+    assert C9200_REVIEW_PROVENANCE.human_approval is False
+    assert C9200_REVIEW_PROVENANCE.hardware_verified is False
+    assert C9200_REVIEW_PROVENANCE.deployment_authorized is False
+    assert C9200_REVIEW_PROVENANCE.source_url == (
+        "https://github.com/yikkrrtykj/event-switch-manager/"
+        "issues/4#issuecomment-7099400033"
+    )
+    for original, reviewed in zip(ROWS, C9200_REVIEWED_REGISTRY.rows, strict=True):
+        assert reviewed.review.content_digest == original.content_digest()
+        assert reviewed.content_digest() == original.content_digest()
+        assert reviewed.renderable
+        assert all(
+            not blocker.startswith("evidence-scope-gap-independent-evidence-review")
+            for blocker in reviewed.scope_blockers()
+        )
+
+
+def test_c9200_production_selection_uses_reviewed_registry() -> None:
     _, _, core = _intent(C9200)
     selection = select_l3_registry(core.identity)
-    assert selection.registry is UNREVIEWED_PLATFORM_REGISTRY
+    assert selection.registry is C9200_REVIEWED_REGISTRY
     assert selection.registry is not DRAFT_REGISTRY
+    assert selection.evidence_approved is True
+    assert selection.registry.registry_id == C9200_REVIEWED_REGISTRY_ID
+
+
+def test_unreviewed_c9200_identity_falls_back_to_sentinel() -> None:
+    _, _, core = _intent({**C9200, "core_image": "17.12.5"})
+    selection = select_l3_registry(core.identity)
+    assert selection.registry is UNREVIEWED_PLATFORM_REGISTRY
+    assert selection.evidence_approved is False
     assert selection.registry.rows == ()
-    assert selection.registry.renderable_count == 0
-    assert selection.registry.registry_id != C9200_DRAFT_REGISTRY_ID
 
 
-def test_c9200_api_remains_all_blocked_with_no_new_cli(client: TestClient) -> None:
+def test_c9200_api_returns_reviewed_candidates_for_the_four_topics(
+    client: TestClient,
+) -> None:
     event_id = _event(client)
-    plan = make_l3_plan(
-        event_id, core_pid="C9200L-24P-4X", core_family="catalyst-9200",
-        with_relay=False, static_route_count=1,
-    )
+    plan = c9200_candidate_plan(event_id)
     revision = _save(client, event_id, plan)
     assignment_id = _assignment(plan)
     base = (
@@ -315,25 +388,91 @@ def test_c9200_api_remains_all_blocked_with_no_new_cli(client: TestClient) -> No
     assert candidates.status_code == 200, candidates.text
     body = candidates.json()
     assert body["source"]["command_evidence_registry_id"] == (
-        "cis-03-l1-command-evidence-unreviewed-v1"
+        C9200_REVIEWED_REGISTRY_ID
     )
-    assert body["summary"]["candidates"] == 0
-    assert body["summary"]["blocked"] > 0
-    assert all(item["candidate_text"] is None for item in body["candidates"])
-    assert all(item["status"] == "blocked" for item in body["candidates"])
+    assert body["summary"]["candidates"] == 6
+    assert body["summary"]["blocked"] == 2
+    rendered = [
+        item for item in body["candidates"] if item["status"] == "candidate"
+    ]
+    assert {item["category"] for item in rendered} >= {
+        "ip-routing", "svi-interface", "svi-address", "static-route",
+    }
+    by_category = {
+        item["category"]: item["candidate_text"] for item in rendered
+    }
+    assert by_category["ip-routing"] == "ip routing"
+    assert sorted(
+        item["candidate_text"] for item in rendered
+        if item["category"] == "svi-interface"
+    ) == ["interface Vlan10", "interface Vlan20"]
+    assert any(
+        text.startswith("ip address ")
+        for item in rendered if item["category"] == "svi-address"
+        for text in [item["candidate_text"]]
+    )
+    assert any(
+        text.startswith("ip route ")
+        for item in rendered if item["category"] == "static-route"
+        for text in [item["candidate_text"]]
+    )
+    assert all(
+        item["status"] == "blocked"
+        for item in body["candidates"]
+        if item["category"] not in {
+            "ip-routing", "svi-interface", "svi-address", "static-route",
+        }
+    )
 
     validation = client.get(base + "/l3-cli-validation")
     assert validation.status_code == 200, validation.text
     report = validation.json()
     assert report["source"]["command_evidence_registry_id"] == (
-        "cis-03-l1-command-evidence-unreviewed-v1"
+        C9200_REVIEWED_REGISTRY_ID
     )
-    assert report["summary"]["passed"] == 0
-    assert report["summary"]["blocked"] > 0
+    assert report["summary"]["passed"] == 6
+    assert report["summary"]["failed"] == 0
+    assert report["summary"]["blocked"] == 2
+    assert report["overall_status"] == "partial"
     assert all(
         item["independent_verdict"] != "pass"
         for item in report["candidates"]
+        if item["category"] == "default-route"
     )
+
+
+def test_c9200_default_route_plan_does_not_release_cli(
+    client: TestClient,
+) -> None:
+    event_id = _event(client)
+    plan = make_l3_plan(
+        event_id, core_pid="C9200L-24P-4X", core_family="catalyst-9200",
+        core_image="17.12.4", core_license="Network Advantage",
+        with_relay=True, static_route_count=1,
+    )
+    revision = _save(client, event_id, plan)
+    assignment_id = _assignment(plan)
+    base = (
+        f"{API}/events/{event_id}/plan-revisions/{revision['id']}"
+        f"/assignments/{assignment_id}"
+    )
+    body = client.get(base + "/l3-cli-candidates").json()
+    assert body["source"]["command_evidence_registry_id"] == (
+        C9200_REVIEWED_REGISTRY_ID
+    )
+    assert body["summary"]["candidates"] == 0
+    assert all(item["candidate_text"] is None for item in body["candidates"])
+    default = next(
+        item for item in body["candidates"]
+        if item["category"] == "default-route"
+    )
+    assert default["status"] == "blocked"
+    dhcp = next(
+        item for item in body["candidates"]
+        if item["category"] == "dhcp-helper-address"
+    )
+    assert dhcp["status"] == "blocked"
+    assert dhcp["candidate_text"] is None
 
 
 def test_9300_frozen_registry_and_dhcp_helper_are_unchanged() -> None:

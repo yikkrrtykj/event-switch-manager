@@ -166,9 +166,34 @@ async function preparedEvent(
   return { eventId, plan, revision }
 }
 
+function c9200CandidatePlan(plan: JsonRecord): JsonRecord {
+  const copy = structuredClone(plan)
+  const assignments = copy.assignments as JsonRecord[]
+  const core = assignments.find((item) => item.hostname === 'L3-Core')!
+  copy.transit = null
+  copy.default_routes = []
+  copy.static_routes = (copy.static_routes as JsonRecord[]).filter(
+    (route) => route.assignment_id === core.id,
+  )
+  for (const route of copy.static_routes as JsonRecord[]) {
+    route.next_hop = { kind: 'ip', address: '192.168.10.2' }
+  }
+  return copy
+}
+
 async function preparedC9200Event(request: APIRequestContext, name: string) {
-  return preparedEvent(request, name, {
+  const eventId = await createEvent(request, name)
+  const plan = c9200CandidatePlan(l3Plan(eventId, {
     pid: 'C9200L-24P-4X', family: 'catalyst-9200', withRelay: false,
+  }))
+  const revision = await savePlan(request, plan)
+  return { eventId, plan, revision }
+}
+
+async function preparedC9200SentinelEvent(request: APIRequestContext, name: string) {
+  return preparedEvent(request, name, {
+    pid: 'C9200L-24P-4X', family: 'catalyst-9200', image: '17.12.5',
+    withRelay: false,
   })
 }
 
@@ -243,8 +268,8 @@ test('shows a saved revision read-only 9 PASS / 1 BLOCKED review', async ({ page
   await expect(page.getByRole('link', { name: /download|deploy|execute/i })).toHaveCount(0)
 })
 
-test('shows a real C9200 saved revision as all-BLOCKED on the fixed unreviewed registry', async ({ page, request }) => {
-  const { eventId, plan, revision } = await preparedC9200Event(request, 'R52A C9200 review')
+test('shows a real C9200 saved revision with reviewed L3 candidates', async ({ page, request }) => {
+  const { eventId, plan, revision } = await preparedC9200Event(request, 'R57 C9200 reviewed review')
   const assignmentId = String((plan.assignments as JsonRecord[])[0]!.id)
   const validation = await request.get(
     events + '/' + eventId + '/plan-revisions/' + revision.id +
@@ -256,37 +281,40 @@ test('shows a real C9200 saved revision as all-BLOCKED on the fixed unreviewed r
   const report = await validation.json() as JsonRecord
   const source = report.source as JsonRecord
   const summary = report.summary as JsonRecord
-  expect(source.command_evidence_registry_id).toBe('cis-03-l1-command-evidence-unreviewed-v1')
+  expect(source.command_evidence_registry_id).toBe('cis-03-c9200-l3-command-evidence-v1')
   expect(source.command_evidence_registry_fingerprint).toBe(
-    '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+    '2c73c8b39100622360c6bfab935d995d8fb884dd999b6df0ae744a7be7cec876',
   )
   expect(report.overall_status).toBe('partial')
-  expect(summary).toMatchObject({ total: 9, passed: 0, failed: 0, blocked: 9 })
-  expect((report.candidates as JsonRecord[]).every((item) => item.independent_verdict === 'blocked'))
-    .toBe(true)
-  expect((report.candidates as JsonRecord[]).every((item) => (item.evidence as JsonRecord).review_state === null))
-    .toBe(true)
+  expect(summary).toMatchObject({ total: 8, passed: 6, failed: 0, blocked: 2 })
+  expect((report.candidates as JsonRecord[]).some(
+    (item) => (item.evidence as JsonRecord).review_state === 'independently-reviewed',
+  )).toBe(true)
 
   await openReview(page, eventId)
   const counts = page.locator('dl.l3-counts')
-  await expect(counts.locator('div').filter({ hasText: /^Total/ })).toContainText('9')
-  await expect(counts.locator('div').filter({ hasText: /^Passed/ })).toContainText('0')
-  await expect(counts.locator('div').filter({ hasText: /^BLOCKED/ })).toContainText('9')
+  await expect(counts.locator('div').filter({ hasText: /^Total/ })).toContainText('8')
+  await expect(counts.locator('div').filter({ hasText: /^Passed/ })).toContainText('6')
+  await expect(counts.locator('div').filter({ hasText: /^BLOCKED/ })).toContainText('2')
   await expect(page.getByText('PARTIAL', { exact: true })).toBeVisible()
-  await expect(page.getByText('Platform evidence unreviewed', { exact: true })).toBeVisible()
-  await expect(page.getByText('Production validation scope', { exact: true })).toBeVisible()
-  await expect(page.getByText('Production scope', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Platform evidence unreviewed', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('C9200 evidence reviewed (AI documentation)', { exact: true })).toBeVisible()
   const table = page.getByRole('table', { name: 'Candidates' })
-  await expect(table.locator('tbody tr')).toHaveCount(9)
-  await expect(table.getByText('PASS', { exact: true })).toHaveCount(0)
-  await expect(table.getByText('BLOCKED', { exact: true })).toHaveCount(18)
-  await expect(page.locator('pre.l3-command')).toHaveCount(0)
-  const first = table.locator('tbody tr').first()
-  await first.getByText('Details', { exact: true }).click()
-  await expect(first.getByText('Command text unavailable or withheld for this candidate.')).toBeVisible()
-  await expect(first.locator('pre')).toHaveCount(0)
+  await expect(table.locator('tbody tr')).toHaveCount(8)
+  await expect(table.getByText('PASS', { exact: true })).toHaveCount(6)
+  await expect(table.getByText('CANDIDATE', { exact: true })).toHaveCount(6)
   await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i }))
     .toHaveCount(0)
+
+  const ipRow = table.locator('tbody tr').filter({ hasText: 'ip-routing' }).first()
+  await ipRow.getByText('Details', { exact: true }).click()
+  await expect(ipRow.locator('pre.l3-command')).toContainText('ip routing')
+  const sviRow = table.locator('tbody tr').filter({ hasText: 'svi-interface' }).first()
+  await sviRow.getByText('Details', { exact: true }).click()
+  await expect(sviRow.locator('pre.l3-command')).toContainText('interface Vlan')
+  const routeRow = table.locator('tbody tr').filter({ hasText: 'static-route' }).first()
+  await routeRow.getByText('Details', { exact: true }).click()
+  await expect(routeRow.locator('pre.l3-command')).toContainText('ip route 10.200.0.0')
 
   for (const width of [390, 1366, 1920]) {
     await page.setViewportSize({ width, height: 900 })
@@ -295,9 +323,31 @@ test('shows a real C9200 saved revision as all-BLOCKED on the fixed unreviewed r
   }
 })
 
-test('does not keep 9300 command text when switching to a C9200 saved revision', async ({ page, request }) => {
-  const r9300 = await preparedEvent(request, 'R52A switch 9300')
-  const r9200 = await preparedC9200Event(request, 'R52A switch 9200')
+test('keeps an unknown C9200 release on the sentinel and hides CLI', async ({ page, request }) => {
+  const { eventId, plan, revision } = await preparedC9200SentinelEvent(
+    request, 'R57 unknown C9200 release',
+  )
+  const assignmentId = String((plan.assignments as JsonRecord[])[0]!.id)
+  const validation = await request.get(
+    events + '/' + eventId + '/plan-revisions/' + revision.id +
+    '/assignments/' + assignmentId + '/l3-cli-validation',
+    { headers },
+  )
+  expect(validation.status(), await validation.text()).toBe(200)
+  const report = await validation.json() as JsonRecord
+  expect((report.source as JsonRecord).command_evidence_registry_id).toBe(
+    'cis-03-l1-command-evidence-unreviewed-v1',
+  )
+  await openReview(page, eventId)
+  await expect(page.getByText('Platform evidence unreviewed', { exact: true })).toBeVisible()
+  await expect(page.locator('pre.l3-command')).toHaveCount(0)
+  await expect(page.getByRole('table', { name: 'Candidates' }).getByText('PASS', { exact: true }))
+    .toHaveCount(0)
+})
+
+test('rebinds to reviewed C9200 candidates when switching from 9300', async ({ page, request }) => {
+  const r9300 = await preparedEvent(request, 'R57 switch 9300')
+  const r9200 = await preparedC9200Event(request, 'R57 switch 9200')
   await openReview(page, r9300.eventId)
   const passRow = page.getByRole('table', { name: 'Candidates' })
     .locator('tbody tr').filter({ hasText: 'ip-routing' }).first()
@@ -305,10 +355,11 @@ test('does not keep 9300 command text when switching to a C9200 saved revision',
   await expect(passRow.locator('pre.l3-command')).toContainText('ip routing')
 
   await page.getByLabel('Event', { exact: true }).selectOption(r9200.eventId)
-  await expect(page.getByText('Platform evidence unreviewed', { exact: true })).toBeVisible()
-  await expect(page.locator('pre.l3-command')).toHaveCount(0)
+  await expect(page.locator('dl.l3-counts')).toContainText('8')
+  await expect(page.locator('dl.l3-counts')).toContainText('6')
   await expect(page.getByRole('table', { name: 'Candidates' }).getByText('PASS', { exact: true }))
-    .toHaveCount(0)
+    .toHaveCount(6)
+  await expect(page.getByText('Platform evidence unreviewed', { exact: true })).toHaveCount(0)
 })
 
 test('rejects a 9300 report that claims the unreviewed sentinel', async ({ page, request }) => {
@@ -380,7 +431,7 @@ test('rejects a correct Registry ID with the wrong fingerprint', async ({ page, 
 })
 
 test('rejects a sentinel report containing a PASS candidate', async ({ page, request }) => {
-  const { eventId } = await preparedC9200Event(request, 'R52A sentinel PASS')
+  const { eventId } = await preparedC9200SentinelEvent(request, 'R52A sentinel PASS')
   const candidateCalls = await injectValidationResponse(page, (report) => {
     const candidates = report.candidates as JsonRecord[]
     candidates[0]!.independent_verdict = 'pass'
@@ -409,7 +460,7 @@ for (const [field, value] of [
 }
 
 test('rejects a sentinel candidate document that injects CLI text', async ({ page, request }) => {
-  const { eventId } = await preparedC9200Event(request, 'R52A sentinel CLI')
+  const { eventId } = await preparedC9200SentinelEvent(request, 'R52A sentinel CLI')
   await page.route('**/l3-cli-candidates', async (route) => {
     const response = await route.fetch()
     const document = await response.json() as JsonRecord

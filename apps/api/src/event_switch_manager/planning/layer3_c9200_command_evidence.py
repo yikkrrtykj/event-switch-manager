@@ -1,9 +1,11 @@
 """CIS-03-04A-2 Catalyst 9200 layer-3 evidence drafts.
 
-This module is deliberately NOT imported by the production Layer 3 registry
-selection or command rendering pipeline.  The rows below are evidence-review
-candidates only: every row starts PENDING, uses independent Catalyst 9200
-evidence IDs, and cannot authorize CLI text.
+This module owns the original Catalyst 9200 evidence candidates and the
+non-production draft Registry.  Every original row starts PENDING and uses
+independent Catalyst 9200 evidence IDs.  The production-reviewed rows are
+constructed separately in ``layer3_c9200_command_evidence_reviews`` by
+replacing only review metadata; the draft Registry itself is never selected by
+production code.
 
 The four topics in this batch are:
 

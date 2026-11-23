@@ -1,11 +1,12 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+﻿import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '../api'
 import type { Revision } from './model'
 import {
   canLoadCandidates, coreAssignments, expectedRegistryBinding, fetchValidation, filterReviewRows,
   isUnreviewedRegistry, overallKeys, parseReviewError, reviewErrorKey, reviewRows, validateDocument,
-  validateReport, verdictKeys, L3_UNREVIEWED_REGISTRY_FINGERPRINT, L3_UNREVIEWED_REGISTRY_ID,
+  validateReport, verdictKeys, L3_C9200_REGISTRY_FINGERPRINT, L3_C9200_REGISTRY_ID,
+  L3_UNREVIEWED_REGISTRY_FINGERPRINT, L3_UNREVIEWED_REGISTRY_ID,
 } from './l3Review'
 import type {
   L3CandidateDocument, L3CandidateValidation, L3Integrity, L3Source, L3SourceField,
@@ -147,17 +148,21 @@ function document(): L3CandidateDocument {
 
 const binding: ReviewBinding = { eventId, revision, assignmentId }
 
-function c9200Revision(): Revision {
+function c9200Revision(image = '17.12.4'): Revision {
   const copied = structuredClone(revision)
   const devices = copied.plan.physical_devices as Record<string, unknown>[]
   devices[0]!.model = 'C9200L-24P-4X'
   const assignments = copied.plan.assignments as Record<string, unknown>[]
   assignments[0]!.family = 'catalyst-9200'
+  assignments[0]!.software = { image, license: 'Network Advantage' }
   return copied
 }
 
-const unreviewedBinding: ReviewBinding = {
+const reviewedC9200Binding: ReviewBinding = {
   eventId, revision: c9200Revision(), assignmentId,
+}
+const unreviewedBinding: ReviewBinding = {
+  eventId, revision: c9200Revision('17.12.5'), assignmentId,
 }
 
 function unreviewedCandidate(id: string, category: string): L3CandidateValidation {
@@ -179,7 +184,10 @@ function unreviewedReport(): L3ValidationReport {
     ...value,
     source: { ...source },
     expected_source: { ...source },
-    device: { ...value.device, family: 'catalyst-9200', exact_pid: 'C9200L-24P-4X' },
+    device: {
+      ...value.device, family: 'catalyst-9200', exact_pid: 'C9200L-24P-4X',
+      software_image: '17.12.5',
+    },
     candidates: [
       unreviewedCandidate('c1', 'ip-routing'),
       {
@@ -210,7 +218,10 @@ function unreviewedDocument(): L3CandidateDocument {
   return {
     ...value,
     source,
-    device: { ...value.device, family: 'catalyst-9200', exact_pid: 'C9200L-24P-4X' },
+    device: {
+      ...value.device, family: 'catalyst-9200', exact_pid: 'C9200L-24P-4X',
+      software_image: '17.12.5',
+    },
     candidates,
     render_state: 'blocked',
     summary: { ...value.summary, candidates: 0, blocked: 2, unsupported: 0 },
@@ -229,10 +240,15 @@ describe('L3 review data contracts', () => {
     expect(verdictKeys.pass).toBe('verdictPass')
   })
 
-  it('binds a reviewed 9300 identity to the frozen registry and a C9200 identity to the fixed sentinel', () => {
+  it('binds 9300, reviewed C9200 and unreviewed identities to three fixed registries', () => {
     expect(expectedRegistryBinding(binding)).toMatchObject({
       registryId: 'cis-03-l1-command-evidence-v1',
       registryFingerprint: registryHash,
+      evidenceApproved: true,
+    })
+    expect(expectedRegistryBinding(reviewedC9200Binding)).toMatchObject({
+      registryId: L3_C9200_REGISTRY_ID,
+      registryFingerprint: L3_C9200_REGISTRY_FINGERPRINT,
       evidenceApproved: true,
     })
     expect(expectedRegistryBinding(unreviewedBinding)).toMatchObject({
@@ -279,7 +295,7 @@ describe('L3 review data contracts', () => {
     for (const change of [
       { family: 'catalyst-9300' },
       { exact_pid: 'C9300L-24P-4X' },
-      { software_image: '17.12.5' },
+      { software_image: '17.12.6' },
       { software_license: 'Network Essentials' },
     ]) {
       const forged = unreviewedReport()

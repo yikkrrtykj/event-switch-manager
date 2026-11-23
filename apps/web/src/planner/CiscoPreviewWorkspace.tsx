@@ -38,6 +38,7 @@ import {
   canLoadCandidates as canLoadL3Candidates,
   fetchCandidates as fetchL3Candidates,
   fetchValidation as fetchL3Validation,
+  isReviewedC9200Registry as isReviewedC9200L3Registry,
   isUnreviewedRegistry as isUnreviewedL3Registry,
   reviewRows as l3ReviewRows,
   validateDocument as validateL3Document,
@@ -656,6 +657,9 @@ function L3Section({ view }: { view: L3View }) {
     {view.status !== 'pass' && <p className="cisco-partial-note" role="status">{t('ciscoPartialNote')}</p>}
     {isUnreviewedL3Registry(view.report) && <p className="cisco-partial-note cisco-unreviewed-note" role="note">
       {t('ciscoL3UnreviewedRegistryNote')}
+    </p>}
+    {isReviewedC9200L3Registry(view.report) && <p className="cisco-partial-note cisco-reviewed-note" role="note">
+      {t('ciscoL3ReviewedC9200')}
     </p>}
     {view.report.summary.dhcp_helper_blocked && <p className="cisco-dhcp-blocked" role="note">
       <Badge tone="danger">{t('ciscoDhcpHelperBlocked')}</Badge> {t('ciscoDhcpHelperBlockedDetail')}
