@@ -18,11 +18,17 @@ from layer3_helpers import make_l3_plan, revision_for
 from test_event_plans import API, ORIGIN
 
 from event_switch_manager.app import create_app
+from event_switch_manager.planning import layer3_c9200_command_evidence as c9200_evidence
+from event_switch_manager.planning import layer3_capability
 from event_switch_manager.planning.layer3_c9200_command_evidence import (
     C9200_DRAFT_REGISTRY_ID,
+    C9200_HARDWARE_PIDS,
     C9200_LICENSES,
+    C9200_ORDERING_SKU_DEFAULT_LICENSES,
+    C9200_ORDERING_SKUS,
     C9200_PIDS,
     C9200_RELEASE,
+    C9200_RELEASE_WHATS_NEW,
     DRAFT_REGISTRY,
     ROWS,
     pending_digests,
@@ -54,16 +60,16 @@ FROZEN_9300_FINGERPRINT = (
 )
 EXPECTED_DIGESTS = {
     "l3-9200-ip-routing-v1": (
-        "3994bc18808f56bff6f02e60bb9964d680788d4e446de86eaa01d2aea233ecc0"
+        "84fb338c43bd5584f0797baf9172291973f26720227dc18bbf0fb09a48c4db38"
     ),
     "l3-9200-svi-interface-v1": (
-        "43db1b686d11ac297c615be7f8ea8bb0fb193c17941cdaec923f9844f642dfc6"
+        "37223459db80efc3d531a6ccf898c217fc7319893cbee56d3c7ec4eccf2e2193"
     ),
     "l3-9200-svi-address-v1": (
-        "b0c61e8444d84b4fca71c1792766daf325a446392480ef7adaea0f5d1ff99619"
+        "e61264cf0a1b2441f443b8e5213e42ef3b2b6db946619909bd396650ba56c6d9"
     ),
     "l3-9200-static-route-v1": (
-        "446c9c6df64a33dad0ced5b18ff12db5fd6f6815d3f0325e7dbc47d7ef8255a6"
+        "8206b57a147c5d3a4a3b29506a91ec9f7de1b586ed0fd074f30bae453df55a4a"
     ),
 }
 
@@ -139,17 +145,28 @@ def test_exactly_four_topics_have_independent_family_and_grammar() -> None:
         assert row.mode.value in {"global", "interface"}
 
 
-def test_pid_whitelist_is_exact_and_positive_and_negative_matching_holds() -> None:
-    assert C9200_PIDS == (
-        "C9200-24T", "C9200-24P", "C9200L-24T-4G",
-        "C9200L-24T-4G-E", "C9200L-24P-4X", "C9200L-24P-4X-A",
+def test_hardware_pids_ordering_skus_and_default_license_mapping() -> None:
+    assert C9200_HARDWARE_PIDS == (
+        "C9200-24T", "C9200-24P", "C9200L-24T-4G", "C9200L-24P-4X",
     )
+    assert C9200_ORDERING_SKUS == (
+        "C9200L-24T-4G-E", "C9200L-24P-4X-A",
+    )
+    assert C9200_PIDS == C9200_HARDWARE_PIDS + C9200_ORDERING_SKUS
+    assert set(C9200_HARDWARE_PIDS).isdisjoint(C9200_ORDERING_SKUS)
+    assert C9200_ORDERING_SKU_DEFAULT_LICENSES == {
+        "C9200L-24T-4G-E": "Network Essentials",
+        "C9200L-24P-4X-A": "Network Advantage",
+    }
     for row in ROWS:
         assert row.classification is not None
         assert row.pids == C9200_PIDS
-        assert row.classification.hardware_pids == C9200_PIDS
+        assert row.classification.hardware_pids == C9200_HARDWARE_PIDS
+        assert row.classification.ordering_skus == C9200_ORDERING_SKUS
         assert row.classification.verified_pids == C9200_PIDS
-        assert row.classification.ordering_skus == ()
+        assert "ordering-sku-default-license-is-not-active-license" in (
+            row.classification.excluded_scope_notes
+        )
         for pid in C9200_PIDS:
             matched = DRAFT_REGISTRY.matching(
                 row.topic, pid, C9200_RELEASE, "Network Advantage",
@@ -163,9 +180,51 @@ def test_pid_whitelist_is_exact_and_positive_and_negative_matching_holds() -> No
         ) == ()
 
 
+def test_evidence_pid_scope_is_owned_by_the_evidence_module() -> None:
+    assert c9200_evidence.C9200_PIDS == C9200_PIDS
+    assert not hasattr(c9200_evidence, "_9200_PIDS")
+    # Current expected relation to Capability.  A future Capability expansion
+    # must deliberately update this test and the Evidence scope, not inherit it.
+    assert set(C9200_PIDS) == set(layer3_capability._9200_PIDS)
+
+
+def test_exact_syntax_and_official_sections_are_bound() -> None:
+    expected = {
+        L3CommandTopic.IP_ROUTING: (
+            "Configuration Guidelines for IP Routing", None, False,
+        ),
+        L3CommandTopic.SVI_INTERFACE: (
+            "Configuration Guidelines for IP Routing", "interface", False,
+        ),
+        L3CommandTopic.SVI_ADDRESS: (
+            "Assigning IP Addresses to Network Interfaces", "ip address", False,
+        ),
+        L3CommandTopic.STATIC_ROUTE: (
+            "Configuring Static Unicast Routes", "ip route", True,
+        ),
+    }
+    for row in ROWS:
+        source_section, reference_section, generic = expected[row.topic]
+        assert row.source_section == source_section
+        assert row.command_reference_section == reference_section
+        assert row.classification is not None
+        assert row.classification.generic_command_reference is generic
+        if row.topic is L3CommandTopic.SVI_INTERFACE:
+            assert row.limits and "interface vlan vlan-id" in " ".join(row.limits)
+        if row.topic is L3CommandTopic.STATIC_ROUTE:
+            assert any(
+                "interface next-hop and distance" in limit
+                for limit in row.limits
+            )
+
+
 def test_release_scope_is_17_12_4_and_other_releases_do_not_match() -> None:
     for row in ROWS:
         assert row.releases == (C9200_RELEASE,)
+        assert any(
+            source.url == C9200_RELEASE_WHATS_NEW
+            for source in row.supplemental_sources
+        )
         assert DRAFT_REGISTRY.matching(
             row.topic, "C9200L-24P-4X", "17.12.5", "Network Advantage",
         ) == ()
@@ -174,16 +233,19 @@ def test_release_scope_is_17_12_4_and_other_releases_do_not_match() -> None:
         ) == ()
 
 
-def test_license_scope_is_partial_and_positive_negative_ranges_are_clear() -> None:
+def test_license_evidence_is_verified_for_basic_routing_and_dna_is_excluded() -> None:
     for row in ROWS:
         assert row.licenses == C9200_LICENSES
         assert row.classification is not None
-        assert row.classification.license_evidence is EvidenceStatus.PARTIAL
+        assert row.classification.license_evidence is EvidenceStatus.VERIFIED
         assert row.classification.license_source_url is not None
-        assert "official-feature-to-license-mapping-not-pinned" in (
-            row.classification.blocking_evidence_gaps
+        assert row.classification.license_source_section == "Interface Connections"
+        assert not any(
+            "license" in reason for reason in row.scope_blockers()
         )
-        assert any("license-partial" in reason for reason in row.scope_blockers())
+        assert "actual-active-license-not-hardware-verified" in (
+            row.classification.excluded_scope_notes
+        )
         for license_name in C9200_LICENSES:
             assert DRAFT_REGISTRY.matching(
                 row.topic, "C9200L-24P-4X", C9200_RELEASE, license_name,
