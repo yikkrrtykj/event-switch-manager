@@ -402,6 +402,9 @@ test('supports Chinese labels and three responsive viewports', async ({ page, re
   await page.getByLabel('Language').selectOption('zh-CN')
   await expect(page.getByRole('heading', { name: 'Cisco 配置预览', exact: true })).toBeVisible()
   await expect(page.locator('.cisco-status-card').filter({ hasText: '整体审阅' })).toContainText('部分通过')
+  const assembly = page.getByRole('region', { name: '设备配置整合' })
+  await expect(assembly).toBeVisible()
+  await expect(assembly).toContainText('不完整')
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
   const region = page.locator('.cisco-subsystem').first().locator('[data-slot="table-container"]')
   await expect(region).toHaveAttribute('tabindex', '0')
@@ -688,4 +691,392 @@ test('shows a stable 409 error and hides command text', async ({ page, request }
   await expect(page.getByRole('region', { name: 'Layer 2 review' })).toContainText('validation-integrity-failure')
   await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toHaveCount(0)
   await expect(page.getByRole('region', { name: 'Layer 2 review' }).locator('pre.cisco-command')).toHaveCount(0)
+})
+
+test('shows device configuration assembly chapters and cross-layer checks for C9200', async ({ page, request }) => {
+  const { eventId } = await preparedC9200CandidateEvent(request, 'R59 C9200 assembly')
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Device configuration assembly' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('This device configuration is NOT COMPLETE.')
+  const chapters = panel.getByRole('table', { name: 'Configuration chapters' })
+  await expect(chapters.locator('tbody tr')).toHaveCount(12)
+  const ipRow = chapters.locator('tbody tr').filter({ hasText: 'ip-routing' }).first()
+  await expect(ipRow).toContainText('VALIDATED SECTION')
+  const sviRow = chapters.locator('tbody tr').filter({ hasText: 'svi' }).first()
+  await expect(sviRow).toContainText('PARTIAL')
+  const dhcpRow = chapters.locator('tbody tr').filter({ hasText: 'dhcp' }).first()
+  await expect(dhcpRow).toContainText('NOT APPLICABLE')
+  const managementRow = chapters.locator('tbody tr').filter({ hasText: 'management-auth-ssh' }).first()
+  await expect(managementRow).toContainText('NOT IMPLEMENTED')
+  const checks = panel.getByRole('table', { name: 'Cross-layer checks' })
+  await expect(checks.locator('tbody tr')).toHaveCount(11)
+  const chapter = panel.locator('.cisco-assembly-chapter').filter({ hasText: 'ip-routing' }).first()
+  await chapter.locator('summary').click()
+  await expect(chapter.locator('pre.cisco-command')).toContainText('ip routing')
+  await expect(panel).toContainText('No combined command script is generated')
+  await expect(panel.getByRole('button', { name: /copy all|execute|deploy/i })).toHaveCount(0)
+
+  for (const width of [390, 1366, 1920]) {
+    await page.setViewportSize({ width, height: 900 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
+      .toBeLessThanOrEqual(1)
+  }
+})
+
+test('clears the old device assembly when the selected assignment changes', async ({ page, request }) => {
+  const { eventId, plan } = await preparedEvent(request, 'R59 assembly switch')
+  const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Device configuration assembly' })
+  await expect(panel.getByRole('table', { name: 'Configuration chapters' })).toBeVisible()
+  const chapter = panel.locator('.cisco-assembly-chapter').filter({ hasText: 'ip-routing' }).first()
+  await chapter.locator('summary').click()
+  await expect(chapter.locator('pre.cisco-command')).toContainText('ip routing')
+  await page.locator('#cisco-assignment').selectOption(accessId)
+  await expect(page.locator('#cisco-assignment')).toHaveValue(accessId)
+  await expect(panel.getByRole('table', { name: 'Configuration chapters' })).toBeVisible()
+  await expect(panel).not.toContainText('ip routing')
+  const row = panel.getByRole('table', { name: 'Configuration chapters' })
+    .locator('tbody tr').filter({ hasText: 'ip-routing' }).first()
+  await expect(row).toContainText('NOT APPLICABLE')
+})
+
+test('shows C9300 assembly completeness without claiming a complete configuration', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R59 C9300 assembly')
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Device configuration assembly' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('This device configuration is NOT COMPLETE.')
+  const chapters = panel.getByRole('table', { name: 'Configuration chapters' })
+  await expect(chapters.locator('tbody tr')).toHaveCount(12)
+  const dhcpRow = chapters.locator('tbody tr').filter({ hasText: 'dhcp' }).first()
+  await expect(dhcpRow).toContainText('BLOCKED')
+  const managementRow = chapters.locator('tbody tr').filter({ hasText: 'management-auth-ssh' }).first()
+  await expect(managementRow).toContainText('NOT IMPLEMENTED')
+  await expect(panel.getByRole('table', { name: 'Cross-layer checks' })).toContainText('BLOCKED')
+  await expect(panel.getByText('Hardware is NOT VERIFIED', { exact: false })).toBeVisible()
+  await expect(panel.getByRole('button', { name: /copy all|execute|deploy/i })).toHaveCount(0)
+})
+
+test('keeps unsupported C9200-style platforms assembly fail-closed with no CLI text', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(
+    request, 'R59 unsupported assembly', false,
+    { pid: 'WS-C2960X-24TS-L', family: 'catalyst-2960x', image: '15.2(7)E', license: 'LAN Base' },
+  )
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Device configuration assembly' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('This device configuration is NOT COMPLETE.')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+  await expect(panel).toContainText('NOT IMPLEMENTED')
+  await expect(panel.getByRole('button', { name: /copy all|execute|deploy/i })).toHaveCount(0)
+})
+
+test('rejects tampered assembly source fingerprints and hides chapter CLI', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R59 tampered assembly')
+  await page.route('**/config-assembly-preview', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    const source = body.source as JsonRecord
+    source.l2_render_fingerprint = 'tampered'
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Device configuration assembly' })
+  await expect(panel).toContainText('Data binding is inconsistent')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})
+function assemblySection(body: JsonRecord, sectionId: string): JsonRecord {
+  const section = (body.sections as JsonRecord[]).find((item) => item.section_id === sectionId)
+  expect(section).toBeDefined()
+  return section!
+}
+
+function assemblyCandidate(section: JsonRecord): JsonRecord {
+  const candidate = (section.candidates as JsonRecord[]).find((item) => item.status === 'candidate')
+  expect(candidate).toBeDefined()
+  return candidate!
+}
+
+async function interceptAssembly(
+  page: Page, mutate: (body: JsonRecord) => void,
+) {
+  await page.route('**/config-assembly-preview', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    mutate(body)
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+}
+
+async function expectAssemblyWithheld(page: Page) {
+  const panel = page.getByRole('region', { name: 'Device configuration assembly' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('Data binding is inconsistent')
+  await expect(panel).toContainText('Command text withheld')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+}
+
+test('withholds assembly CLI when the independent L2 report fails', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R59A L2 report failure')
+  await page.route('**/l2-cli-validation', (route) => route.fulfill({
+    status: 500,
+    json: { detail: { reason_code: 'forced-l2-failure', stage: 'validation', failures: ['forced'] } },
+  }))
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('withholds assembly CLI when the Core L3 report fails', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R59A L3 report failure')
+  await page.route('**/l3-cli-validation', (route) => route.fulfill({
+    status: 500,
+    json: { detail: { reason_code: 'forced-l3-failure', stage: 'validation', failures: ['forced'] } },
+  }))
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('withholds assembly CLI when the L2 candidate document is unavailable', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R59A L2 document failure')
+  await page.route('**/l2-cli-candidates', (route) => route.fulfill({
+    status: 409,
+    json: { detail: { reason_code: 'forced-document-failure', stage: 'candidate', failures: ['forced'] } },
+  }))
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects a replaced assembly command even when the source fingerprint strings stay unchanged', async ({ page, request }) => {
+  const { eventId } = await preparedC9200CandidateEvent(request, 'R59A replaced command')
+  await interceptAssembly(page, (body) => {
+    const candidate = assemblyCandidate(assemblySection(body, 'ip-routing'))
+    candidate.candidate_text = 'ip route 203.0.113.0 255.255.255.0 192.168.10.2'
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects a valid-shaped but mismatched assembly candidate fingerprint', async ({ page, request }) => {
+  const { eventId } = await preparedC9200CandidateEvent(request, 'R59A candidate fingerprint')
+  await interceptAssembly(page, (body) => {
+    const candidate = assemblyCandidate(assemblySection(body, 'ip-routing'))
+    candidate.candidate_fingerprint = '0'.repeat(64)
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects changed assembly category and target while keeping the candidate ID', async ({ page, request }) => {
+  const { eventId } = await preparedC9200CandidateEvent(request, 'R59A category target')
+  await interceptAssembly(page, (body) => {
+    const candidate = assemblyCandidate(assemblySection(body, 'ip-routing'))
+    candidate.category = 'static-route'
+    candidate.target_name = 'Vlan999'
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects injected CLI on a blocked assembly candidate', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R59A blocked CLI')
+  await interceptAssembly(page, (body) => {
+    const section = assemblySection(body, 'dhcp')
+    const blocked = (section.candidates as JsonRecord[]).find((item) => item.status === 'blocked')
+    expect(blocked).toBeDefined()
+    blocked!.candidate_text = 'ip helper-address 192.168.10.5'
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects a duplicate assembly candidate across chapters', async ({ page, request }) => {
+  const { eventId } = await preparedC9200CandidateEvent(request, 'R59A duplicate candidate')
+  await interceptAssembly(page, (body) => {
+    const source = assemblySection(body, 'ip-routing')
+    const candidate = assemblyCandidate(source)
+    const target = assemblySection(body, 'svi')
+    ;(target.candidates as JsonRecord[]).push(structuredClone(candidate))
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects a forged Cross-layer ID and a changed Cross-layer status', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R59A cross layer tamper')
+  await interceptAssembly(page, (body) => {
+    const checks = body.cross_layer_checks as JsonRecord[]
+    checks[0]!.check_id = 'forged-cross-layer-check'
+    const dhcp = checks.find((item) => item.check_id === 'dhcp-relay-issue-30')
+    expect(dhcp).toBeDefined()
+    dhcp!.status = 'PASS'
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects a required chapter converted to NOT_APPLICABLE and a forged COMPLETE claim', async ({ page, request }) => {
+  const { eventId } = await preparedC9200CandidateEvent(request, 'R59A completeness claim')
+  await interceptAssembly(page, (body) => {
+    const management = assemblySection(body, 'management-auth-ssh')
+    management.status = 'NOT_APPLICABLE'
+    management.applicability = 'NOT_APPLICABLE'
+    management.required = false
+    const completeness = body.completeness as JsonRecord
+    completeness.complete = true
+    completeness.status = 'VALIDATED_SECTION'
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects inconsistent assembly statistics', async ({ page, request }) => {
+  const { eventId } = await preparedC9200CandidateEvent(request, 'R59A statistics')
+  await interceptAssembly(page, (body) => {
+    const section = assemblySection(body, 'vlan-definitions')
+    section.candidate_count = Number(section.candidate_count) + 2
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects an assembly response bound to a different saved revision', async ({ page, request }) => {
+  const { eventId, revision } = await preparedC9200CandidateEvent(request, 'R59A revision mismatch')
+  const otherRevision = id()
+  expect(otherRevision).not.toBe(revision.id)
+  await interceptAssembly(page, (body) => {
+    const source = body.source as JsonRecord
+    source.revision_id = otherRevision
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('withholds non-core assembly L3 CLI injected outside the N/A contract', async ({ page, request }) => {
+  const { eventId, plan } = await preparedEvent(request, 'R59A non-core injection')
+  const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  await page.route('**/config-assembly-preview', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    if ((body.identity as JsonRecord).assignment_id === accessId) {
+      const section = assemblySection(body, 'ip-routing')
+      section.candidates = [{
+        candidate_id: 'cand-0000000000000099',
+        source_layer: 'l3',
+        category: 'ip-routing',
+        target_kind: 'device',
+        target_name: 'L2-Access',
+        status: 'candidate',
+        verdict: 'pass',
+        candidate_text: 'ip routing',
+        risk_class: 'R2',
+        requires_field_verification: false,
+        blocking_reasons: [],
+        candidate_fingerprint: '0'.repeat(64),
+      }]
+      section.candidate_count = 1
+      section.passed_count = 1
+      section.status = 'VALIDATED_SECTION'
+      section.required = true
+    }
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  await page.locator('#cisco-assignment').selectOption(accessId)
+  await expect(page.locator('#cisco-assignment')).toHaveValue(accessId)
+  const panel = page.getByRole('region', { name: 'Device configuration assembly' })
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+  await expect(panel).toContainText('Data binding is inconsistent')
+})
+test('withholds assembly CLI when the independent L2 report is structurally invalid', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R59A L2 invalid report')
+  await page.route('**/l2-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    body.report_fingerprint = '0'.repeat(64)
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('withholds assembly CLI when the L3 report integrity is invalid', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R59A L3 invalid report')
+  await page.route('**/l3-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    ;(body.integrity as JsonRecord).document_fingerprint = false
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('withholds assembly CLI when the L3 candidate document is unavailable', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R59A L3 document failure')
+  await page.route('**/l3-cli-candidates', (route) => route.fulfill({
+    status: 409,
+    json: { detail: { reason_code: 'forced-l3-document-failure', stage: 'candidate', failures: ['forced'] } },
+  }))
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects a structurally valid but forged assembly content hash and changed command', async ({ page, request }) => {
+  const { eventId } = await preparedC9200CandidateEvent(request, 'R59A forged assembly hash')
+  await interceptAssembly(page, (body) => {
+    const candidate = assemblyCandidate(assemblySection(body, 'ip-routing'))
+    candidate.candidate_text = 'hostname FORGED'
+    body.assembly_fingerprint = '1'.repeat(64)
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('rejects an assembly response bound to a different assignment', async ({ page, request }) => {
+  const { eventId } = await preparedC9200CandidateEvent(request, 'R59A assignment mismatch')
+  await interceptAssembly(page, (body) => {
+    ;(body.source as JsonRecord).assignment_id = id()
+  })
+  await openPreview(page, eventId)
+  await expectAssemblyWithheld(page)
+})
+
+test('keeps a non-Core L2 assembly review with L3 N/A and no L3 CLI', async ({ page, request }) => {
+  const { eventId, plan } = await preparedEvent(request, 'R59A non-core assembly')
+  const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  await openPreview(page, eventId)
+  await page.locator('#cisco-assignment').selectOption(accessId)
+  await expect(page.locator('#cisco-assignment')).toHaveValue(accessId)
+  const panel = page.getByRole('region', { name: 'Device configuration assembly' })
+  await expect(panel.getByRole('table', { name: 'Configuration chapters' })).toBeVisible()
+  await expect(panel).toContainText('This device configuration is NOT COMPLETE.')
+  const l3Section = panel.getByRole('table', { name: 'Configuration chapters' })
+    .locator('tbody tr').filter({ hasText: 'ip-routing' }).first()
+  await expect(l3Section).toContainText('NOT APPLICABLE')
+  await expect(panel.locator('pre.cisco-command').filter({ hasText: 'ip routing' })).toHaveCount(0)
+})
+
+test('does not restore a late Core assembly after switching to a non-Core assignment', async ({ page, request }) => {
+  const { eventId, plan } = await preparedEvent(request, 'R59A late assembly')
+  const coreId = String((plan.assignments as JsonRecord[])[0]!.id)
+  const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  let releaseCore: (() => void) | undefined
+  await page.route('**/config-assembly-preview', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    if ((body.identity as JsonRecord).assignment_id === coreId) {
+      await new Promise<void>((resolve) => { releaseCore = resolve })
+    }
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  await expect.poll(() => releaseCore !== undefined).toBe(true)
+  await page.locator('#cisco-assignment').selectOption(accessId)
+  const panel = page.getByRole('region', { name: 'Device configuration assembly' })
+  await expect(panel.getByRole('table', { name: 'Configuration chapters' })).toBeVisible()
+  releaseCore!()
+  await page.waitForTimeout(150)
+  await expect(panel.locator('pre.cisco-command').filter({ hasText: 'ip routing' })).toHaveCount(0)
 })
