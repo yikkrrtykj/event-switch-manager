@@ -1,4 +1,4 @@
-﻿"""CIS-04B-1 staged management Evidence review binding.
+"""CIS-04B-1 staged management Evidence review binding.
 
 The four corrected Evidence rows below have exact Cisco IOS XE 17.12.x URLs
 for the command sections.  They remain PENDING in the draft registry until a
@@ -307,32 +307,106 @@ DOCUMENT_REVIEW_RECORDS: tuple[ManagementReviewRecord, ...] = tuple(
 )
 
 
+def document_review_record_id(evidence_id: str) -> str:
+    return f"r63a-ai-document-{evidence_id}"
+
+
 def document_review_record_valid(record: ManagementReviewRecord) -> bool:
+    """Exact fixed provenance check; DOCUMENT_SYNTAX_ONLY, never authority."""
+    if record.evidence_id not in R63_REVIEWED_EVIDENCE_IDS:
+        return False
     row = _CORRECTED_BY_ID.get(record.evidence_id)
     return bool(
         record.structural_complete
+        and record.record_id == document_review_record_id(record.evidence_id)
+        and record.evidence_id in R63_REVIEWED_EVIDENCE_IDS
         and record.approval_scope == "DOCUMENT_SYNTAX_ONLY"
         and not record.production_authorized
         and row is not None
+        and record.content_digest == R63_STAGED_DIGESTS[record.evidence_id]
         and record.content_digest == row.content_digest()
         and record.evidence_source_url == row.source_url
         and record.review_record_url == R63A_REVIEW_RECORD_URL
         and record.review_type == R63A_AI_REVIEW_TYPE
         and record.reviewer == R63A_AI_REVIEWER
         and record.reviewed_at == R63A_AI_REVIEW_DATE
+        and record.findings == _R63A_AI_FINDINGS
     )
 
 
+def validate_document_review_record_set(
+    records: tuple[ManagementReviewRecord, ...] = DOCUMENT_REVIEW_RECORDS,
+) -> bool:
+    """Startup integrity check for exactly the four fixed document records."""
+    if len(records) != 4:
+        raise ManagementReviewError(
+            "management-review-document-record-set-incomplete",
+        )
+    evidence_ids = [record.evidence_id for record in records]
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise ManagementReviewError(
+            "management-review-document-record-set-duplicate",
+        )
+    if set(evidence_ids) != set(R63_REVIEWED_EVIDENCE_IDS):
+        raise ManagementReviewError(
+            "management-review-document-record-unknown",
+        )
+    record_ids = [record.record_id for record in records]
+    if len(record_ids) != len(set(record_ids)):
+        raise ManagementReviewError(
+            "management-review-document-record-set-duplicate",
+        )
+    if set(record_ids) != {
+        document_review_record_id(evidence_id)
+        for evidence_id in R63_REVIEWED_EVIDENCE_IDS
+    }:
+        raise ManagementReviewError(
+            "management-review-document-record-unknown",
+        )
+    if not all(document_review_record_valid(record) for record in records):
+        raise ManagementReviewError("management-review-document-record-invalid")
+    return True
+
+
+validate_document_review_record_set()
+
+
 def production_review_record_valid(record: ManagementReviewRecord) -> bool:
+    """Declared production fields only; manifest membership is authority."""
     row = _CORRECTED_BY_ID.get(record.evidence_id)
     return bool(
         record.structural_complete
+        and record.record_id
         and record.production_authorized
         and record.approval_scope == "PRODUCTION_ACTIVATION"
         and row is not None
         and record.content_digest == row.content_digest()
         and record.evidence_source_url == row.source_url
     )
+
+
+def _validate_production_manifest(
+    records: tuple[ManagementReviewRecord, ...],
+) -> tuple[ManagementReviewRecord, ...]:
+    if not records:
+        raise ManagementReviewError(
+            "management-review-production-authorization-pending",
+        )
+    if len(records) != 4:
+        raise ManagementReviewError("management-review-incomplete-manifest")
+    evidence_ids = [record.evidence_id for record in records]
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise ManagementReviewError("management-review-evidence-duplicate")
+    if set(evidence_ids) != set(R63_REVIEWED_EVIDENCE_IDS):
+        raise ManagementReviewError("management-review-evidence-unknown")
+    record_ids = [record.record_id for record in records]
+    if any(not record_id for record_id in record_ids):
+        raise ManagementReviewError("management-review-record-id-invalid")
+    if len(record_ids) != len(set(record_ids)):
+        raise ManagementReviewError("management-review-record-id-duplicate")
+    if not all(production_review_record_valid(record) for record in records):
+        raise ManagementReviewError("management-review-production-record-invalid")
+    return records
 
 
 def review_status(evidence_id: str) -> str:
@@ -400,18 +474,11 @@ def build_reviewed_registry(
 
 
 def build_production_reviewed_registry() -> ManagementEvidenceRegistry:
-    """Build only from the server-fixed production-authorized record manifest."""
-    if not PRODUCTION_APPROVED_RECORDS:
-        raise ManagementReviewError(
-            "management-review-production-authorization-pending",
-        )
-    if len(PRODUCTION_APPROVED_RECORDS) != 4:
-        raise ManagementReviewError("management-review-incomplete-manifest")
+    """Build only from the server-fixed, exact four-record production manifest."""
+    manifest = _validate_production_manifest(PRODUCTION_APPROVED_RECORDS)
     by_id = {row.evidence_id: row for row in R63_CORRECTED_ROWS}
     reviewed: list[ManagementEvidenceRow] = []
-    for record in PRODUCTION_APPROVED_RECORDS:
-        if not production_review_record_valid(record):
-            raise ManagementReviewError("management-review-production-record-invalid")
+    for record in manifest:
         reviewed.append(by_id[record.evidence_id].with_review(
             reviewer=record.reviewer,
             reviewed_at=record.reviewed_at,
@@ -474,11 +541,13 @@ __all__ = [
     "R63_STAGED_ROWS",
     "build_production_reviewed_registry",
     "build_reviewed_registry",
+    "document_review_record_id",
     "document_review_record_valid",
     "production_management_registry",
     "production_review_record_valid",
     "review_status",
     "test_only_reviewed_registry",
+    "validate_document_review_record_set",
     "URL_9200_CONFIG_SSH",
     "URL_9200_SSH_V2",
     "URL_9300_CONFIG_SSH",

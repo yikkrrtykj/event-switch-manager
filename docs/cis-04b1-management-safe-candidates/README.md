@@ -128,6 +128,36 @@ The `management-auth-ssh` Assembly chapter remains required and BLOCKED; no
 management CLI is added to Assembly until an independently reviewed production
 registry is activated.
 
+## R63B review-record integrity closure
+
+`document_review_record_valid()` now requires every field of the fixed R63A
+document record to match exactly:
+
+- Fixed Record ID (`r63a-ai-document-<evidence_id>`).
+- Evidence ID in the four-record frozen set.
+- Exact staged Content Digest.
+- Fixed Reviewer, Review Type and Reviewed Date.
+- Exact Findings tuple (the real R63A document-review findings).
+- Evidence Source URL (official Cisco URL).
+- Review Record URL (the real GitHub PR comment).
+- `DOCUMENT_SYNTAX_ONLY` scope and `production_authorized=False`.
+
+A module-startup check requires exactly four records with unique Evidence IDs,
+unique fixed Record IDs and no missing, duplicate or unknown entries. The
+check never upgrades document review to production `REVIEWED`.
+
+`build_production_reviewed_registry()` requires the server-fixed manifest to
+contain exactly the four frozen Evidence IDs, each once, with non-empty and
+unique Record IDs, and validates all records before constructing any reviewed
+Rows. Duplicate Evidence IDs, duplicate Record IDs, blank Record IDs, unknown
+Evidence IDs, missing records and empty manifests are rejected. No caller
+Attestation, Registry ID/fingerprint or `test_only_registry=True` can replace
+the server manifest. A temporary test-double manifest can exercise the
+structure only; it does not activate the real production constants.
+
+`PRODUCTION_APPROVED_RECORDS` and `MANAGEMENT_APPROVED_REVIEWS` remain empty.
+Production Management remains 0 PASS / 9 BLOCKED and the isolated test-only
+path remains 1 PASS / 8 BLOCKED.
 ## Activation prerequisites
 
 1. Independent review explicitly approves all four corrected rows and provides

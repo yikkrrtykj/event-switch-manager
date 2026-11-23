@@ -1,4 +1,4 @@
-﻿"""R63 staged reviewed management Evidence tests.
+"""R63 staged reviewed management Evidence tests.
 
 These tests prove the isolated reviewed path (1 PASS / 8 BLOCKED) and the fixed
 review binding without activating any production review.  The production
@@ -14,6 +14,7 @@ from uuid import UUID
 import pytest
 from layer3_helpers import make_l3_plan, revision_for
 
+from event_switch_manager.planning import management_command_evidence_reviews as reviews_module
 from event_switch_manager.planning.layer2_intent import build_layer2_intent
 from event_switch_manager.planning.management_cli_candidates import (
     ManagementRenderError,
@@ -40,11 +41,14 @@ from event_switch_manager.planning.management_command_evidence_reviews import (
     R63A_REVIEW_RECORD_URL,
     ManagementReviewAttestation,
     ManagementReviewError,
+    ManagementReviewRecord,
     build_production_reviewed_registry,
     build_reviewed_registry,
+    document_review_record_id,
     document_review_record_valid,
     production_management_registry,
     review_status,
+    validate_document_review_record_set,
 )
 from event_switch_manager.planning.management_command_evidence_reviews import (
     test_only_reviewed_registry as make_test_only_registry,
@@ -442,3 +446,194 @@ def test_changed_evidence_invalidates_document_review_record() -> None:
     assert review_status(record.evidence_id) == "DOCUMENT-SYNTAX-REVIEWED"
     assert review_status(record.evidence_id) != "REVIEWED"
     assert review_status("mgmt-unknown-evidence") == "PENDING"
+def _production_records() -> tuple[ManagementReviewRecord, ...]:
+    return tuple(
+        replace(
+            record,
+            record_id=f"prod-{record.evidence_id}",
+            production_authorized=True,
+            approval_scope="PRODUCTION_ACTIVATION",
+        )
+        for record in DOCUMENT_REVIEW_RECORDS
+    )
+
+
+def test_fixed_document_records_pass_exact_integrity_and_startup_set() -> None:
+    assert validate_document_review_record_set(DOCUMENT_REVIEW_RECORDS) is True
+    for record in DOCUMENT_REVIEW_RECORDS:
+        assert record.record_id == document_review_record_id(record.evidence_id)
+        assert document_review_record_valid(record) is True
+    assert all(
+        review_status(record.evidence_id) == "DOCUMENT-SYNTAX-REVIEWED"
+        for record in DOCUMENT_REVIEW_RECORDS
+    )
+
+
+@pytest.mark.parametrize("field", [
+    "findings", "record_id", "reviewer", "reviewed_at", "review_record_url",
+    "content_digest", "evidence_source_url",
+])
+def test_fixed_document_record_field_tampering_is_rejected(field: str) -> None:
+    record = DOCUMENT_REVIEW_RECORDS[0]
+    if field == "findings":
+        tampered = replace(record, findings=("tampered non-empty findings",))
+    elif field == "record_id":
+        tampered = replace(record, record_id="r63a-ai-document-forged")
+    elif field == "reviewer":
+        tampered = replace(record, reviewer="Cisco TAC")
+    elif field == "reviewed_at":
+        tampered = replace(record, reviewed_at="2099-12-31")
+    elif field == "review_record_url":
+        tampered = replace(
+            record,
+            review_record_url="https://github.com/forged/review-comment",
+        )
+    elif field == "content_digest":
+        tampered = replace(
+            record, content_digest=R63_OLD_DIGESTS[record.evidence_id],
+        )
+    else:
+        tampered = replace(
+            record,
+            evidence_source_url="https://www.cisco.com/forged-source.html",
+        )
+    assert document_review_record_valid(tampered) is False
+
+
+def test_document_record_cannot_self_declare_production_authority() -> None:
+    record = replace(
+        DOCUMENT_REVIEW_RECORDS[0],
+        production_authorized=True,
+        approval_scope="PRODUCTION_ACTIVATION",
+    )
+    assert document_review_record_valid(record) is False
+    assert review_status(record.evidence_id) == "DOCUMENT-SYNTAX-REVIEWED"
+    assert review_status(record.evidence_id) != "REVIEWED"
+
+
+def test_fixed_document_record_set_rejects_duplicate_missing_unknown() -> None:
+    records = DOCUMENT_REVIEW_RECORDS
+    with pytest.raises(ManagementReviewError) as error:
+        validate_document_review_record_set((records[0], records[0], records[1], records[2]))
+    assert error.value.reason_code == (
+        "management-review-document-record-set-duplicate"
+    )
+    with pytest.raises(ManagementReviewError) as error:
+        validate_document_review_record_set(records[:3])
+    assert error.value.reason_code == (
+        "management-review-document-record-set-incomplete"
+    )
+    unknown = replace(
+        records[3],
+        evidence_id="mgmt-unknown-review",
+        record_id="r63a-ai-document-mgmt-unknown-review",
+    )
+    with pytest.raises(ManagementReviewError) as error:
+        validate_document_review_record_set((*records[:3], unknown))
+    assert error.value.reason_code == (
+        "management-review-document-record-unknown"
+    )
+    duplicate_id = replace(records[1], record_id=records[0].record_id)
+    with pytest.raises(ManagementReviewError) as error:
+        validate_document_review_record_set(
+            (records[0], duplicate_id, records[2], records[3]),
+        )
+    assert error.value.reason_code == (
+        "management-review-document-record-set-duplicate"
+    )
+    with pytest.raises(ManagementReviewError) as error:
+        validate_document_review_record_set((*records, records[0]))
+    assert error.value.reason_code == (
+        "management-review-document-record-set-incomplete"
+    )
+
+
+def test_empty_production_manifest_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(reviews_module, "PRODUCTION_APPROVED_RECORDS", ())
+    with pytest.raises(ManagementReviewError) as error:
+        build_production_reviewed_registry()
+    assert error.value.reason_code == (
+        "management-review-production-authorization-pending"
+    )
+    assert production_management_registry() is MANAGEMENT_EVIDENCE_DRAFT_REGISTRY
+
+
+def test_three_record_production_manifest_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reviews_module, "PRODUCTION_APPROVED_RECORDS", _production_records()[:3],
+    )
+    with pytest.raises(ManagementReviewError) as error:
+        build_production_reviewed_registry()
+    assert error.value.reason_code == "management-review-incomplete-manifest"
+
+
+def test_duplicate_production_evidence_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = _production_records()
+    duplicate = replace(records[0], record_id="prod-duplicate-evidence")
+    monkeypatch.setattr(
+        reviews_module,
+        "PRODUCTION_APPROVED_RECORDS",
+        (duplicate, records[0], records[1], records[2]),
+    )
+    with pytest.raises(ManagementReviewError) as error:
+        build_production_reviewed_registry()
+    assert error.value.reason_code == "management-review-evidence-duplicate"
+
+
+def test_duplicate_production_record_id_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = tuple(replace(record, record_id="same-record") for record in _production_records())
+    monkeypatch.setattr(reviews_module, "PRODUCTION_APPROVED_RECORDS", records)
+    with pytest.raises(ManagementReviewError) as error:
+        build_production_reviewed_registry()
+    assert error.value.reason_code == "management-review-record-id-duplicate"
+
+
+def test_blank_production_record_id_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = list(_production_records())
+    records[0] = replace(records[0], record_id="")
+    monkeypatch.setattr(
+        reviews_module, "PRODUCTION_APPROVED_RECORDS", tuple(records),
+    )
+    with pytest.raises(ManagementReviewError) as error:
+        build_production_reviewed_registry()
+    assert error.value.reason_code == "management-review-record-id-invalid"
+
+
+def test_unknown_production_evidence_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = list(_production_records())
+    records[3] = replace(
+        records[3],
+        evidence_id="mgmt-unknown-production-evidence",
+        record_id="prod-unknown",
+    )
+    monkeypatch.setattr(
+        reviews_module, "PRODUCTION_APPROVED_RECORDS", tuple(records),
+    )
+    with pytest.raises(ManagementReviewError) as error:
+        build_production_reviewed_registry()
+    assert error.value.reason_code == "management-review-evidence-unknown"
+
+
+def test_exact_unique_production_manifest_passes_structure_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = _production_records()
+    monkeypatch.setattr(
+        reviews_module, "PRODUCTION_APPROVED_RECORDS", records,
+    )
+    registry = build_production_reviewed_registry()
+    # This is a temporary test double only; the returned object is not
+    # production-enabled, and monkeypatch restores the empty real manifest.
+    assert registry.production is False
+    assert registry.renderable_count == 4
+    assert reviews_module.PRODUCTION_APPROVED_RECORDS == records
