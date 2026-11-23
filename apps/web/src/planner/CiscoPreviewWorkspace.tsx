@@ -861,6 +861,7 @@ function ManagementFacts({ review }: { review: ManagementReview }) {
           <th scope="col">{t('ciscoIndependentVerdict')}</th>
           <th scope="col">{t('ciscoManagementEvidenceReview')}</th>
           <th scope="col">{t('ciscoManagementSecretBearing')}</th>
+          <th scope="col">{t('ciscoManagementCommandCandidate')}</th>
           <th scope="col">{t('ciscoBlockingReasons')}</th>
         </tr></thead>
         <tbody>{review.report.candidates.map((candidate) => <tr key={candidate.candidate_id}>
@@ -869,6 +870,17 @@ function ManagementFacts({ review }: { review: ManagementReview }) {
           <td>{candidate.independent_verdict}</td>
           <td>{candidate.evidence_review_state}</td>
           <td>{candidate.secret_bearing ? t('ciscoValueYes') : t('ciscoValueNo')}</td>
+          <td>{(() => {
+            const documentCandidate = review.document.candidates.find(
+              (item) => item.candidate_id === candidate.candidate_id,
+            )
+            if (candidate.status !== 'candidate' ||
+              candidate.independent_verdict !== 'pass' ||
+              !documentCandidate?.candidate_text) {
+              return <span className="muted">{t('ciscoManagementCliWithheld')}</span>
+            }
+            return <pre className="cisco-command">{documentCandidate.candidate_text}</pre>
+          })()}</td>
           <td>{candidate.blocking_reasons.length
             ? candidate.blocking_reasons.map((reason) => <code className="cisco-reason" key={reason}>{reason}</code>)
             : <span className="muted">{t('ciscoNotAvailable')}</span>}</td>

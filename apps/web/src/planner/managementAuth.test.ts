@@ -5,7 +5,8 @@ import {
   MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT,
   MANAGEMENT_EVIDENCE_REGISTRY_ID,
   MANAGEMENT_EXPECTED_TOPICS,
-  MANAGEMENT_INTENT_CONTRACT, MANAGEMENT_VALIDATION_CONTRACT,
+  MANAGEMENT_CANDIDATE_CONTRACT, MANAGEMENT_INTENT_CONTRACT,
+  MANAGEMENT_VALIDATION_CONTRACT,
   validateManagementReview,
 } from './managementAuth'
 import type { ManagementReview } from './managementAuth'
@@ -62,10 +63,14 @@ function resealReview(value: ManagementReview): ManagementReview {
   value.report.report_fingerprint = canonicalSha256(
     withoutKey(value.report, 'report_fingerprint'),
   )
+  value.document.source = { ...value.report.source }
+  value.document.render_fingerprint = canonicalSha256(
+    withoutKey(value.document, 'render_fingerprint'),
+  )
   return value
 }
 
-function candidateFor(topic: string, index: number) {
+function reportCandidateFor(topic: string, index: number) {
   return {
     candidate_id: 'mgmtcand-' + String(index).padStart(16, '0'),
     topic,
@@ -80,6 +85,48 @@ function candidateFor(topic: string, index: number) {
     evidence_digest_match: true,
     blocking_reasons: ['management-evidence-not-renderable'],
   }
+}
+
+function resealDocument(value: ManagementReview): void {
+  for (const candidate of value.document.candidates) {
+    candidate.candidate_fingerprint = canonicalSha256(
+      withoutKey(candidate, 'candidate_fingerprint'),
+    )
+  }
+  value.document.render_fingerprint = canonicalSha256(
+    withoutKey(value.document, 'render_fingerprint'),
+  )
+}
+
+function documentCandidateFor(topic: string, index: number) {
+  const value = {
+    candidate_id: 'mgmtcand-' + String(index).padStart(16, '0'),
+    assignment_id: assignmentId,
+    topic,
+    command_context_mode: topic === 'management-console-auth' ? 'line' : 'global',
+    command_context_header: topic === 'management-console-auth'
+      ? 'line console 0' : 'global',
+    target_name: 'L3-Core',
+    status: 'blocked',
+    candidate_text: null,
+    parameters: {
+      secret_bearing: topic === 'management-local-username',
+      credential_reference_present: true,
+      credential_secret_available: false,
+    },
+    evidence_id: 'mgmt-9300-' + topic.slice('management-'.length) + '-v1',
+    evidence_review_state: 'pending-independent-review',
+    evidence_content_digest: hash('e'),
+    evidence_source_url: 'https://www.cisco.com/c/en/us/td/docs/security.html',
+    secret_bearing: topic === 'management-local-username',
+    requires_field_verification: true,
+    blocking_reasons: ['management-evidence-not-renderable'],
+    candidate_fingerprint: '',
+  }
+  value.candidate_fingerprint = canonicalSha256(
+    withoutKey(value, 'candidate_fingerprint'),
+  )
+  return value
 }
 
 function fixture(): ManagementReview {
@@ -167,7 +214,7 @@ function fixture(): ManagementReview {
       source,
       expected_source: { ...source, assignment_id: assignmentId },
       assignment_id: assignmentId,
-      candidates: MANAGEMENT_EXPECTED_TOPICS.map(candidateFor),
+      candidates: MANAGEMENT_EXPECTED_TOPICS.map(reportCandidateFor),
       summary: { total: 9, passed: 0, blocked: 9, failed: 0 },
       overall_status: 'blocked',
       integrity: {
@@ -186,6 +233,36 @@ function fixture(): ManagementReview {
         secret_placeholder_included: false,
       },
       report_fingerprint: hash('d'),
+    },
+    document: {
+      management_render_schema_version: 1,
+      contract_id: MANAGEMENT_CANDIDATE_CONTRACT,
+      source: { ...source },
+      assignment_id: assignmentId,
+      device: {
+        assignment_id: assignmentId,
+        hostname: 'L3-Core',
+        family: 'catalyst-9300',
+        exact_pid: 'C9300L-24P-4X',
+        software_image: '17.12.4',
+        software_license: 'Network Advantage',
+        stack_identity: 'standalone',
+      },
+      candidates: MANAGEMENT_EXPECTED_TOPICS.map(documentCandidateFor),
+      unresolved_prerequisites: [],
+      deployment_blockers: ['management-evidence-pending'],
+      safety: {
+        candidate_only: true, read_only: true, executable: false,
+        deployable: false, deployment_allowed: false, device_connection: 'none',
+        running_config_read: false, device_writes_enabled: false,
+        full_config_generated: false, cli: null, deployment_artifact: null,
+        hardware_verified: false, secrets_included: false,
+        secret_placeholder_included: false,
+      },
+      summary: { total: 9, candidates: 0, blocked: 9, skipped: 0 },
+      verification: 'not-verified',
+      deployment_status: 'blocked',
+      render_fingerprint: hash('e'),
     },
   } as ManagementReview
   resealReview(value)
@@ -301,6 +378,27 @@ describe('management/SSHv2 contract', () => {
     resealReview(missing)
     expect(validateManagementReview(missing, binding))
       .toContain('management-topic-set')
+  })
+
+  it('binds displayed CLI text to the candidate document, not the report alone', () => {
+    const injected = fixture()
+    injected.document.candidates[0]!.candidate_text =
+      'ip domain name attacker.example; interface Gi1/0/1'
+    resealDocument(injected)
+    expect(validateManagementReview(injected, binding))
+      .toContain('management-command-text')
+
+    const mismatched = fixture()
+    mismatched.document.candidates[0]!.evidence_id = 'mgmt-forged-evidence'
+    resealDocument(mismatched)
+    expect(validateManagementReview(mismatched, binding))
+      .toContain('management-document-binding')
+
+    const missing = fixture() as unknown as Record<string, unknown>
+    delete missing.document
+    expect(validateManagementReview(
+      missing as unknown as ManagementReview, binding,
+    )).toContain('management-document-contract')
   })
 
   it('rejects secret material and cross-event credential metadata', () => {

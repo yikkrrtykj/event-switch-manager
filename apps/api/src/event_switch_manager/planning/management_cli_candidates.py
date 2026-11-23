@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -38,6 +39,18 @@ MANAGEMENT_VALIDATION_SCHEMA_VERSION: Literal[1] = 1
 MANAGEMENT_VALIDATION_CONTRACT_ID: Literal[
     "cis-04b-management-cli-validation-v1"
 ] = "cis-04b-management-cli-validation-v1"
+_MANAGEMENT_DOMAIN = re.compile(
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,63}",
+)
+
+
+def _safe_management_domain(value: str | None) -> bool:
+    return bool(
+        value is not None
+        and 3 <= len(value) <= 253
+        and _MANAGEMENT_DOMAIN.fullmatch(value) is not None
+    )
 
 
 class ManagementRenderError(ValueError):
@@ -248,7 +261,7 @@ def _command_text(
     if row.secret_bearing:
         return None
     if topic is ManagementCommandTopic.DOMAIN_NAME:
-        if intent.management_domain is None:
+        if not _safe_management_domain(intent.management_domain):
             return None
         return f"ip domain name {intent.management_domain}"
     if topic is ManagementCommandTopic.SSH_VERSION:
@@ -275,6 +288,8 @@ def _topic_blockers(
     if topic is ManagementCommandTopic.DOMAIN_NAME:
         if intent.management_domain is None:
             reasons.append("management-domain-not-planned")
+        elif not _safe_management_domain(intent.management_domain):
+            reasons.append("management-domain-invalid")
         return tuple(reasons)
     if topic is ManagementCommandTopic.LOCAL_USERNAME:
         reasons.extend(("credential-secret-not-available", "secret-command-not-renderable"))
@@ -292,6 +307,8 @@ def _topic_blockers(
             "console-recovery-not-verified",
             "management-lockout-risk",
         ))
+    if topic is ManagementCommandTopic.SSH_VERSION:
+        reasons.append("ssh-rsa-key-state-unknown")
     if topic in {
         ManagementCommandTopic.AAA_NEW_MODEL,
         ManagementCommandTopic.AAA_LOGIN_LOCAL,
@@ -485,6 +502,8 @@ def _validation_topic_blockers(
     if topic is ManagementCommandTopic.DOMAIN_NAME:
         if intent.management_domain is None:
             reasons.append("management-domain-not-planned")
+        elif not _safe_management_domain(intent.management_domain):
+            reasons.append("management-domain-invalid")
         return tuple(reasons)
     if topic is ManagementCommandTopic.LOCAL_USERNAME:
         reasons.extend((
@@ -497,6 +516,8 @@ def _validation_topic_blockers(
             "console-recovery-not-verified",
             "management-lockout-risk",
         ))
+    if topic is ManagementCommandTopic.SSH_VERSION:
+        reasons.append("ssh-rsa-key-state-unknown")
     if topic in {
         ManagementCommandTopic.AAA_NEW_MODEL,
         ManagementCommandTopic.AAA_LOGIN_LOCAL,
@@ -512,7 +533,7 @@ def _validation_command_text(
     if topic is ManagementCommandTopic.DOMAIN_NAME:
         return (
             f"ip domain name {intent.management_domain}"
-            if intent.management_domain is not None else None
+            if _safe_management_domain(intent.management_domain) else None
         )
     if topic is ManagementCommandTopic.SSH_VERSION:
         return "ip ssh version 2"

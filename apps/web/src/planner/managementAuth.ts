@@ -193,8 +193,65 @@ export interface ManagementSafety {
   secret_placeholder_included: boolean
 }
 
+export interface ManagementDocumentCandidate {
+  candidate_id: string
+  assignment_id: string
+  topic: string
+  command_context_mode: string
+  command_context_header: string
+  target_name: string
+  status: string
+  candidate_text: string | null
+  parameters: Record<string, unknown>
+  evidence_id: string
+  evidence_review_state: string
+  evidence_content_digest: string
+  evidence_source_url: string
+  secret_bearing: boolean
+  requires_field_verification: boolean
+  blocking_reasons: string[]
+  candidate_fingerprint: string
+}
+
+export interface ManagementCandidateDocument {
+  management_render_schema_version: number
+  contract_id: string
+  source: {
+    revision_uuid: string
+    revision_number: number
+    revision_hash: string
+    management_intent_fingerprint: string
+    evidence_registry_id: string
+    evidence_registry_fingerprint: string
+  }
+  assignment_id: string
+  device: {
+    assignment_id: string
+    hostname: string
+    family: string | null
+    exact_pid: string | null
+    software_image: string | null
+    software_license: string | null
+    stack_identity: string
+  }
+  candidates: ManagementDocumentCandidate[]
+  unresolved_prerequisites: string[]
+  deployment_blockers: string[]
+  safety: ManagementSafety
+  summary: {
+    total: number
+    candidates: number
+    blocked: number
+    skipped: number
+  }
+  verification: string
+  deployment_status: string
+  render_fingerprint: string
+}
+
 export interface ManagementReview {
   intent: ManagementIntent
+  document: ManagementCandidateDocument
   report: ManagementValidationReport
 }
 
@@ -225,6 +282,35 @@ function expectedEvidenceId(topic: string, family: string | null): string | null
     ? 'mgmt-9300-' : family === 'catalyst-9200' ? 'mgmt-9200-' : null
   if (prefix === null || !topic.startsWith('management-')) return null
   return prefix + topic.slice('management-'.length) + '-v1'
+}
+
+const SAFE_DOMAIN = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/
+
+function safeManagementDomain(value: string | null): boolean {
+  return Boolean(value !== null && value.length >= 3 && value.length <= 253 &&
+    SAFE_DOMAIN.test(value))
+}
+
+function expectedDocumentCommand(topic: string, intent: ManagementIntent): string | null {
+  if (topic === 'management-domain-name' &&
+    safeManagementDomain(intent.management_domain)) {
+    return 'ip domain name ' + intent.management_domain
+  }
+  // SSH version evidence can be reviewed, but authentication/key/recovery
+  // gates keep its command text withheld.
+  return null
+}
+
+function candidatePayloadFingerprint(candidate: ManagementDocumentCandidate): string {
+  const payload = { ...candidate } as Record<string, unknown>
+  delete payload.candidate_fingerprint
+  return canonicalSha256(payload)
+}
+
+function documentFingerprint(document: ManagementCandidateDocument): string {
+  const payload = { ...document } as Record<string, unknown>
+  delete payload.render_fingerprint
+  return canonicalSha256(payload)
 }
 
 function hasSecretMaterial(value: unknown, path = ''): boolean {
@@ -283,11 +369,16 @@ export async function fetchManagementReview(
   const base = '/events/' + encodeURIComponent(eventId) +
     '/plan-revisions/' + encodeURIComponent(revisionId) +
     '/assignments/' + encodeURIComponent(assignmentId)
-  const [intent, report] = await Promise.all([
+  const [intent, document, report] = await Promise.all([
     getJson(base + '/management-intent', signal),
+    getJson(base + '/management-cli-candidates', signal),
     getJson(base + '/management-cli-validation', signal),
   ])
-  return { intent: intent as ManagementIntent, report: report as ManagementValidationReport }
+  return {
+    intent: intent as ManagementIntent,
+    document: document as ManagementCandidateDocument,
+    report: report as ManagementValidationReport,
+  }
 }
 
 function validateManagementReviewRaw(
@@ -466,6 +557,110 @@ function validateManagementReviewRaw(
   if (seenTopics.size !== MANAGEMENT_EXPECTED_TOPICS.length) {
     problems.push('management-topic-set')
   }
+
+  const document = value.document
+  if (!document || document.management_render_schema_version !== 1 ||
+    document.contract_id !== MANAGEMENT_CANDIDATE_CONTRACT) {
+    problems.push('management-document-contract')
+  } else {
+    if (
+      document.assignment_id !== binding.assignment.assignmentId ||
+      document.source.revision_uuid !== binding.revision.id ||
+      document.source.revision_number !== binding.revision.number ||
+      document.source.revision_hash !== binding.revision.content_hash ||
+      document.source.management_intent_fingerprint !== intent.intent_fingerprint ||
+      document.source.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
+      document.source.evidence_registry_fingerprint !==
+        MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
+      document.device.assignment_id !== binding.assignment.assignmentId ||
+      document.device.hostname !== intent.identity.hostname ||
+      document.device.family !== intent.identity.family ||
+      document.device.exact_pid !== intent.identity.exact_pid ||
+      document.device.software_image !== intent.identity.software_image ||
+      document.device.software_license !== intent.identity.software_license ||
+      document.device.stack_identity !== intent.identity.stack_identity
+    ) {
+      problems.push('management-document-binding')
+    }
+    if (!sha256.test(document.render_fingerprint) ||
+      documentFingerprint(document) !== document.render_fingerprint ||
+      document.summary.total !== document.candidates.length ||
+      document.summary.total !== MANAGEMENT_EXPECTED_TOPICS.length ||
+      document.summary.skipped !== 0 ||
+      document.summary.candidates !== document.candidates.filter(
+        (candidate) => candidate.status === 'candidate',
+      ).length ||
+      document.summary.blocked !== document.candidates.filter(
+        (candidate) => candidate.status === 'blocked',
+      ).length ||
+      document.verification !== 'not-verified' ||
+      document.deployment_status !== 'blocked') {
+      problems.push('management-document-fingerprint')
+    }
+    const documentSafety = document.safety
+    if (!documentSafety || documentSafety.candidate_only !== true ||
+      documentSafety.read_only !== true || documentSafety.executable !== false ||
+      documentSafety.deployable !== false ||
+      documentSafety.deployment_allowed !== false ||
+      documentSafety.device_connection !== 'none' ||
+      documentSafety.running_config_read !== false ||
+      documentSafety.device_writes_enabled !== false ||
+      documentSafety.full_config_generated !== false ||
+      documentSafety.cli !== null || documentSafety.hardware_verified !== false ||
+      documentSafety.secrets_included !== false ||
+      documentSafety.secret_placeholder_included !== false) {
+      problems.push('management-document-safety')
+    }
+    const documentCandidates = new Map<string, ManagementDocumentCandidate>()
+    const documentTopics = new Set<string>()
+    for (const candidate of document.candidates) {
+      if (documentCandidates.has(candidate.candidate_id) ||
+        documentTopics.has(candidate.topic) ||
+        !expectedTopics.has(candidate.topic) ||
+        candidate.assignment_id !== binding.assignment.assignmentId ||
+        !sha256.test(candidate.evidence_content_digest) ||
+        !sha256.test(candidate.candidate_fingerprint) ||
+        candidatePayloadFingerprint(candidate) !== candidate.candidate_fingerprint) {
+        problems.push('management-document-candidate')
+      }
+      documentCandidates.set(candidate.candidate_id, candidate)
+      documentTopics.add(candidate.topic)
+      const reportCandidate = report.candidates.find(
+        (item) => item.candidate_id === candidate.candidate_id,
+      )
+      if (!reportCandidate ||
+        reportCandidate.topic !== candidate.topic ||
+        reportCandidate.status !== candidate.status ||
+        reportCandidate.evidence_id !== candidate.evidence_id ||
+        reportCandidate.evidence_review_state !== candidate.evidence_review_state ||
+        reportCandidate.evidence_source_url !== candidate.evidence_source_url ||
+        reportCandidate.secret_bearing !== candidate.secret_bearing ||
+        reportCandidate.candidate_text_present !== (candidate.candidate_text !== null)) {
+        problems.push('management-document-binding')
+      }
+      const expectedText = expectedDocumentCommand(candidate.topic, intent)
+      if (candidate.secret_bearing && candidate.candidate_text !== null) {
+        problems.push('management-command-text')
+      }
+      if (candidate.status === 'candidate') {
+        if (expectedText === null || candidate.candidate_text !== expectedText) {
+          problems.push('management-command-text')
+        }
+      } else if (candidate.candidate_text !== null) {
+        problems.push('management-command-text')
+      }
+      if (candidate.candidate_text !== null &&
+        (/[\r\n;]/.test(candidate.candidate_text) ||
+          candidate.candidate_text.length > 280)) {
+        problems.push('management-command-text')
+      }
+    }
+    if (documentCandidates.size !== MANAGEMENT_EXPECTED_TOPICS.length ||
+      documentTopics.size !== MANAGEMENT_EXPECTED_TOPICS.length) {
+      problems.push('management-document-topic-set')
+    }
+  }
+
   const safety = report.safety
   if (!safety || safety.candidate_only !== true || safety.read_only !== true ||
     safety.executable !== false || safety.deployable !== false ||

@@ -26,8 +26,8 @@ from .planning.management_cli_candidates import (
     build_management_cli_candidates,
     validate_management_candidates,
 )
-from .planning.management_command_evidence import (
-    MANAGEMENT_EVIDENCE_DRAFT_REGISTRY,
+from .planning.management_command_evidence_reviews import (
+    production_management_registry,
 )
 from .planning.management_intent import (
     ManagementInputError,
@@ -130,14 +130,14 @@ def _build(request_revision: PlanRevision, baseline: PlanRevision | None,
         raise _conflict("management-intent-build-failed", "intent") from None
     try:
         document = build_management_cli_candidates(
-            revision, intent, MANAGEMENT_EVIDENCE_DRAFT_REGISTRY,
+            revision, intent, production_management_registry(),
         )
     except (ManagementRenderError, ValueError) as exc:
         reason = getattr(exc, "reason_code", str(exc))
         raise _conflict(reason, "candidate") from None
     try:
         report = validate_management_candidates(
-            revision, intent, document, MANAGEMENT_EVIDENCE_DRAFT_REGISTRY,
+            revision, intent, document, production_management_registry(),
         )
     except (ManagementRenderError, ValueError) as exc:
         reason = getattr(exc, "reason_code", str(exc))

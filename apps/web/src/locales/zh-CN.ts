@@ -967,6 +967,8 @@ export const zhCN = {
   ciscoManagementEvidencePending: "独立审查未完成",
   ciscoManagementBlockers: "管理阻断项",
   ciscoManagementCandidates: "管理命令候选",
+  ciscoManagementCommandCandidate: "命令候选",
+  ciscoManagementCliWithheld: "CLI 已隐藏",
   ciscoManagementTopic: "主题",
   ciscoManagementEvidenceReview: "证据审查",
   ciscoManagementSecretBearing: "含 Secret",
