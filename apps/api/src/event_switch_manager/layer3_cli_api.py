@@ -40,8 +40,9 @@ from .planning.layer3_cli_validation import (
     independent_report_fingerprint,
     validate_l3_candidates,
 )
-from .planning.layer3_command_evidence import DEFAULT_REGISTRY
+from .planning.layer3_command_evidence import CommandEvidenceRegistry
 from .planning.layer3_intent import L3DeviceIntent, Layer3Intent, build_layer3_intent
+from .planning.layer3_registry_selection import select_l3_registry
 from .planning.plan import PlanRevision, canonical_plan, plan_hash
 
 router = APIRouter(prefix="/api/v1/events/{event_id}")
@@ -159,13 +160,14 @@ def _build_document(
     intent: Layer3Intent,
     baseline: PlanRevision | None,
     assignment_id: UUID,
+    registry: CommandEvidenceRegistry,
 ) -> L3CandidateDocument:
     try:
         return build_l3_cli_candidates(
             revision,
             intent,
             assignment_id,
-            DEFAULT_REGISTRY,
+            registry,
             baseline=baseline,
         )
     except RenderBindingError as exc:
@@ -183,6 +185,7 @@ def _expected_source(
     intent: Layer3Intent,
     document: L3CandidateDocument,
     assignment_id: UUID,
+    registry: CommandEvidenceRegistry,
 ) -> ExpectedSource:
     return ExpectedSource(
         event_id=revision.plan.event_id,
@@ -194,8 +197,8 @@ def _expected_source(
         l3_render_contract_id=document.contract_id,
         l3_render_contract_version=document.l3_render_schema_version,
         l3_render_fingerprint=document.l3_render_fingerprint,
-        command_evidence_registry_id=DEFAULT_REGISTRY.registry_id,
-        command_evidence_registry_fingerprint=DEFAULT_REGISTRY.fingerprint,
+        command_evidence_registry_id=registry.registry_id,
+        command_evidence_registry_fingerprint=registry.fingerprint,
         assignment_id=assignment_id,
         baseline_revision_uuid=intent.baseline.revision_id,
         baseline_revision_hash=intent.baseline.revision_hash,
@@ -209,6 +212,7 @@ def _validate(
     expected: ExpectedSource,
     baseline: PlanRevision | None,
     assignment_id: UUID,
+    registry: CommandEvidenceRegistry,
 ) -> L3ValidationReport:
     try:
         report = validate_l3_candidates(
@@ -217,6 +221,7 @@ def _validate(
             document,
             expected,
             assignment_id,
+            registry,
             baseline=baseline,
         )
     except ValidationIntegrityError as exc:
@@ -384,17 +389,23 @@ async def _trusted_response(
     if baseline is not None:
         _verify_revision(baseline, event_id, "baseline")
     intent = _rebuild_intent(revision, baseline)
-    _eligible_device(intent, assignment_id)
-    document = _build_document(revision, intent, baseline, assignment_id)
+    device = _eligible_device(intent, assignment_id)
+    selection = select_l3_registry(device.identity)
+    registry = selection.registry
+    document = _build_document(
+        revision, intent, baseline, assignment_id, registry,
+    )
     if document.summary.total == 0:
         raise _conflict(
             "candidate-document-not-reviewable",
             "candidate",
             failures=["empty-candidate-document"],
         )
-    expected = _expected_source(revision, intent, document, assignment_id)
+    expected = _expected_source(
+        revision, intent, document, assignment_id, registry,
+    )
     report = _validate(
-        revision, intent, document, expected, baseline, assignment_id,
+        revision, intent, document, expected, baseline, assignment_id, registry,
     )
     return document, report
 

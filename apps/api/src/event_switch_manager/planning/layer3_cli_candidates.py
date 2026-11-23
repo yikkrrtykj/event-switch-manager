@@ -48,6 +48,10 @@ from .layer3_intent import (
     Layer3Intent,
     build_layer3_intent,
 )
+from .layer3_registry_selection import (
+    RegistrySelectionError,
+    assert_production_registry,
+)
 from .plan import PlanRevision, canonical_plan, plan_hash
 from .types import Record
 
@@ -877,12 +881,15 @@ def build_l3_cli_candidates(
     """Build one deterministic, read-only candidate document."""
     if not registry.production and not test_only_registry:
         raise RenderBindingError("non-production-registry-not-allowed")
-    if not test_only_registry and registry is not DEFAULT_REGISTRY:
-        raise RenderBindingError("untrusted-production-registry")
     if test_only_registry and registry.production:
         raise RenderBindingError("test-only-path-rejects-production-registry")
     intent = _verify_binding(revision, intent, baseline)
     device = _device(intent, assignment_id)
+    if not test_only_registry:
+        try:
+            assert_production_registry(registry, device.identity)
+        except RegistrySelectionError as exc:
+            raise RenderBindingError(exc.reason_code) from None
     device_ref = _device_ref(device)
     source = SourceBinding(
         revision_uuid=revision.id,
