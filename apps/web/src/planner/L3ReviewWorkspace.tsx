@@ -6,9 +6,9 @@ import type { MessageKey } from '../messages'
 import type { Revision, Summary } from './model'
 import {
   candidateStatusKeys, canLoadCandidates, coreAssignments, fetchCandidates, fetchValidation,
-  filterReviewRows, isAbort, isUnreviewedRegistry, listRevisions, overallKeys, parseReviewError,
-  problemKeys, readRevision, reviewCategories, reviewErrorKey, reviewRows, validateDocument,
-  validateReport, verdictKeys,
+  filterReviewRows, isAbort, isReviewedC9200Registry, isUnreviewedRegistry, listRevisions,
+  overallKeys, parseReviewError, problemKeys, readRevision, reviewCategories, reviewErrorKey,
+  reviewRows, validateDocument, validateReport, verdictKeys,
 } from './l3Review'
 import type {
   CoreAssignment, L3CandidateDocument, L3ValidationReport, ReviewBinding, ReviewError,
@@ -144,6 +144,7 @@ export function L3ReviewWorkspace({ event, navigate }: { event: EventRecord; nav
 
   const selectedCore = cores.find((item) => item.assignmentId === assignmentId)
   const unreviewedRegistry = report !== null && !reportProblems && isUnreviewedRegistry(report)
+  const reviewedC9200 = report !== null && !reportProblems && isReviewedC9200Registry(report)
   const rows = report && !reportProblems ? reviewRows(report, document) : []
   const filtered = filterReviewRows(rows, categoryFilter, statusFilter)
   const categories = reviewCategories(rows)
@@ -168,6 +169,7 @@ export function L3ReviewWorkspace({ event, navigate }: { event: EventRecord; nav
             {t(unreviewedRegistry ? 'l3ProductionScopeOnly' : 'l3ProductionScope')}
           </Badge>}
           {unreviewedRegistry && <Badge tone="warning">{t('l3UnreviewedRegistry')}</Badge>}
+          {reviewedC9200 && <Badge tone="success">{t('l3C9200ReviewedEvidence')}</Badge>}
         </div>
       </div>
       <div className="actions">

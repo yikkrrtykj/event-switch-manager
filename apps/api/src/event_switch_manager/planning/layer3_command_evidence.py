@@ -244,6 +244,10 @@ PENDING_REVIEW = EvidenceReview(
     EvidenceReviewState.PENDING, "", "", (), "",
 )
 
+#: Lifecycle gate, not a missing-official-source fact.  A well-formed,
+#: digest-bound REVIEWED attestation may release this single gate.
+REVIEW_LIFECYCLE_GAP = "independent-evidence-review-required"
+
 
 def _dedupe_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(values))
@@ -360,10 +364,15 @@ class CommandEvidenceRow:
             blockers.append("evidence-pid-scope-outside-row")
         if hardware & ordering or hardware | ordering != verified:
             blockers.append("evidence-pid-scope-inconsistent")
-        blockers.extend(
-            f"evidence-scope-gap-{gap}"
-            for gap in classification.blocking_evidence_gaps
-        )
+        for gap in classification.blocking_evidence_gaps:
+            if (
+                gap == REVIEW_LIFECYCLE_GAP
+                and self.renderable
+            ):
+                # The lifecycle gate is released only by a well-formed,
+                # digest-bound REVIEWED attestation.  All other gaps remain.
+                continue
+            blockers.append(f"evidence-scope-gap-{gap}")
         return _dedupe_tuple(tuple(blockers))
 
 
@@ -889,6 +898,7 @@ __all__ = [
     "L3CommandTopic",
     "ParameterRule",
     "PENDING_REVIEW",
+    "REVIEW_LIFECYCLE_GAP",
     "ROWS",
     "SourceRef",
     "evidence_row_count",

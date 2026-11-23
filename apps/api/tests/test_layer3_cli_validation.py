@@ -1090,7 +1090,10 @@ def test_forged_evidence_with_capability_blocker_is_not_masked() -> None:
 
 def test_forged_evidence_with_unsupported_device_is_not_masked() -> None:
     revision, intent, core, document, expected = _fixture(
-        plan_kwargs={"core_pid": "C9200L-24P-4X", "core_family": "catalyst-9200"},
+        plan_kwargs={
+            "core_pid": "C9200L-24P-4X", "core_family": "catalyst-9200",
+            "core_image": "17.12.5",
+        },
     )
     candidate = _category(document, CandidateCategory.STATIC_ROUTE)
     assert candidate.syntax_evidence == ()

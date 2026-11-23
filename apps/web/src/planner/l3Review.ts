@@ -7,6 +7,8 @@ export const L3_CONTRACT = 'cis-03-cisco-l3-cli-candidate-v1'
 export const L3_VALIDATION_CONTRACT = 'cis-03-03-independent-cli-validation-v1'
 export const L3_REGISTRY_ID = 'cis-03-l1-command-evidence-v1'
 export const L3_REGISTRY_FINGERPRINT = '27d9c46f610b974de5570fb13e115260e2d109475a8d967704de9bb9ca6ef00b'
+export const L3_C9200_REGISTRY_ID = 'cis-03-c9200-l3-command-evidence-v1'
+export const L3_C9200_REGISTRY_FINGERPRINT = '2c73c8b39100622360c6bfab935d995d8fb884dd999b6df0ae744a7be7cec876'
 export const L3_UNREVIEWED_REGISTRY_ID = 'cis-03-l1-command-evidence-unreviewed-v1'
 export const L3_UNREVIEWED_REGISTRY_FINGERPRINT = '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945'
 
@@ -16,8 +18,14 @@ const L3_9300_PIDS = new Set([
   'C9300-24T', 'C9300-24P', 'C9300L-24T-4G', 'C9300L-24T-4G-E',
   'C9300L-24P-4X', 'C9300L-24P-4X-E', 'C9300X-24Y', 'C9300X-24Y-A',
 ])
+const L3_9200_PIDS = new Set([
+  'C9200-24T', 'C9200-24P', 'C9200L-24T-4G', 'C9200L-24P-4X',
+  'C9200L-24T-4G-E', 'C9200L-24P-4X-A',
+])
 const L3_9300_RELEASE = '17.12.4'
+const L3_9200_RELEASE = '17.12.4'
 const L3_9300_LICENSES = new Set(['network essentials', 'network advantage'])
+const L3_9200_LICENSES = new Set(['network essentials', 'network advantage'])
 const L3_KNOWN_FAMILIES = new Set(['catalyst-9300', 'catalyst-9200'])
 
 export const sourceFields = [
@@ -428,10 +436,24 @@ export function expectedRegistryBinding(binding: ReviewBinding): L3RegistryExpec
     L3_9300_PIDS.has(exactPid) &&
     core.image === L3_9300_RELEASE &&
     L3_9300_LICENSES.has(core.license.toLowerCase())
+  const reviewed9200 = core.family === 'catalyst-9200' &&
+    L3_9200_PIDS.has(exactPid) &&
+    core.image === L3_9200_RELEASE &&
+    L3_9200_LICENSES.has(core.license.toLowerCase())
+  const registryId = reviewed9300
+    ? L3_REGISTRY_ID
+    : reviewed9200
+      ? L3_C9200_REGISTRY_ID
+      : L3_UNREVIEWED_REGISTRY_ID
+  const registryFingerprint = reviewed9300
+    ? L3_REGISTRY_FINGERPRINT
+    : reviewed9200
+      ? L3_C9200_REGISTRY_FINGERPRINT
+      : L3_UNREVIEWED_REGISTRY_FINGERPRINT
   return {
-    registryId: reviewed9300 ? L3_REGISTRY_ID : L3_UNREVIEWED_REGISTRY_ID,
-    registryFingerprint: reviewed9300 ? L3_REGISTRY_FINGERPRINT : L3_UNREVIEWED_REGISTRY_FINGERPRINT,
-    evidenceApproved: reviewed9300,
+    registryId,
+    registryFingerprint,
+    evidenceApproved: reviewed9300 || reviewed9200,
     identity: {
       hostname: core.hostname,
       family: core.family,
@@ -445,6 +467,11 @@ export function expectedRegistryBinding(binding: ReviewBinding): L3RegistryExpec
 export function isUnreviewedRegistry(report: L3ValidationReport): boolean {
   return report.source.command_evidence_registry_id === L3_UNREVIEWED_REGISTRY_ID &&
     report.source.command_evidence_registry_fingerprint === L3_UNREVIEWED_REGISTRY_FINGERPRINT
+}
+
+export function isReviewedC9200Registry(report: L3ValidationReport): boolean {
+  return report.source.command_evidence_registry_id === L3_C9200_REGISTRY_ID &&
+    report.source.command_evidence_registry_fingerprint === L3_C9200_REGISTRY_FINGERPRINT
 }
 
 function deviceOrObject(value: unknown): RecordValue {

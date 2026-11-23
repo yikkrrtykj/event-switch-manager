@@ -40,6 +40,7 @@ from event_switch_manager.planning.layer3_intent import (
     build_layer3_intent,
 )
 from event_switch_manager.planning.layer3_registry_selection import (
+    C9200_REVIEWED_REGISTRY,
     UNREVIEWED_PLATFORM_REGISTRY,
     UNREVIEWED_PLATFORM_REGISTRY_ID,
     RegistrySelectionError,
@@ -105,6 +106,36 @@ def _intent(
     return revision, intent, core
 
 
+def _c9200_candidate_intent() -> tuple[PlanRevision, Layer3Intent, L3DeviceIntent]:
+    plan = make_l3_plan(
+        "00000000-0000-0000-0000-000000000099",
+        core_pid="C9200L-24P-4X",
+        core_family="catalyst-9200",
+        core_image="17.12.4",
+        core_license="Network Advantage",
+        with_relay=False,
+        with_default=False,
+        static_route_count=1,
+    )
+    core = next(
+        item for item in plan["assignments"] if item["hostname"] == "L3-Core"
+    )
+    plan["transit"] = None
+    plan["default_routes"] = []
+    plan["static_routes"] = [
+        route for route in plan["static_routes"]
+        if route["assignment_id"] == core["id"]
+    ]
+    for route in plan["static_routes"]:
+        route["next_hop"] = {"kind": "ip", "address": "192.168.10.2"}
+    revision = revision_for(plan)
+    intent = build_layer3_intent(revision)
+    core_intent = next(
+        item for item in intent.devices if item.identity.hostname == "L3-Core"
+    )
+    return revision, intent, core_intent
+
+
 def test_9300_selects_the_frozen_default_registry() -> None:
     _, _, core = _intent()
     selection = select_l3_registry(core.identity)
@@ -117,18 +148,31 @@ def test_9300_selects_the_frozen_default_registry() -> None:
     assert_production_registry(DEFAULT_REGISTRY, core.identity)
 
 
-def test_c9200_resolves_to_the_unreviewed_platform_sentinel() -> None:
+def test_c9200_resolves_to_the_reviewed_registry_for_exact_scope() -> None:
     _, _, core = _intent(C9200)
     selection = select_l3_registry(core.identity)
-    assert selection.registry is UNREVIEWED_PLATFORM_REGISTRY
+    assert selection.registry is C9200_REVIEWED_REGISTRY
     assert selection.assignment_id == core.identity.assignment_id
     assert selection.family is not None
     assert selection.family.value == "catalyst-9200"
-    assert selection.evidence_approved is False
-    assert selection.reason_code == "platform-evidence-unreviewed"
-    assert selection.registry.rows == ()
-    assert selection.registry.registry_id == UNREVIEWED_PLATFORM_REGISTRY_ID
-    assert selection.registry.renderable_count == 0
+    assert selection.evidence_approved is True
+    assert selection.reason_code == "registry-selected-reviewed-platform"
+    assert selection.registry.registry_id == "cis-03-c9200-l3-command-evidence-v1"
+    assert selection.registry.renderable_count == 4
+
+
+def test_unknown_c9200_scope_falls_back_to_sentinel() -> None:
+    for kwargs in (
+        {"core_image": "17.12.5"},
+        {"core_license": "Unknown License"},
+        {"core_pid": "C9200-48T"},
+    ):
+        _, _, core = _intent({**C9200, **kwargs})
+        selection = select_l3_registry(core.identity)
+        assert selection.registry is UNREVIEWED_PLATFORM_REGISTRY
+        assert selection.evidence_approved is False
+        assert selection.registry.rows == ()
+        assert selection.registry.registry_id == UNREVIEWED_PLATFORM_REGISTRY_ID
 
 
 @pytest.mark.parametrize(
@@ -181,18 +225,22 @@ def test_renderer_accepts_only_the_selected_production_registry() -> None:
     assert document.source.command_evidence_registry_fingerprint == FROZEN_9300_FINGERPRINT
     assert document.summary.candidates > 0
 
-    revision_9200, intent_9200, core_9200 = _intent(C9200)
+    revision_9200, intent_9200, core_9200 = _c9200_candidate_intent()
     with pytest.raises(RenderBindingError, match="registry-selection-mismatch"):
         build_l3_cli_candidates(
             revision_9200, intent_9200, core_9200.identity.assignment_id,
             DEFAULT_REGISTRY,
         )
-    blocked = build_l3_cli_candidates(
+    document_9200 = build_l3_cli_candidates(
         revision_9200, intent_9200, core_9200.identity.assignment_id,
-        UNREVIEWED_PLATFORM_REGISTRY,
+        C9200_REVIEWED_REGISTRY,
     )
-    assert blocked.summary.candidates == 0
-    assert all(item.candidate_text is None for item in blocked.candidates)
+    assert document_9200.summary.candidates == 6
+    assert all(
+        item.candidate_text is not None
+        for item in document_9200.candidates
+        if item.status is CandidateStatus.CANDIDATE
+    )
 
 
 def test_renderer_and_validator_must_use_the_same_registry() -> None:
@@ -270,12 +318,24 @@ def test_9300_api_still_binds_the_frozen_default_registry(client: TestClient) ->
     )
 
 
-def test_c9200_api_remains_read_only_blocked_without_new_cli(client: TestClient) -> None:
+def test_c9200_api_returns_reviewed_candidates(client: TestClient) -> None:
     event_id = _event(client)
     plan = make_l3_plan(
         event_id, core_pid="C9200L-24P-4X", core_family="catalyst-9200",
-        with_relay=False,
+        core_image="17.12.4", core_license="Network Advantage",
+        with_relay=False, with_default=False, static_route_count=1,
     )
+    core = next(
+        item for item in plan["assignments"] if item["hostname"] == "L3-Core"
+    )
+    plan["transit"] = None
+    plan["default_routes"] = []
+    plan["static_routes"] = [
+        route for route in plan["static_routes"]
+        if route["assignment_id"] == core["id"]
+    ]
+    for route in plan["static_routes"]:
+        route["next_hop"] = {"kind": "ip", "address": "192.168.10.2"}
     revision = _save(client, event_id, plan)
     assignment_id = _assignment(plan)
     candidate_response = client.get(
@@ -283,11 +343,14 @@ def test_c9200_api_remains_read_only_blocked_without_new_cli(client: TestClient)
     )
     assert candidate_response.status_code == 200, candidate_response.text
     document = L3CandidateDocument.model_validate(candidate_response.json())
-    assert document.source.command_evidence_registry_id == UNREVIEWED_PLATFORM_REGISTRY_ID
-    assert document.summary.candidates == 0
-    assert document.summary.blocked > 0
-    assert all(item.candidate_text is None for item in document.candidates)
-    assert all(item.status is CandidateStatus.BLOCKED for item in document.candidates)
+    assert document.source.command_evidence_registry_id == (
+        C9200_REVIEWED_REGISTRY.registry_id
+    )
+    assert document.summary.candidates == 6
+    assert all(
+        item.candidate_text is None
+        for item in document.candidates if item.status is CandidateStatus.BLOCKED
+    )
 
     validation_response = client.get(
         _path(event_id, str(revision["id"]), assignment_id, "l3-cli-validation"),
@@ -295,11 +358,8 @@ def test_c9200_api_remains_read_only_blocked_without_new_cli(client: TestClient)
     assert validation_response.status_code == 200, validation_response.text
     body = validation_response.json()
     assert body["source"]["command_evidence_registry_id"] == (
-        UNREVIEWED_PLATFORM_REGISTRY_ID
+        C9200_REVIEWED_REGISTRY.registry_id
     )
-    assert body["expected_source"]["command_evidence_registry_id"] == (
-        UNREVIEWED_PLATFORM_REGISTRY_ID
-    )
-    assert body["summary"]["passed"] == 0
+    assert body["summary"]["passed"] == 6
     assert body["summary"]["failed"] == 0
-    assert body["summary"]["blocked"] > 0
+    assert body["summary"]["blocked"] == 2

@@ -145,6 +145,32 @@ async function preparedEvent(
   return { eventId, plan, revision }
 }
 
+function c9200CandidatePlan(plan: JsonRecord): JsonRecord {
+  const copy = structuredClone(plan)
+  const assignments = copy.assignments as JsonRecord[]
+  const core = assignments.find((item) => item.hostname === 'L3-Core')!
+  copy.transit = null
+  copy.default_routes = []
+  copy.static_routes = (copy.static_routes as JsonRecord[]).filter(
+    (route) => route.assignment_id === core.id,
+  )
+  for (const route of copy.static_routes as JsonRecord[]) {
+    route.next_hop = { kind: 'ip', address: '192.168.10.2' }
+  }
+  return copy
+}
+
+async function preparedC9200CandidateEvent(
+  request: APIRequestContext, name: string,
+) {
+  const eventId = await createEvent(request, name)
+  const plan = c9200CandidatePlan(ciscoPlan(eventId, false, {
+    pid: 'C9200L-24P-4X', family: 'catalyst-9200',
+  }))
+  const revision = await savePlan(request, plan)
+  return { eventId, plan, revision }
+}
+
 async function openPreview(page: Page, eventId: string, name = 'Cisco Config Preview') {
   await page.goto('/#cisco-preview')
   const eventSelect = page.getByLabel('Event', { exact: true })
@@ -234,32 +260,33 @@ test('shows a unified read-only L2 and L3 review bound to one saved revision', a
   await expect(assignmentSelect.locator('option')).toHaveCount(2)
 })
 
-test('shows a real C9200 L3 review as PARTIAL/BLOCKED with the unreviewed sentinel', async ({ page, request }) => {
-  const { eventId } = await preparedEvent(
-    request, 'R52A C9200 unified preview', false,
-    { pid: 'C9200L-24P-4X', family: 'catalyst-9200' },
+test('shows reviewed C9200 L3 candidates in unified preview', async ({ page, request }) => {
+  const { eventId } = await preparedC9200CandidateEvent(
+    request, 'R57 C9200 unified preview',
   )
   await openPreview(page, eventId)
   const l3Card = page.locator('.cisco-status-card').filter({ hasText: 'L3 review' })
   await expect(l3Card).toContainText('PARTIAL')
   const l3Region = page.getByRole('region', { name: 'Layer 3 review' })
-  await expect(l3Region).toContainText('This platform has no independently reviewed L3 command evidence')
+  await expect(l3Region).not.toContainText('This platform has no independently reviewed L3 command evidence')
+  await expect(l3Region).toContainText('Reviewed C9200 L3 evidence — software candidates only')
   const l3Table = page.getByRole('table', { name: 'Layer 3 candidates' })
   await expect(l3Table).toBeVisible()
-  await expect(l3Table.locator('tbody tr')).toHaveCount(9)
-  await expect(l3Table.getByText('PASS', { exact: true })).toHaveCount(0)
-  await expect(l3Table.getByText('BLOCKED', { exact: true })).toHaveCount(18)
-  await expect(l3Region.locator('pre.cisco-command')).toHaveCount(0)
+  await expect(l3Table.locator('tbody tr')).toHaveCount(8)
+  await expect(l3Table.getByText('PASS', { exact: true })).toHaveCount(6)
+  await expect(l3Table.getByText('CANDIDATE', { exact: true })).toHaveCount(6)
   await expect(page.locator('.cisco-source-panel')).toContainText(
-    'cis-03-l1-command-evidence-unreviewed-v1',
+    'cis-03-c9200-l3-command-evidence-v1',
   )
   await expect(page.locator('.cisco-source-panel')).toContainText(
-    '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+    '2c73c8b39100622360c6bfab935d995d8fb884dd999b6df0ae744a7be7cec876',
   )
-  const first = l3Table.locator('tbody tr').first()
-  await first.getByText('Details', { exact: true }).click()
-  await expect(first.getByText('Command text is withheld for this candidate.', { exact: true })).toBeVisible()
-  await expect(first.locator('pre')).toHaveCount(0)
+  const ipRow = l3Table.locator('tbody tr').filter({ hasText: 'ip-routing' }).first()
+  await ipRow.getByText('Details', { exact: true }).click()
+  await expect(ipRow.locator('pre.cisco-command')).toContainText('ip routing')
+  const routeRow = l3Table.locator('tbody tr').filter({ hasText: 'static-route' }).first()
+  await routeRow.getByText('Details', { exact: true }).click()
+  await expect(routeRow.locator('pre.cisco-command')).toContainText('ip route 10.200.0.0')
   await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i }))
     .toHaveCount(0)
 
@@ -268,6 +295,23 @@ test('shows a real C9200 L3 review as PARTIAL/BLOCKED with the unreviewed sentin
     expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
       .toBeLessThanOrEqual(1)
   }
+})
+
+test('keeps C9200 default route plan blocked without CLI', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(
+    request, 'R57 C9200 default blocked', false,
+    { pid: 'C9200L-24P-4X', family: 'catalyst-9200' },
+  )
+  await openPreview(page, eventId)
+  const l3Region = page.getByRole('region', { name: 'Layer 3 review' })
+  const l3Table = page.getByRole('table', { name: 'Layer 3 candidates' })
+  await expect(l3Table.locator('tbody tr')).toHaveCount(9)
+  await expect(l3Table.getByText('PASS', { exact: true })).toHaveCount(0)
+  await expect(l3Region.locator('pre.cisco-command')).toHaveCount(0)
+  const defaultRow = l3Table.locator('tbody tr').filter({ hasText: 'default-route' }).first()
+  await defaultRow.getByText('Details', { exact: true }).click()
+  await expect(defaultRow.getByText('Command text is withheld for this candidate.', { exact: true })).toBeVisible()
+  await expect(defaultRow.locator('pre')).toHaveCount(0)
 })
 
 test('shows L3 as not applicable for a non-Core Cisco assignment', async ({ page, request }) => {

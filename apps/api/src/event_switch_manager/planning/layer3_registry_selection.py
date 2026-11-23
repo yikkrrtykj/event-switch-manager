@@ -7,11 +7,10 @@ The production trust boundary has two separate concerns:
 * the selected object must be the one that the trusted saved-revision device
   identity resolves to.
 
-Only Catalyst 9300 has independently reviewed production command evidence in
-this phase.  Any other platform, or a 9300 identity outside the reviewed
-PID/release/license scope, resolves to a row-less, explicitly registered
-unreviewed-platform sentinel.  The sentinel can render only blocked candidates;
-it carries no command evidence and is not an approved C9200 registry.
+Catalyst 9300 and the reviewed Catalyst 9200 scope are explicitly registered.
+Any other platform, or an identity outside the reviewed PID/release/license
+scope, resolves to a row-less sentinel.  The sentinel can render only blocked
+candidates; it carries no command evidence.
 """
 
 from __future__ import annotations
@@ -20,6 +19,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from ..domain import DeviceFamily
+from .layer3_c9200_command_evidence_reviews import C9200_REVIEWED_REGISTRY
 from .layer3_command_evidence import (
     DEFAULT_REGISTRY,
     CommandEvidenceRegistry,
@@ -69,6 +69,11 @@ _REGISTERED: tuple[_RegisteredRegistry, ...] = (
         evidence_approved=True,
     ),
     _RegisteredRegistry(
+        registry=C9200_REVIEWED_REGISTRY,
+        family=DeviceFamily.CATALYST_9200,
+        evidence_approved=True,
+    ),
+    _RegisteredRegistry(
         registry=UNREVIEWED_PLATFORM_REGISTRY,
         family=None,
         evidence_approved=False,
@@ -83,9 +88,13 @@ def _row_pids(row: object) -> tuple[str, ...]:
     return tuple(getattr(row, "pids", ()))
 
 
-def _matches_9300_scope(identity: L3Identity) -> bool:
+def _matches_registry_scope(
+    registry: CommandEvidenceRegistry,
+    family: DeviceFamily,
+    identity: L3Identity,
+) -> bool:
     if (
-        identity.family is not DeviceFamily.CATALYST_9300
+        identity.family is not family
         or identity.pid_evidence != "exact-verified-pid"
         or identity.exact_pid is None
         or identity.software_image is None
@@ -98,8 +107,8 @@ def _matches_9300_scope(identity: L3Identity) -> bool:
         if identity.software_license is not None
         else None
     )
-    for row in DEFAULT_REGISTRY.rows:
-        if row.family is not DeviceFamily.CATALYST_9300:
+    for row in registry.rows:
+        if row.family is not family:
             continue
         if pid not in {item.upper() for item in _row_pids(row)}:
             continue
@@ -119,14 +128,17 @@ def select_l3_registry(identity: L3Identity) -> RegistrySelection:
 
     The URL, request body and headers never contribute to this decision.
     """
-    if _matches_9300_scope(identity):
-        return RegistrySelection(
-            registry=DEFAULT_REGISTRY,
-            assignment_id=identity.assignment_id,
-            family=DeviceFamily.CATALYST_9300,
-            evidence_approved=True,
-            reason_code="registry-selected-reviewed-platform",
-        )
+    for entry in _REGISTERED:
+        if not entry.evidence_approved or entry.family is None:
+            continue
+        if _matches_registry_scope(entry.registry, entry.family, identity):
+            return RegistrySelection(
+                registry=entry.registry,
+                assignment_id=identity.assignment_id,
+                family=entry.family,
+                evidence_approved=True,
+                reason_code="registry-selected-reviewed-platform",
+            )
     return RegistrySelection(
         registry=UNREVIEWED_PLATFORM_REGISTRY,
         assignment_id=identity.assignment_id,
@@ -154,6 +166,7 @@ def assert_production_registry(
 
 
 __all__ = [
+    "C9200_REVIEWED_REGISTRY",
     "RegistrySelection",
     "RegistrySelectionError",
     "UNREVIEWED_PLATFORM_REGISTRY",

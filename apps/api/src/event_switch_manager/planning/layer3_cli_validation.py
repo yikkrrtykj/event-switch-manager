@@ -51,6 +51,7 @@ from .layer3_cli_parser import (
 )
 from .layer3_command_evidence import (
     DEFAULT_REGISTRY,
+    REVIEW_LIFECYCLE_GAP,
     CommandEvidenceRegistry,
     CommandEvidenceRow,
     EvidenceReviewState,
@@ -985,7 +986,9 @@ def _row_scope_reasons(
     if hardware & ordering or hardware | ordering != verified:
         reasons.append("pid-scope-inconsistent")
     reasons.extend(
-        f"scope-gap-{gap}" for gap in classification.blocking_evidence_gaps
+        f"scope-gap-{gap}"
+        for gap in classification.blocking_evidence_gaps
+        if not (gap == REVIEW_LIFECYCLE_GAP and row.renderable)
     )
     return _dedupe(tuple(reasons))
 
@@ -1083,15 +1086,19 @@ def _check_capability(
     )
 
 
-def _check_device(device: L3DeviceIntent) -> tuple[str, ...]:
+def _check_device(
+    device: L3DeviceIntent,
+    registry: CommandEvidenceRegistry,
+) -> tuple[str, ...]:
     identity = device.identity
     reasons: list[str] = []
     if identity.role is not DeviceRole.CORE:
         reasons.append("device-not-core")
     if identity.vendor != "cisco":
         reasons.append("device-not-cisco")
-    if identity.family is None or identity.family.value != "catalyst-9300":
-        reasons.append("device-family-not-9300")
+    families = {row.family for row in registry.rows}
+    if identity.family is None or identity.family not in families:
+        reasons.append("device-family-not-in-registry")
     if identity.exact_pid is None:
         reasons.append("exact-pid-missing")
     elif identity.pid_evidence != "exact-verified-pid":
@@ -1486,6 +1493,7 @@ _LEGIT_SEMANTIC_PREFIXES = (
     "transit-",
     "dhcp-",
     "default-",
+    "l3-evidence-",
     "l3-license-",
 )
 
@@ -1673,7 +1681,7 @@ def _validate_candidate(
     reasons.extend(evidence.reason_codes)
     reasons.extend(context.reason_codes)
     reasons.extend(capability.reason_codes)
-    device_reasons = _check_device(device)
+    device_reasons = _check_device(device, registry)
     reasons.extend(device_reasons)
     semantics_reasons: list[str] = []
     if parsed is not None and parsed.ok:

@@ -441,7 +441,7 @@ def test_unsupported_pid_remains_blocked_without_becoming_not_found(
 ) -> None:
     event_id = _event(client)
     plan = make_l3_plan(
-        event_id, core_pid="C9200L-24P-4X", core_family="catalyst-9200",
+        event_id, core_pid="C9200-48T", core_family="catalyst-9200",
         with_relay=False,
     )
     revision = _save(client, event_id, plan)
