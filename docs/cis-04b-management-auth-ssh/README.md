@@ -99,6 +99,36 @@ private key, combined management script, Copy All, Execute or Deploy action.
 - C9300/C9200 L3 counts, Registry/Evidence digests and Default Route/DHCP
   Helper gates are unchanged.
 
+## R61A independent validation closure
+
+The production UI now fails closed unless all of the following are true:
+
+- The management VLAN is an integer in `1..4094` and equals the selected
+  trusted Saved Revision's `management_vlan`; a missing Revision Plan is
+  rejected.
+- The exact device identity (Assignment, hostname, role, family, PID, image,
+  license and Stack identity) matches the selected Assignment.
+- The Management Intent and Validation Report canonical SHA-256 fingerprints
+  are recomputed in the browser with the same Python-compatible canonical JSON
+  rules used by the backend.
+- The Intent/Report reference exactly the frozen PENDING registry:
+  `cis-04b-management-command-evidence-draft-v1` with fingerprint
+  `7ad9d17396f8cd8ed2c18c70b3ca021a3932800d54b94eef9c5d22405694d640`.
+- Exactly nine expected management topics are present once each.
+- All production candidates remain `blocked` / `blocked`, use the PENDING
+  review state, carry no CLI text, and the Summary is exactly 0 PASS / 9
+  BLOCKED / 0 FAIL.
+- Any client-supplied alternative Registry ID/fingerprint, REVIEWED claim, PASS
+  candidate or missing/duplicate/unknown topic is rejected even if the
+  response fingerprints were recomputed.
+
+The backend Independent Validator independently derives the expected topic and
+evidence set, recomputes Candidate/Document fingerprints, verifies Candidate
+IDs, Evidence IDs, content digests, review states and source URLs for both
+PASS and BLOCKED candidates, and derives status, Summary and Overall Status
+from those checks. Resealed deletions, duplicate/unknown topics, forged
+reviewed states and BLOCKED evidence tampering are rejected.
+
 ## Management chapter COMPLETE conditions
 
 The chapter can only become COMPLETE after all of the following:

@@ -1,6 +1,10 @@
-﻿import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { canonicalSha256 } from './canonical'
 import type { PreviewBinding } from './ciscoPreview'
 import {
+  MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT,
+  MANAGEMENT_EVIDENCE_REGISTRY_ID,
+  MANAGEMENT_EXPECTED_TOPICS,
   MANAGEMENT_INTENT_CONTRACT, MANAGEMENT_VALIDATION_CONTRACT,
   validateManagementReview,
 } from './managementAuth'
@@ -33,16 +37,61 @@ const binding = {
   },
 } satisfies PreviewBinding
 
+function withoutKey(value: object, key: string): Record<string, unknown> {
+  const copy = { ...value } as Record<string, unknown>
+  delete copy[key]
+  return copy
+}
+
+function resealReview(value: ManagementReview): ManagementReview {
+  value.report.source.management_intent_fingerprint = value.intent.intent_fingerprint
+  value.report.expected_source.management_intent_fingerprint =
+    value.intent.intent_fingerprint
+  value.report.source.evidence_registry_id = value.intent.evidence_registry_id
+  value.report.expected_source.evidence_registry_id = value.intent.evidence_registry_id
+  value.report.source.evidence_registry_fingerprint =
+    value.intent.evidence_registry_fingerprint
+  value.report.expected_source.evidence_registry_fingerprint =
+    value.intent.evidence_registry_fingerprint
+  value.intent.intent_fingerprint = canonicalSha256(
+    withoutKey(value.intent, 'intent_fingerprint'),
+  )
+  value.report.source.management_intent_fingerprint = value.intent.intent_fingerprint
+  value.report.expected_source.management_intent_fingerprint =
+    value.intent.intent_fingerprint
+  value.report.report_fingerprint = canonicalSha256(
+    withoutKey(value.report, 'report_fingerprint'),
+  )
+  return value
+}
+
+function candidateFor(topic: string, index: number) {
+  return {
+    candidate_id: 'mgmtcand-' + String(index).padStart(16, '0'),
+    topic,
+    status: 'blocked',
+    independent_verdict: 'blocked',
+    candidate_text_present: false,
+    secret_text_present: false,
+    evidence_id: 'mgmt-9300-' + topic.slice('management-'.length) + '-v1',
+    evidence_review_state: 'pending-independent-review',
+    evidence_source_url: 'https://www.cisco.com/c/en/us/td/docs/security.html',
+    secret_bearing: topic === 'management-local-username',
+    evidence_digest_match: true,
+    blocking_reasons: ['management-evidence-not-renderable'],
+  }
+}
+
 function fixture(): ManagementReview {
   const source = {
     revision_uuid: revisionId,
     revision_number: 1,
     revision_hash: hash('a'),
     management_intent_fingerprint: hash('b'),
-    evidence_registry_id: 'cis-04b-management-command-evidence-draft-v1',
-    evidence_registry_fingerprint: hash('c'),
+    evidence_registry_id: MANAGEMENT_EVIDENCE_REGISTRY_ID,
+    evidence_registry_fingerprint: MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT,
   }
-  return {
+  const value = {
     intent: {
       management_intent_schema_version: 1,
       contract_id: MANAGEMENT_INTENT_CONTRACT,
@@ -102,8 +151,8 @@ function fixture(): ManagementReview {
         deletion_or_auth_switch_generation: false,
         reason_codes: ['external-aaa-not-implemented'],
       },
-      evidence_registry_id: 'cis-04b-management-command-evidence-draft-v1',
-      evidence_registry_fingerprint: hash('c'),
+      evidence_registry_id: MANAGEMENT_EVIDENCE_REGISTRY_ID,
+      evidence_registry_fingerprint: MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT,
       evidence_status: 'PENDING',
       risk_codes: ['management-lockout-risk'],
       reason_codes: ['management-evidence-pending'],
@@ -118,13 +167,15 @@ function fixture(): ManagementReview {
       source,
       expected_source: { ...source, assignment_id: assignmentId },
       assignment_id: assignmentId,
-      candidates: [],
-      summary: { total: 0, passed: 0, blocked: 0, failed: 0 },
+      candidates: MANAGEMENT_EXPECTED_TOPICS.map(candidateFor),
+      summary: { total: 9, passed: 0, blocked: 9, failed: 0 },
       overall_status: 'blocked',
       integrity: {
         revision_hash: true, intent_binding: true, source_binding: true,
-        evidence_registry: true, candidate_ids_unique: true,
-        candidate_fingerprints: true, no_secret_text: true, safety: true,
+        evidence_registry: true, expected_topic_set: true,
+        candidate_ids_unique: true, candidate_evidence_binding: true,
+        candidate_status: true, candidate_fingerprints: true,
+        summary_derived: true, no_secret_text: true, safety: true,
       },
       safety: {
         candidate_only: true, read_only: true, executable: false,
@@ -136,18 +187,128 @@ function fixture(): ManagementReview {
       },
       report_fingerprint: hash('d'),
     },
-  }
+  } as ManagementReview
+  resealReview(value)
+  return value
 }
 
 describe('management/SSHv2 contract', () => {
-  it('accepts a blocked management review with no secret material', () => {
-    expect(validateManagementReview(fixture(), binding)).toEqual([])
+  it('accepts a blocked PENDING review with no secret or CLI material', () => {
+    const value = fixture()
+    expect(validateManagementReview(value, binding)).toEqual([])
+    expect(value.report.candidates.every(
+      (candidate) => !candidate.candidate_text_present &&
+        !candidate.secret_text_present &&
+        candidate.status === 'blocked',
+    )).toBe(true)
+  })
+
+  it('binds the management VLAN to the trusted Saved Revision', () => {
+    const wrongVlan = binding.revision.plan as { management_vlan: number }
+    const original = wrongVlan.management_vlan
+    wrongVlan.management_vlan = 20
+    expect(validateManagementReview(fixture(), binding)).toContain('management-vlan')
+    wrongVlan.management_vlan = original
+
+    for (const invalid of ['10', 0, -1, 4095]) {
+      const value = fixture()
+      value.intent.management_vlan = invalid as unknown as number
+      expect(validateManagementReview(value, binding)).toContain('management-vlan')
+    }
+    const noPlan = {
+      ...binding,
+      revision: { ...binding.revision, plan: undefined } as unknown as Revision,
+    }
+    expect(validateManagementReview(fixture(), noPlan)).toContain('management-vlan')
+  })
+
+  it('rejects a stale assignment/revision and a mismatched identity', () => {
+    const stale = {
+      ...binding,
+      assignment: {
+        ...binding.assignment,
+        assignmentId: '99999999-9999-4999-8999-999999999999',
+      },
+    }
+    expect(validateManagementReview(fixture(), stale))
+      .toContain('management-intent-binding')
+    const identity = fixture()
+    identity.intent.identity.exact_pid = 'C9300-24T'
+    expect(validateManagementReview(identity, binding))
+      .toContain('management-identity-binding')
+  })
+
+  it('rejects forged intent/report fingerprints even when format-valid', () => {
+    const intent = fixture()
+    intent.intent.intent_fingerprint = hash('0')
+    expect(validateManagementReview(intent, binding))
+      .toContain('management-intent-fingerprint')
+    const report = fixture()
+    report.report.report_fingerprint = hash('0')
+    expect(validateManagementReview(report, binding))
+      .toContain('management-report-fingerprint')
+  })
+
+  it('rejects arbitrary PENDING registry IDs and fingerprints', () => {
+    const wrongFingerprint = fixture()
+    wrongFingerprint.intent.evidence_registry_fingerprint = hash('f')
+    resealReview(wrongFingerprint)
+    expect(validateManagementReview(wrongFingerprint, binding))
+      .toContain('management-pending-registry')
+
+    const wrongId = fixture()
+    wrongId.intent.evidence_registry_id = 'client-chosen-registry'
+    resealReview(wrongId)
+    expect(validateManagementReview(wrongId, binding))
+      .toContain('management-pending-registry')
+  })
+
+  it('rejects a PENDING candidate converted to PASS/REVIEWED after resealing', () => {
+    const value = fixture()
+    value.report.candidates[0] = {
+      ...value.report.candidates[0]!,
+      status: 'candidate',
+      independent_verdict: 'pass',
+      candidate_text_present: true,
+      evidence_review_state: 'independently-reviewed',
+      blocking_reasons: [],
+    }
+    value.report.summary = { total: 9, passed: 1, blocked: 8, failed: 0 }
+    value.report.overall_status = 'partial'
+    resealReview(value)
+    expect(validateManagementReview(value, binding))
+      .toContain('management-reviewed-claim')
+  })
+
+  it('rejects forged review state, evidence ID/source, and missing topics', () => {
+    const forgedState = fixture()
+    forgedState.report.candidates[0]!.evidence_review_state =
+      'independently-reviewed'
+    resealReview(forgedState)
+    expect(validateManagementReview(forgedState, binding))
+      .toContain('management-reviewed-claim')
+
+    const forgedEvidence = fixture()
+    forgedEvidence.report.candidates[0]!.evidence_source_url =
+      'https://example.invalid/management'
+    resealReview(forgedEvidence)
+    expect(validateManagementReview(forgedEvidence, binding))
+      .toContain('management-evidence-binding')
+
+    const missing = fixture()
+    missing.report.candidates.pop()
+    missing.report.summary = { total: 8, passed: 0, blocked: 8, failed: 0 }
+    resealReview(missing)
+    expect(validateManagementReview(missing, binding))
+      .toContain('management-topic-set')
   })
 
   it('rejects secret material and cross-event credential metadata', () => {
     const secret = fixture()
-    ;(secret.intent as unknown as Record<string, unknown>)['pass' + 'word'] = 'fixture-value'
-    expect(validateManagementReview(secret, binding)).toContain('management-secret-material')
+    ;(secret.intent as unknown as Record<string, unknown>)['pass' + 'word'] =
+      'fixture-value'
+    expect(validateManagementReview(secret, binding))
+      .toContain('management-secret-material')
     const crossEvent = fixture()
     crossEvent.intent.authentication.credential_reference.reference =
       'credref:99999999-9999-4999-8999-999999999999:other'
@@ -166,29 +327,11 @@ describe('management/SSHv2 contract', () => {
   it('rejects SSHv1/Telnet policy and unverifiable console recovery', () => {
     const telnet = fixture()
     telnet.intent.ssh_policy.telnet_enabled = true
-    expect(validateManagementReview(telnet, binding)).toContain('management-ssh-policy')
+    expect(validateManagementReview(telnet, binding))
+      .toContain('management-ssh-policy')
     const console = fixture()
     console.intent.console_recovery.console_operation = 'executed'
-    expect(validateManagementReview(console, binding)).toContain('management-console-recovery')
-  })
-
-  it('rejects a PASS candidate without an independently matched evidence digest', () => {
-    const value = fixture()
-    value.report.candidates = [{
-      candidate_id: 'mgmtcand-0000000000000001',
-      topic: 'management-domain-name',
-      status: 'candidate',
-      independent_verdict: 'pass',
-      candidate_text_present: true,
-      secret_text_present: false,
-      evidence_id: 'mgmt-9300-domain-name-v1',
-      evidence_review_state: 'independently-reviewed',
-      evidence_source_url: 'https://www.cisco.com/',
-      secret_bearing: false,
-      evidence_digest_match: false,
-      blocking_reasons: [],
-    }]
-    value.report.summary = { total: 1, passed: 1, blocked: 0, failed: 0 }
-    expect(validateManagementReview(value, binding)).toContain('management-candidate-binding')
+    expect(validateManagementReview(console, binding))
+      .toContain('management-console-recovery')
   })
 })

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
@@ -22,7 +23,10 @@ from .management_command_evidence import (
     ManagementEvidenceRegistry,
     ManagementEvidenceRow,
 )
-from .management_intent import ManagementIntent
+from .management_intent import (
+    ManagementIntent,
+    management_intent_fingerprint,
+)
 from .plan import PlanRevision, canonical_plan, plan_hash
 from .types import Record
 
@@ -437,53 +441,222 @@ def build_management_cli_candidates(
     })
 
 
-def _validate_candidate(
-    candidate: ManagementCandidate,
-    row: ManagementEvidenceRow | None,
-    *,
-    intent: ManagementIntent,
-) -> ManagementCandidateValidation:
+MANAGEMENT_EXPECTED_TOPICS: tuple[str, ...] = tuple(
+    topic.value for topic in ManagementCommandTopic
+)
+_MANAGEMENT_EXPECTED_TOPIC_SET = frozenset(MANAGEMENT_EXPECTED_TOPICS)
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpectedCandidate:
+    candidate_id: str
+    topic: ManagementCommandTopic
+    row: ManagementEvidenceRow | None
+    evidence_id: str
+    evidence_review_state: str
+    evidence_content_digest: str
+    evidence_source_url: str
+    secret_bearing: bool
+    status: Literal["candidate", "blocked"]
+    candidate_text: str | None
+    command_context_mode: Literal["global", "line"]
+    command_context_header: str
+    target_name: str
+    parameters: dict[str, JsonValue]
+    blocking_reasons: tuple[str, ...]
+
+
+def _candidate_id_for(
+    topic: str, assignment_id: UUID, evidence_id: str, revision_id: UUID,
+) -> str:
+    return "mgmtcand-" + _sha256({
+        "topic": topic,
+        "assignment_id": str(assignment_id),
+        "evidence_id": evidence_id,
+        "revision": str(revision_id),
+    })[:16]
+
+
+def _validation_topic_blockers(
+    intent: ManagementIntent, topic: ManagementCommandTopic,
+) -> tuple[str, ...]:
+    """Independent policy derivation; never trusts renderer status/blockers."""
     reasons: list[str] = []
+    if topic is ManagementCommandTopic.DOMAIN_NAME:
+        if intent.management_domain is None:
+            reasons.append("management-domain-not-planned")
+        return tuple(reasons)
+    if topic is ManagementCommandTopic.LOCAL_USERNAME:
+        reasons.extend((
+            "credential-secret-not-available",
+            "secret-command-not-renderable",
+        ))
+    else:
+        reasons.extend((
+            "management-authentication-not-validated",
+            "console-recovery-not-verified",
+            "management-lockout-risk",
+        ))
+    if topic in {
+        ManagementCommandTopic.AAA_NEW_MODEL,
+        ManagementCommandTopic.AAA_LOGIN_LOCAL,
+        ManagementCommandTopic.CONSOLE_AUTH,
+    }:
+        reasons.append("aaa-or-console-lockout-risk")
+    return tuple(dict.fromkeys(reasons))
+
+
+def _validation_command_text(
+    intent: ManagementIntent, topic: ManagementCommandTopic,
+) -> str | None:
+    if topic is ManagementCommandTopic.DOMAIN_NAME:
+        return (
+            f"ip domain name {intent.management_domain}"
+            if intent.management_domain is not None else None
+        )
+    if topic is ManagementCommandTopic.SSH_VERSION:
+        return "ip ssh version 2"
+    if topic is ManagementCommandTopic.RSA_KEY:
+        return "crypto key generate rsa modulus 4096"
+    if topic is ManagementCommandTopic.VTY_TRANSPORT:
+        return "transport input ssh"
+    if topic is ManagementCommandTopic.LOGIN_LOCAL:
+        return "login local"
+    if topic is ManagementCommandTopic.AAA_NEW_MODEL:
+        return "aaa new-model"
+    if topic is ManagementCommandTopic.AAA_LOGIN_LOCAL:
+        return "aaa authentication login default local"
+    if topic is ManagementCommandTopic.CONSOLE_AUTH:
+        return "login authentication CONSOLE"
+    return None
+
+
+def _expected_candidate(
+    intent: ManagementIntent,
+    topic: ManagementCommandTopic,
+    row: ManagementEvidenceRow | None,
+    revision_id: UUID,
+) -> _ExpectedCandidate:
+    blockers = list(_validation_topic_blockers(intent, topic))
+    if row is None:
+        blockers.append("management-evidence-missing")
+        evidence_id = ""
+        review_state = "missing"
+        digest = ""
+        source_url = ""
+        secret_bearing = topic is ManagementCommandTopic.LOCAL_USERNAME
+        mode: Literal["global", "line"] = (
+            "line" if topic in {
+                ManagementCommandTopic.VTY_TRANSPORT,
+                ManagementCommandTopic.LOGIN_LOCAL,
+                ManagementCommandTopic.CONSOLE_AUTH,
+            } else "global"
+        )
+    else:
+        evidence_id = row.evidence_id
+        review_state = row.review_state.value
+        digest = row.content_digest()
+        source_url = row.source_url
+        secret_bearing = row.secret_bearing
+        if not row.renderable:
+            blockers.append("management-evidence-not-renderable")
+        if not row.well_formed:
+            blockers.append("management-evidence-malformed")
+        mode = row.configuration_mode
+    if secret_bearing:
+        blockers.append("secret-command-not-renderable")
+    text = _validation_command_text(intent, topic)
+    if secret_bearing:
+        text = None
+    status: Literal["candidate", "blocked"] = "blocked" if blockers else "candidate"
+    if status == "candidate" and text is None:
+        status = "blocked"
+        blockers.append("management-command-text-unavailable")
+    if status == "blocked":
+        text = None
+    expected_id = _candidate_id_for(
+        topic.value, intent.assignment_id, evidence_id, revision_id,
+    )
+    header = (
+        "line vty 0 4"
+        if mode == "line" and topic is not ManagementCommandTopic.CONSOLE_AUTH
+        else "line console 0" if mode == "line" else "global"
+    )
+    return _ExpectedCandidate(
+        candidate_id=expected_id,
+        topic=topic,
+        row=row,
+        evidence_id=evidence_id,
+        evidence_review_state=review_state,
+        evidence_content_digest=digest,
+        evidence_source_url=source_url,
+        secret_bearing=secret_bearing,
+        status=status,
+        candidate_text=text,
+        command_context_mode=mode,
+        command_context_header=header,
+        target_name=intent.identity.hostname,
+        parameters={
+            "secret_bearing": secret_bearing,
+            "credential_reference_present": (
+                intent.authentication.credential_reference.present
+            ),
+            "credential_secret_available": False,
+        },
+        blocking_reasons=tuple(dict.fromkeys(blockers)),
+    )
+
+
+def _validate_candidate_expected(
+    candidate: ManagementCandidate,
+    expected: _ExpectedCandidate,
+) -> ManagementCandidateValidation:
+    """Validate a candidate against independently derived source/evidence facts."""
+    if candidate.candidate_id != expected.candidate_id:
+        raise ManagementRenderError("management-candidate-id-mismatch")
+    if candidate.topic != expected.topic.value:
+        raise ManagementRenderError("management-candidate-topic-mismatch")
+    if candidate.evidence_id != expected.evidence_id:
+        raise ManagementRenderError("management-evidence-id-mismatch")
+    if candidate.evidence_content_digest != expected.evidence_content_digest:
+        raise ManagementRenderError("management-evidence-digest-mismatch")
+    if candidate.evidence_review_state != expected.evidence_review_state:
+        raise ManagementRenderError("management-evidence-review-mismatch")
+    if candidate.evidence_source_url != expected.evidence_source_url:
+        raise ManagementRenderError("management-evidence-source-mismatch")
+    if candidate.secret_bearing is not expected.secret_bearing:
+        raise ManagementRenderError("management-secret-bearing-mismatch")
+    if candidate.status != expected.status:
+        raise ManagementRenderError("management-candidate-status-mismatch")
+    if candidate.candidate_text != expected.candidate_text:
+        raise ManagementRenderError("management-command-text-mismatch")
+    if candidate.command_context_mode != expected.command_context_mode:
+        raise ManagementRenderError("management-command-context-mismatch")
+    if candidate.command_context_header != expected.command_context_header:
+        raise ManagementRenderError("management-command-context-mismatch")
+    if candidate.target_name != expected.target_name:
+        raise ManagementRenderError("management-candidate-target-mismatch")
+    if candidate.parameters != expected.parameters:
+        raise ManagementRenderError("management-candidate-parameters-mismatch")
+    if set(candidate.blocking_reasons) != set(expected.blocking_reasons):
+        raise ManagementRenderError("management-candidate-blocker-mismatch")
+    if candidate.candidate_fingerprint != _candidate_fingerprint(candidate):
+        raise ManagementRenderError("management-candidate-fingerprint-mismatch")
     secret_text = bool(
         candidate.candidate_text
         and any(token in candidate.candidate_text.casefold() for token in (
             "password", "secret", "private-key", "<redacted>",
         ))
     )
-    if secret_text:
-        reasons.append("secret-text-present")
-    if candidate.secret_bearing and candidate.candidate_text is not None:
-        reasons.append("secret-command-carries-text")
+    if secret_text or (candidate.secret_bearing and candidate.candidate_text is not None):
+        raise ManagementRenderError("management-secret-text-present")
     if candidate.status == "blocked" and candidate.candidate_text is not None:
-        reasons.append("blocked-candidate-carries-text")
-    if candidate.status == "candidate":
-        if candidate.candidate_text is None:
-            reasons.append("candidate-text-missing")
-        if row is None or not row.renderable:
-            reasons.append("management-evidence-not-renderable")
-        if row is not None and candidate.evidence_content_digest != row.content_digest():
-            reasons.append("management-evidence-digest-mismatch")
-        expected = (
-            _command_text(intent, ManagementCommandTopic(candidate.topic), row)
-            if row else None
-        )
-        if expected is None or candidate.candidate_text != expected:
-            reasons.append("management-command-text-mismatch")
-        prereq = _topic_blockers(intent, ManagementCommandTopic(candidate.topic))
-        if prereq:
-            reasons.append("management-preconditions-not-satisfied")
-    if row is not None and candidate.evidence_id != row.evidence_id:
-        reasons.append("management-evidence-binding-mismatch")
-    verdict: Literal["pass", "fail", "blocked", "not-run"]
-    if candidate.status == "candidate":
-        verdict = "pass" if not reasons else "fail"
-    else:
-        verdict = "blocked" if not reasons else "fail"
+        raise ManagementRenderError("management-blocked-candidate-carries-text")
     return ManagementCandidateValidation(
         candidate_id=candidate.candidate_id,
         topic=candidate.topic,
         status=candidate.status,
-        independent_verdict=verdict,
+        independent_verdict="pass" if candidate.status == "candidate" else "blocked",
         candidate_text_present=candidate.candidate_text is not None,
         secret_text_present=secret_text,
         evidence_id=candidate.evidence_id,
@@ -491,10 +664,10 @@ def _validate_candidate(
         evidence_source_url=candidate.evidence_source_url,
         secret_bearing=candidate.secret_bearing,
         evidence_digest_match=bool(
-            row is not None
-            and candidate.evidence_content_digest == row.content_digest()
+            expected.row is not None
+            and candidate.evidence_content_digest == expected.evidence_content_digest
         ),
-        blocking_reasons=tuple(dict.fromkeys(reasons)),
+        blocking_reasons=expected.blocking_reasons,
     )
 
 
@@ -508,6 +681,10 @@ def validate_management_candidates(
 ) -> ManagementValidationReport:
     if plan_hash(canonical_plan(revision.plan)) != revision.content_hash:
         raise ManagementRenderError("revision-canonical-hash-mismatch")
+    if intent.intent_fingerprint != management_intent_fingerprint(intent):
+        raise ManagementRenderError("management-intent-fingerprint-mismatch")
+    if not test_only_registry and registry.renderable_count:
+        raise ManagementRenderError("unapproved-management-evidence-registry")
     expected = ManagementExpectedSource(
         revision_uuid=revision.id,
         revision_number=revision.number,
@@ -528,24 +705,47 @@ def validate_management_candidates(
         == expected.evidence_registry_fingerprint
         and document.assignment_id == expected.assignment_id
     )
-    ids = [item.candidate_id for item in document.candidates]
-    if len(ids) != len(set(ids)):
-        raise ManagementRenderError("duplicate-management-candidate-id")
+    if not source_ok:
+        raise ManagementRenderError("management-source-binding-mismatch")
+    if document.device != _device_ref(intent):
+        raise ManagementRenderError("management-device-binding-mismatch")
     if document.render_fingerprint != _document_fingerprint(document):
         raise ManagementRenderError("management-render-fingerprint-mismatch")
-    if not test_only_registry and registry.renderable_count:
-        raise ManagementRenderError("unapproved-management-evidence-registry")
-    validations = tuple(
-        _validate_candidate(item, _find_evidence(
-            intent, ManagementCommandTopic(item.topic), registry,
-        ), intent=intent)
-        for item in document.candidates
-    )
-    if not all(
-        item.evidence_digest_match or item.status == "blocked"
-        for item in validations
+
+    topics = [item.topic for item in document.candidates]
+    if (
+        len(topics) != len(MANAGEMENT_EXPECTED_TOPICS)
+        or set(topics) != _MANAGEMENT_EXPECTED_TOPIC_SET
     ):
-        raise ManagementRenderError("management-evidence-digest-mismatch")
+        raise ManagementRenderError("management-candidate-topic-set")
+    expected_by_topic = {
+        topic.value: _expected_candidate(
+            intent, topic, _find_evidence(intent, topic, registry), revision.id,
+        )
+        for topic in ManagementCommandTopic
+    }
+    validations: list[ManagementCandidateValidation] = []
+    for candidate in document.candidates:
+        expected_candidate = expected_by_topic[candidate.topic]
+        validations.append(_validate_candidate_expected(candidate, expected_candidate))
+    candidate_ids = [item.candidate_id for item in validations]
+    if len(candidate_ids) != len(set(candidate_ids)):
+        raise ManagementRenderError("duplicate-management-candidate-id")
+    expected_candidate_count = sum(
+        1 for item in expected_by_topic.values() if item.status == "candidate"
+    )
+    expected_blocked_count = len(expected_by_topic) - expected_candidate_count
+    summary = document.summary
+    if (
+        summary.total != len(MANAGEMENT_EXPECTED_TOPICS)
+        or summary.candidates != expected_candidate_count
+        or summary.blocked != expected_blocked_count
+        or summary.skipped != 0
+    ):
+        raise ManagementRenderError("management-candidate-summary-mismatch")
+    if summary.total != len(validations):
+        raise ManagementRenderError("management-candidate-summary-mismatch")
+
     passed = sum(1 for item in validations if item.independent_verdict == "pass")
     blocked = sum(1 for item in validations if item.independent_verdict == "blocked")
     failed = sum(1 for item in validations if item.independent_verdict == "fail")
@@ -563,7 +763,7 @@ def validate_management_candidates(
         source=document.source,
         expected_source=expected,
         assignment_id=document.assignment_id,
-        candidates=validations,
+        candidates=tuple(validations),
         summary=ManagementValidationSummary(
             total=len(validations), passed=passed, blocked=blocked, failed=failed,
         ),
@@ -573,11 +773,15 @@ def validate_management_candidates(
             "intent_binding": True,
             "source_binding": source_ok,
             "evidence_registry": True,
-            "candidate_ids_unique": len(ids) == len(set(ids)),
+            "expected_topic_set": True,
+            "candidate_ids_unique": len(candidate_ids) == len(set(candidate_ids)),
+            "candidate_evidence_binding": True,
+            "candidate_status": True,
             "candidate_fingerprints": all(
-                item.candidate_fingerprint
-                == _candidate_fingerprint(item) for item in document.candidates
+                item.candidate_fingerprint == _candidate_fingerprint(item)
+                for item in document.candidates
             ),
+            "summary_derived": True,
             "no_secret_text": all(
                 not item.secret_text_present for item in validations
             ),
@@ -592,6 +796,7 @@ def validate_management_candidates(
 
 
 __all__ = [
+    "MANAGEMENT_EXPECTED_TOPICS",
     "MANAGEMENT_RENDER_CONTRACT_ID",
     "MANAGEMENT_VALIDATION_CONTRACT_ID",
     "ManagementCandidate",

@@ -19,6 +19,10 @@ from event_switch_manager.management_api import MANAGEMENT_SCOPE_HEADER
 from event_switch_manager.planning.inventory import EventDeviceAssignment
 from event_switch_manager.planning.layer2_intent import build_layer2_intent
 from event_switch_manager.planning.management_cli_candidates import (
+    MANAGEMENT_EXPECTED_TOPICS,
+    ManagementRenderError,
+    _candidate_fingerprint,
+    _document_fingerprint,
     build_management_cli_candidates,
     validate_management_candidates,
 )
@@ -452,3 +456,184 @@ def test_management_secret_not_present_in_revision_or_api(
         text = json_text(response.json())
         for forbidden in ("password", "private_key", "credential_value"):
             assert forbidden not in text
+def _production_document() -> tuple[Any, Any, Any]:
+    plan, core = _plan_with_management(
+        "00000000-0000-0000-0000-000000000099",
+    )
+    revision, _l2, intent = _intent(plan, core["id"])
+    return revision, intent, build_management_cli_candidates(revision, intent)
+
+
+def _reseal(document: Any) -> Any:
+    candidates = tuple(
+        candidate.model_copy(update={
+            "candidate_fingerprint": _candidate_fingerprint(candidate),
+        })
+        for candidate in document.candidates
+    )
+    resealed = document.model_copy(update={
+        "candidates": candidates,
+        "render_fingerprint": "",
+    })
+    return resealed.model_copy(update={
+        "render_fingerprint": _document_fingerprint(resealed),
+    })
+
+
+def _reseal_document_only(document: Any) -> Any:
+    return document.model_copy(update={
+        "render_fingerprint": _document_fingerprint(
+            document.model_copy(update={"render_fingerprint": ""}),
+        ),
+    })
+
+
+def test_validator_requires_exact_nine_topic_set() -> None:
+    revision, intent, document = _production_document()
+    report = validate_management_candidates(revision, intent, document)
+    assert report.summary.total == 9
+    assert report.summary.passed == 0
+    assert report.summary.blocked == 9
+    assert {item.topic for item in report.candidates} == set(
+        MANAGEMENT_EXPECTED_TOPICS,
+    )
+    assert len(MANAGEMENT_EXPECTED_TOPICS) == 9
+
+
+@pytest.mark.parametrize("mutation", ["missing-one", "missing-all", "duplicate", "unknown"])
+def test_validator_rejects_topic_set_tampering_even_when_resealed(
+    mutation: str,
+) -> None:
+    revision, intent, document = _production_document()
+    candidates = list(document.candidates)
+    if mutation == "missing-one":
+        candidates.pop(0)
+    elif mutation == "missing-all":
+        candidates = []
+    elif mutation == "duplicate":
+        candidates[1] = candidates[0].model_copy(update={
+            "candidate_fingerprint": "",
+        })
+    else:
+        candidates[0] = candidates[0].model_copy(update={
+            "topic": "management-unknown-topic",
+            "candidate_fingerprint": "",
+        })
+    tampered = document.model_copy(update={"candidates": tuple(candidates)})
+    with pytest.raises(ManagementRenderError) as error:
+        validate_management_candidates(revision, intent, _reseal(tampered))
+    assert error.value.reason_code == "management-candidate-topic-set"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("candidate_id", "mgmtcand-forged", "management-candidate-id-mismatch"),
+        ("evidence_id", "mgmt-forged-evidence", "management-evidence-id-mismatch"),
+        (
+            "evidence_content_digest",
+            "0" * 64,
+            "management-evidence-digest-mismatch",
+        ),
+        (
+            "evidence_review_state",
+            "independently-reviewed",
+            "management-evidence-review-mismatch",
+        ),
+        (
+            "evidence_source_url",
+            "https://example.invalid/forged",
+            "management-evidence-source-mismatch",
+        ),
+    ],
+)
+def test_validator_rejects_blocked_evidence_binding_tampering(
+    field: str, value: str, reason: str,
+) -> None:
+    revision, intent, document = _production_document()
+    blocked = next(
+        candidate for candidate in document.candidates
+        if candidate.status == "blocked"
+    )
+    tampered_candidate = blocked.model_copy(update={
+        field: value,
+        "candidate_fingerprint": "",
+    })
+    candidates = tuple(
+        tampered_candidate if candidate.candidate_id == blocked.candidate_id
+        else candidate
+        for candidate in document.candidates
+    )
+    tampered = document.model_copy(update={"candidates": candidates})
+    with pytest.raises(ManagementRenderError) as error:
+        validate_management_candidates(revision, intent, _reseal(tampered))
+    assert error.value.reason_code == reason
+
+
+def test_validator_rejects_status_forgery_and_resealed_fingerprints() -> None:
+    revision, intent, document = _production_document()
+    blocked = next(
+        candidate for candidate in document.candidates
+        if candidate.topic == "management-ssh-version"
+    )
+    forged = blocked.model_copy(update={
+        "status": "candidate",
+        "candidate_text": "ip ssh version 2",
+        "evidence_review_state": "independently-reviewed",
+        "blocking_reasons": (),
+        "candidate_fingerprint": "",
+    })
+    candidates = tuple(
+        forged if candidate.candidate_id == blocked.candidate_id else candidate
+        for candidate in document.candidates
+    )
+    tampered = document.model_copy(update={"candidates": candidates})
+    with pytest.raises(ManagementRenderError) as error:
+        validate_management_candidates(revision, intent, _reseal(tampered))
+    assert error.value.reason_code in {
+        "management-evidence-review-mismatch",
+        "management-candidate-status-mismatch",
+    }
+
+
+def test_validator_rejects_resealed_summary_and_candidate_fingerprint() -> None:
+    revision, intent, document = _production_document()
+    summary = document.summary.model_copy(update={"blocked": 8, "candidates": 1})
+    tampered = document.model_copy(update={"summary": summary})
+    with pytest.raises(ManagementRenderError) as error:
+        validate_management_candidates(revision, intent, _reseal(tampered))
+    assert error.value.reason_code == "management-candidate-summary-mismatch"
+
+    first = document.candidates[0].model_copy(update={"candidate_fingerprint": "0" * 64})
+    tampered = document.model_copy(update={
+        "candidates": (first, *document.candidates[1:]),
+    })
+    with pytest.raises(ManagementRenderError) as error:
+        validate_management_candidates(
+            revision, intent, _reseal_document_only(tampered),
+        )
+    assert error.value.reason_code == "management-candidate-fingerprint-mismatch"
+
+
+def test_reviewed_registry_requires_explicit_test_only_isolation() -> None:
+    plan, core = _plan_with_management(
+        "00000000-0000-0000-0000-000000000099",
+    )
+    revision, _l2, intent = _intent(plan, core["id"])
+    registry = _reviewed_registry()
+    with pytest.raises(ManagementRenderError) as error:
+        build_management_cli_candidates(revision, intent, registry)
+    assert error.value.reason_code == "unapproved-management-evidence-registry"
+    document = build_management_cli_candidates(
+        revision, intent, registry, test_only_registry=True,
+    )
+    with pytest.raises(ManagementRenderError) as error:
+        validate_management_candidates(revision, intent, document, registry)
+    assert error.value.reason_code == "unapproved-management-evidence-registry"
+    report = validate_management_candidates(
+        revision, intent, document, registry, test_only_registry=True,
+    )
+    assert report.summary.model_dump() == {
+        "total": 9, "passed": 1, "blocked": 8, "failed": 0,
+    }
+    assert report.overall_status == "partial"

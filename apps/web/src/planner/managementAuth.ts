@@ -1,10 +1,33 @@
 import { ApiError } from '../api'
+import { canonicalSha256 } from './canonical'
 import type { PreviewBinding } from './ciscoPreview'
 
 export const MANAGEMENT_INTENT_CONTRACT = 'cis-04b-management-intent-v1'
 export const MANAGEMENT_CANDIDATE_CONTRACT = 'cis-04b-cisco-management-cli-candidate-v1'
 export const MANAGEMENT_VALIDATION_CONTRACT = 'cis-04b-management-cli-validation-v1'
 export const MANAGEMENT_SCOPE_HEADER = 'X-Management-Scope'
+export const MANAGEMENT_EVIDENCE_REGISTRY_ID =
+  'cis-04b-management-command-evidence-draft-v1'
+export const MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT =
+  '7ad9d17396f8cd8ed2c18c70b3ca021a3932800d54b94eef9c5d22405694d640'
+export const MANAGEMENT_EXPECTED_TOPICS = [
+  'management-domain-name',
+  'management-ssh-version',
+  'management-rsa-key',
+  'management-local-username',
+  'management-vty-transport',
+  'management-login-local',
+  'management-aaa-new-model',
+  'management-aaa-login-default',
+  'management-console-auth',
+] as const
+const MANAGEMENT_PENDING_REVIEW_STATE = 'pending-independent-review'
+const MANAGEMENT_REQUIRED_INTEGRITY = [
+  'revision_hash', 'intent_binding', 'source_binding', 'evidence_registry',
+  'expected_topic_set', 'candidate_ids_unique', 'candidate_evidence_binding',
+  'candidate_status', 'candidate_fingerprints', 'summary_derived',
+  'no_secret_text', 'safety',
+] as const
 
 export type ManagementStatus =
   | 'PLANNED' | 'VALIDATED' | 'BLOCKED' | 'NOT_IMPLEMENTED'
@@ -189,6 +212,21 @@ function ordinaryRecord(value: unknown): Record<string, unknown> | null {
     ? value as Record<string, unknown> : null
 }
 
+function canonicalWithoutKey(value: unknown, key: string): string | null {
+  const record = ordinaryRecord(value)
+  if (!record) return null
+  const payload = { ...record }
+  delete payload[key]
+  return canonicalSha256(payload)
+}
+
+function expectedEvidenceId(topic: string, family: string | null): string | null {
+  const prefix = family === 'catalyst-9300'
+    ? 'mgmt-9300-' : family === 'catalyst-9200' ? 'mgmt-9200-' : null
+  if (prefix === null || !topic.startsWith('management-')) return null
+  return prefix + topic.slice('management-'.length) + '-v1'
+}
+
 function hasSecretMaterial(value: unknown, path = ''): boolean {
   if (Array.isArray(value)) return value.some((item, index) => hasSecretMaterial(item, path + '[' + index + ']'))
   const record = ordinaryRecord(value)
@@ -265,16 +303,37 @@ function validateManagementReviewRaw(
     !statuses.has(intent.intended_status)) {
     problems.push('management-intent-contract')
   }
-  if (!intent.intent_fingerprint || !sha256.test(intent.intent_fingerprint)) {
+  const intentFingerprint = canonicalWithoutKey(intent, 'intent_fingerprint')
+  if (!intent.intent_fingerprint || !sha256.test(intent.intent_fingerprint) ||
+    intentFingerprint !== intent.intent_fingerprint) {
     problems.push('management-intent-fingerprint')
   }
   if (!isoBinding(
     binding, intent.event_id, intent.revision_id, intent.revision_number,
     intent.revision_hash, intent.assignment_id,
   )) problems.push('management-intent-binding')
-  if (intent.management_vlan !== binding.revision.plan?.management_vlan &&
-    !Number.isInteger(intent.management_vlan)) {
+  const revisionPlan = ordinaryRecord(binding.revision.plan)
+  const revisionVlan = revisionPlan?.management_vlan
+  if (
+    !Number.isInteger(intent.management_vlan) ||
+    intent.management_vlan < 1 || intent.management_vlan > 4094 ||
+    !Number.isInteger(revisionVlan) ||
+    intent.management_vlan !== revisionVlan ||
+    intent.reachability.management_vlan !== intent.management_vlan
+  ) {
     problems.push('management-vlan')
+  }
+  if (
+    intent.identity.assignment_id !== binding.assignment.assignmentId ||
+    intent.identity.hostname !== binding.assignment.hostname ||
+    intent.identity.role !== binding.assignment.role ||
+    intent.identity.family !== binding.assignment.family ||
+    intent.identity.exact_pid !== binding.assignment.pid ||
+    intent.identity.software_image !== binding.assignment.image ||
+    intent.identity.software_license !== binding.assignment.license ||
+    intent.identity.stack_identity !== binding.assignment.stackIdentity
+  ) {
+    problems.push('management-identity-binding')
   }
   if (!intent.ssh_policy || intent.ssh_policy.target_protocol !== 'sshv2' ||
     intent.ssh_policy.telnet_enabled !== false ||
@@ -315,23 +374,37 @@ function validateManagementReviewRaw(
     intent.device_connection !== 'none') {
     problems.push('management-safety')
   }
-  if (!sha256.test(intent.evidence_registry_fingerprint)) {
-    problems.push('management-evidence-fingerprint')
+  if (
+    intent.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
+    intent.evidence_registry_fingerprint !==
+      MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
+    intent.evidence_status !== 'PENDING'
+  ) {
+    problems.push('management-pending-registry')
   }
 
   if (report.validation_schema_version !== 1 ||
     report.validation_contract_id !== MANAGEMENT_VALIDATION_CONTRACT) {
     problems.push('management-report-contract')
   }
+  const reportFingerprint = canonicalWithoutKey(report, 'report_fingerprint')
+  if (!report.report_fingerprint || !sha256.test(report.report_fingerprint) ||
+    reportFingerprint !== report.report_fingerprint) {
+    problems.push('management-report-fingerprint')
+  }
   if (report.assignment_id !== binding.assignment.assignmentId ||
     report.expected_source.assignment_id !== binding.assignment.assignmentId ||
     report.source.management_intent_fingerprint !== intent.intent_fingerprint ||
     report.expected_source.management_intent_fingerprint !== intent.intent_fingerprint ||
-    report.source.evidence_registry_id !== intent.evidence_registry_id ||
-    report.expected_source.evidence_registry_id !== intent.evidence_registry_id ||
-    report.source.evidence_registry_fingerprint !== intent.evidence_registry_fingerprint ||
-    report.expected_source.evidence_registry_fingerprint !== intent.evidence_registry_fingerprint ||
-    !sha256.test(report.report_fingerprint)) {
+    report.source.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
+    report.expected_source.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
+    report.source.evidence_registry_fingerprint !==
+      MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
+    report.expected_source.evidence_registry_fingerprint !==
+      MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
+    report.source.revision_uuid !== report.expected_source.revision_uuid ||
+    report.source.revision_number !== report.expected_source.revision_number ||
+    report.source.revision_hash !== report.expected_source.revision_hash) {
     problems.push('management-report-binding')
   }
   if (!isoBinding(
@@ -339,31 +412,59 @@ function validateManagementReviewRaw(
     report.source.revision_number, report.source.revision_hash,
     report.assignment_id,
   )) problems.push('management-report-revision')
-  if (!Object.values(report.integrity).every(Boolean)) {
+  const integrity = ordinaryRecord(report.integrity)
+  if (!integrity || MANAGEMENT_REQUIRED_INTEGRITY.some(
+    (key) => integrity[key] !== true,
+  )) {
     problems.push('management-report-integrity')
   }
   if (report.summary.total !== report.candidates.length ||
-    report.summary.passed + report.summary.blocked + report.summary.failed !== report.summary.total) {
+    report.summary.total !== MANAGEMENT_EXPECTED_TOPICS.length ||
+    report.summary.passed !== 0 ||
+    report.summary.blocked !== MANAGEMENT_EXPECTED_TOPICS.length ||
+    report.summary.failed !== 0 ||
+    report.overall_status !== 'blocked') {
     problems.push('management-report-summary')
   }
-  if (report.overall_status === 'fail') problems.push('management-report-failed')
+  if (report.candidates.length !== MANAGEMENT_EXPECTED_TOPICS.length) {
+    problems.push('management-topic-set')
+  }
+  const expectedTopics = new Set<string>(MANAGEMENT_EXPECTED_TOPICS)
+  const seenTopics = new Set<string>()
   const ids = new Set<string>()
   for (const candidate of report.candidates) {
-    if (ids.has(candidate.candidate_id)) problems.push('management-candidate-duplicate')
+    if (!expectedTopics.has(candidate.topic) || seenTopics.has(candidate.topic)) {
+      problems.push('management-topic-set')
+    }
+    seenTopics.add(candidate.topic)
+    if (!candidate.candidate_id || ids.has(candidate.candidate_id)) {
+      problems.push('management-candidate-duplicate')
+    }
     ids.add(candidate.candidate_id)
-    if (candidate.secret_text_present) problems.push('management-secret-text')
-    if (!candidate.evidence_id || !candidate.evidence_source_url) {
+    const expectedId = expectedEvidenceId(candidate.topic, binding.assignment.family)
+    const expectedSecret = candidate.topic === 'management-local-username'
+    if (
+      expectedId === null ||
+      candidate.evidence_id !== expectedId ||
+      !candidate.evidence_source_url.startsWith('https://www.cisco.com/') ||
+      candidate.evidence_digest_match !== true ||
+      candidate.secret_bearing !== expectedSecret
+    ) {
       problems.push('management-evidence-binding')
     }
-    if (candidate.status === 'candidate' &&
-      (candidate.independent_verdict !== 'pass' ||
-        !candidate.evidence_digest_match ||
-        candidate.evidence_review_state !== 'independently-reviewed')) {
-      problems.push('management-candidate-binding')
+    if (
+      candidate.status !== 'blocked' ||
+      candidate.independent_verdict !== 'blocked' ||
+      candidate.evidence_review_state !== MANAGEMENT_PENDING_REVIEW_STATE ||
+      candidate.candidate_text_present !== false ||
+      candidate.secret_text_present !== false ||
+      candidate.blocking_reasons.length === 0
+    ) {
+      problems.push('management-reviewed-claim')
     }
-    if (candidate.status !== 'candidate' && candidate.candidate_text_present) {
-      problems.push('management-candidate-text')
-    }
+  }
+  if (seenTopics.size !== MANAGEMENT_EXPECTED_TOPICS.length) {
+    problems.push('management-topic-set')
   }
   const safety = report.safety
   if (!safety || safety.candidate_only !== true || safety.read_only !== true ||

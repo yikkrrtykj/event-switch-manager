@@ -1146,3 +1146,59 @@ test('rejects a management response carrying a forbidden secret field', async ({
   await expect(page.locator('body')).not.toContainText('fixture-value')
   await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
 })
+test('rejects a management VLAN not bound to the selected Saved Revision', async ({ page, request }) => {
+  const { eventId } = await preparedManagementEvent(request, 'R61A management vlan')
+  await page.route('**/management-intent', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    body.management_vlan = 20
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('Data binding is inconsistent')
+  await expect(panel).toContainText('management-vlan')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})
+
+test('rejects a forged reviewed management candidate', async ({ page, request }) => {
+  const { eventId } = await preparedManagementEvent(request, 'R61A management forged')
+  await page.route('**/management-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    const candidates = body.candidates as JsonRecord[]
+    candidates[0]!.status = 'candidate'
+    candidates[0]!.independent_verdict = 'pass'
+    candidates[0]!.evidence_review_state = 'independently-reviewed'
+    candidates[0]!.candidate_text_present = true
+    body.summary = { total: 9, passed: 1, blocked: 8, failed: 0 }
+    body.overall_status = 'partial'
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('Data binding is inconsistent')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})
+test('rebinds management metadata when the Saved Revision changes', async ({ page, request }) => {
+  const { eventId, plan } = await preparedManagementEvent(request, 'R61A management revision')
+  const secondPlan = structuredClone(plan)
+  const secondCore = (secondPlan.assignments as JsonRecord[])[0]!
+  secondCore.management_domain = 'second.example.com'
+  const second = await savePlan(request, secondPlan)
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toContainText('second.example.com')
+  const firstRevision = await request.get(
+    '/api/v1/events/' + eventId + '/plan-revisions',
+    { headers: { Origin: 'http://127.0.0.1:8765' } },
+  )
+  const revisions = await firstRevision.json() as JsonRecord[]
+  const first = revisions.find((item) => String(item.id) !== second.id)!
+  await page.locator('#cisco-revision').selectOption(String(first.id))
+  await expect(panel).toContainText('example.com')
+  await expect(panel).not.toContainText('second.example.com')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})
