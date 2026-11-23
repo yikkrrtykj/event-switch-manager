@@ -1202,3 +1202,34 @@ test('rebinds management metadata when the Saved Revision changes', async ({ pag
   await expect(panel).not.toContainText('second.example.com')
   await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
 })
+test('withholds management CLI when the candidate document is unavailable', async ({ page, request }) => {
+  const { eventId } = await preparedManagementEvent(request, 'R63 management no document')
+  await page.route('**/management-cli-candidates', async (route) => {
+    await route.fulfill({
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+      json: { detail: { reason_code: 'management-candidate-unavailable', stage: 'candidate' } },
+    })
+  })
+  await openPreview(page, eventId)
+  const panel = page.getByRole('alert', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('management-candidate-unavailable')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})
+
+test('rejects injected management candidate text without displaying CLI', async ({ page, request }) => {
+  const { eventId } = await preparedManagementEvent(request, 'R63 management document tamper')
+  await page.route('**/management-cli-candidates', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    const candidates = body.candidates as JsonRecord[]
+    candidates[0]!.candidate_text = 'ip domain name attacker.example; interface Gi1/0/1'
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('Data binding is inconsistent')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})

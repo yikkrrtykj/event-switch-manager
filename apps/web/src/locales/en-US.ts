@@ -1,4 +1,4 @@
-﻿export const enUS = {
+export const enUS = {
   brand: "Event Switch Manager",
   dashboard: "Dashboard",
   events: "Events",
@@ -964,6 +964,8 @@
   ciscoManagementEvidencePending: "PENDING independent review",
   ciscoManagementBlockers: "Management blockers",
   ciscoManagementCandidates: "Management command candidates",
+  ciscoManagementCommandCandidate: "Command candidate",
+  ciscoManagementCliWithheld: "CLI withheld",
   ciscoManagementTopic: "Topic",
   ciscoManagementEvidenceReview: "Evidence review",
   ciscoManagementSecretBearing: "Secret-bearing",
