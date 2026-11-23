@@ -6,19 +6,21 @@ import { Dashboard } from './Dashboard'
 import type { MessageKey } from './messages'
 import { LanguageSelect, useMessages } from './locale'
 import { sections } from './planner/catalog'
+import { CiscoPreviewWorkspace } from './planner/CiscoPreviewWorkspace'
 import { L3ReviewWorkspace } from './planner/L3ReviewWorkspace'
 import { Workspace } from './planner/Workspace'
 
 const destinations = [
   ['dashboard', 'dashboard'], ['events', 'events'], ['planner/addressing', 'planner'],
   ['devices', 'devices'], ['ports', 'ports'], ['l3-review', 'l3Review'],
+  ['cisco-preview', 'ciscoPreview'],
 ] as const
 const workspace = (route: string) => route.startsWith('planner/') || route === 'devices' || route === 'ports'
-const eventContext = (route: string) => workspace(route) || route === 'l3-review'
+const eventContext = (route: string) => workspace(route) || route === 'l3-review' || route === 'cisco-preview'
 function hashRoute() {
   const route = window.location.hash.slice(1)
   if (route === 'planner') return 'planner/addressing'
-  if (route === 'l3-review') return route
+  if (route === 'l3-review' || route === 'cisco-preview') return route
   if (route.startsWith('planner/') && Object.hasOwn(sections, route.slice(8)) && !['topology', 'ports'].includes(route.slice(8))) return route
   return destinations.some(([key]) => key === route) ? route : 'dashboard'
 }
@@ -132,7 +134,13 @@ export function App() {
           {error ? <><p role="alert">{t(error)}</p><Button onClick={retryEvents}>{t('retryEvents')}</Button></>
             : events ? <><p className="empty">{t('selectEventPrompt')}</p><Button primary onClick={() => navigate('events')}>{t('goToEvents')}</Button></>
               : <Loading>{t('loadingEvents')}</Loading>}</div></main>
-        : <Dashboard events={events} setEvents={setEvents} eventError={error} selectedId={selectedId} setSelectedId={select}
+        : route === 'cisco-preview' ? selected
+          ? <CiscoPreviewWorkspace key={selected.id} event={selected} navigate={navigate} />
+          : <main id="main" className="shell screen"><h1>{t('ciscoPreview')}</h1><div className="panel">
+            {error ? <><p role="alert">{t(error)}</p><Button onClick={retryEvents}>{t('retryEvents')}</Button></>
+              : events ? <><p className="empty">{t('selectEventPrompt')}</p><Button primary onClick={() => navigate('events')}>{t('goToEvents')}</Button></>
+                : <Loading>{t('loadingEvents')}</Loading>}</div></main>
+          : <Dashboard events={events} setEvents={setEvents} eventError={error} selectedId={selectedId} setSelectedId={select}
           eventsOnly={route === 'events'} retryEvents={retryEvents} navigate={navigate} />}
   </>
 }

@@ -1,4 +1,4 @@
-/* Hallmark · v2.0.0 · shape: app screen · event network planning workspace */
+﻿/* Hallmark · v2.0.0 · shape: app screen · event network planning workspace */
 @import "tailwindcss";
 
 :root {
@@ -453,4 +453,156 @@ dialog:has(.port-editor) { width: min(68rem, calc(100% - 1rem)); }
   .l3-candidate-section table th:nth-child(8), .l3-candidate-section table td:nth-child(8) {
     white-space: normal;
   }
+}
+
+/* CIS-03-04B unified read-only Cisco preview */
+.cisco-preview .status-strip { margin-top: .45rem; }
+.cisco-scope-note,
+.cisco-footer-note,
+.cisco-source-note {
+  margin: .55rem 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--size-small);
+  overflow-wrap: anywhere;
+}
+.cisco-scope-note {
+  padding: .45rem .6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--muted);
+}
+.cisco-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .65rem;
+  margin-top: .8rem;
+}
+.cisco-controls .field { display: grid; gap: .25rem; font-size: var(--size-small); font-weight: 600; }
+.cisco-controls select { width: 100%; }
+.cisco-revision,
+.cisco-overview,
+.cisco-subsystem,
+.cisco-source-panel,
+.cisco-empty,
+.cisco-error { margin-top: .8rem; }
+.cisco-metadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: .45rem .9rem;
+  margin: .5rem 0 0;
+}
+.cisco-metadata div { min-width: 0; }
+.cisco-metadata dt,
+.cisco-counts dt,
+.cisco-source-grid dt {
+  color: var(--muted-foreground);
+  font-size: var(--size-small);
+  font-variant-numeric: tabular-nums;
+}
+.cisco-metadata dd,
+.cisco-counts dd,
+.cisco-source-grid dd { margin: .15rem 0 0; min-width: 0; overflow-wrap: anywhere; }
+.cisco-metadata code,
+.cisco-source-grid code { overflow-wrap: anywhere; }
+.cisco-overview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .65rem;
+}
+.cisco-status-card { display: grid; align-content: start; gap: .4rem; min-width: 0; }
+.cisco-eyebrow {
+  color: var(--muted-foreground);
+  font-size: var(--size-small);
+  font-weight: 650;
+}
+.cisco-status-card p { margin: 0; color: var(--muted-foreground); font-size: var(--size-small); font-variant-numeric: tabular-nums; }
+.cisco-subsystems { display: grid; gap: .8rem; }
+.cisco-subsystem .table-region { max-height: 28rem; }
+.cisco-subsystem table { min-width: 64rem; }
+.cisco-subsystem table th,
+.cisco-subsystem table td { vertical-align: top; }
+.cisco-subsystem table td:nth-child(2) { min-width: 9rem; }
+.cisco-subsystem table td:nth-child(3),
+.cisco-subsystem table td:nth-child(4),
+.cisco-subsystem table td:nth-child(5),
+.cisco-subsystem table td:nth-child(6) { min-width: 7rem; }
+.cisco-subsystem [data-slot="badge"] { white-space: nowrap; }
+.cisco-subsystem .cisco-reason,
+.cisco-subsystem td > code { white-space: normal; overflow-wrap: anywhere; }
+.cisco-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6rem, 1fr));
+  gap: .45rem .75rem;
+  margin: .55rem 0 0;
+}
+.cisco-counts dd { font-weight: 700; font-variant-numeric: tabular-nums; }
+.cisco-partial-note,
+.cisco-candidate-error,
+.cisco-dhcp-blocked,
+.cisco-na {
+  margin: .55rem 0 0;
+  padding: .45rem .6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: var(--size-small);
+}
+.cisco-partial-note { color: var(--warning); background: var(--warning-surface); }
+.cisco-candidate-error { color: var(--danger); background: var(--danger-surface); }
+.cisco-dhcp-blocked { color: var(--danger); background: var(--danger-surface); }
+.cisco-dhcp-blocked [data-slot="badge"] { margin-right: .35rem; }
+.cisco-na { color: var(--muted-foreground); background: var(--muted); }
+.cisco-problem-list { margin: .4rem 0; padding-inline-start: 1.2rem; }
+.cisco-problem-list li { margin-bottom: .2rem; overflow-wrap: anywhere; }
+.cisco-candidate-details summary { min-height: 2rem; padding-block: .3rem; white-space: nowrap; }
+.cisco-details-list {
+  display: grid;
+  gap: .25rem;
+  min-width: 17rem;
+  max-width: 32rem;
+  margin: .25rem 0 .35rem;
+  white-space: normal;
+}
+.cisco-details-list div { display: grid; grid-template-columns: minmax(6rem, max-content) minmax(0, 1fr); gap: .45rem; }
+.cisco-details-list dt { font-weight: 650; }
+.cisco-details-list dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.cisco-command { margin: .2rem 0; max-height: 10rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cisco-source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: .55rem .9rem;
+  margin: .55rem 0 0;
+}
+.cisco-source-grid div { min-width: 0; }
+.cisco-error h3 { margin: .2rem 0 .4rem; }
+@media (max-width: 64rem) {
+  .cisco-overview { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 38rem) {
+  .cisco-controls { grid-template-columns: minmax(0, 1fr); }
+  .cisco-metadata { grid-template-columns: minmax(0, 1fr); }
+  .cisco-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cisco-details-list div { grid-template-columns: minmax(0, 1fr); gap: .1rem; }
+  .cisco-subsystem table { width: max-content; min-width: 0; }
+  .cisco-subsystem table th,
+  .cisco-subsystem table td { white-space: nowrap; }
+  .cisco-subsystem table td:nth-child(2),
+  .cisco-subsystem table td:nth-child(6) { white-space: normal; }
+}
+.cisco-intent {
+  margin: .55rem 0;
+  padding: .55rem .65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--muted);
+}
+.cisco-intent .section-head { align-items: flex-start; margin-bottom: .2rem; }
+.cisco-intent h3 { margin: 0; }
+.cisco-intent p { margin: .3rem 0; }
+.cisco-intent-statements { margin: .3rem 0 0; padding-inline-start: 1.2rem; font-size: var(--size-small); }
+.cisco-intent-statements li { margin-bottom: .2rem; overflow-wrap: anywhere; }
+.cisco-intent-more summary { min-height: 2rem; padding-block: .2rem; }
+
+.cisco-table-hint { display: none; margin: .45rem 0 0; font-size: var(--size-small); font-variant-numeric: tabular-nums; }
+@media (max-width: 38rem) {
+  .cisco-table-hint { display: block; }
 }
