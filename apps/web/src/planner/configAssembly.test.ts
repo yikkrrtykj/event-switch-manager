@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+﻿import { describe, expect, it } from 'vitest'
 import type { PreviewBinding } from './ciscoPreview'
 import type { ConfigurationAssembly } from './configAssembly'
 import {
@@ -47,7 +47,7 @@ function fixture(): ConfigurationAssembly {
     'svi': 'NOT_APPLICABLE',
     'routes': 'NOT_APPLICABLE',
     dhcp: 'NOT_APPLICABLE',
-    'management-auth-ssh': 'NOT_IMPLEMENTED',
+    'management-auth-ssh': 'BLOCKED',
     'snmp-syslog-ntp': 'NOT_IMPLEMENTED',
   }
   const required = new Set([
@@ -57,17 +57,18 @@ function fixture(): ConfigurationAssembly {
   const sections = CONFIG_ASSEMBLY_SECTIONS.map((sectionId) => ({
     section_id: sectionId,
     required: required.has(sectionId),
-    applicability: sectionId === 'management-auth-ssh'
-      ? 'NOT_IMPLEMENTED' : sectionId === 'snmp-syslog-ntp'
-        ? 'NOT_IMPLEMENTED' : required.has(sectionId) ? 'APPLICABLE' : 'NOT_APPLICABLE',
+    applicability: sectionId === 'snmp-syslog-ntp'
+      ? 'NOT_IMPLEMENTED' : required.has(sectionId) ? 'APPLICABLE' : 'NOT_APPLICABLE',
     status: sectionStatuses[sectionId],
     candidate_count: 0,
     passed_count: 0,
     failed_count: 0,
     blocked_count: 0,
     missing_count: sectionId === 'management-auth-ssh' ? 1 : 0,
-    reason_codes: sectionStatuses[sectionId] === 'NOT_IMPLEMENTED'
-      ? ['section-not-implemented'] : [],
+    reason_codes: sectionId === 'management-auth-ssh'
+      ? ['management-evidence-pending']
+      : sectionStatuses[sectionId] === 'NOT_IMPLEMENTED'
+        ? ['section-not-implemented'] : [],
     evidence_references: [],
     source_fingerprints: { ...sourceFingerprints },
     candidates: [],
@@ -127,9 +128,9 @@ function fixture(): ConfigurationAssembly {
       required_sections: 5,
       validated_sections: 0,
       partial_sections: 0,
-      blocked_sections: 4,
+      blocked_sections: 5,
       not_applicable_sections: 6,
-      not_implemented_sections: 2,
+      not_implemented_sections: 1,
       missing_sections: [
         'vlan-definitions', 'stp-vtp', 'physical-interfaces',
         'access-trunk-vlans', 'management-auth-ssh',
@@ -141,7 +142,7 @@ function fixture(): ConfigurationAssembly {
       blockers: [
         'vlan-definitions:BLOCKED', 'stp-vtp:BLOCKED',
         'physical-interfaces:BLOCKED', 'access-trunk-vlans:BLOCKED',
-        'management-auth-ssh:NOT_IMPLEMENTED',
+        'management-auth-ssh:BLOCKED',
       ],
     },
     safety: {

@@ -1,4 +1,4 @@
-import { ApiError } from '../api'
+﻿import { ApiError } from '../api'
 import type {
   L2CandidateDocument,
   L2CandidateValidation,
@@ -88,7 +88,7 @@ export const CONFIG_ASSEMBLY_PROBLEM_KEYS: Record<string, string> = {
   'assembly-candidate-untrusted': 'ciscoAssemblyTrustL2',
 }
 
-const NOT_IMPLEMENTED_SECTIONS = new Set(['management-auth-ssh', 'snmp-syslog-ntp'])
+const NOT_IMPLEMENTED_SECTIONS = new Set(['snmp-syslog-ntp'])
 const BASE_L2_SECTIONS = new Set([
   'vlan-definitions', 'stp-vtp', 'physical-interfaces', 'access-trunk-vlans',
 ])

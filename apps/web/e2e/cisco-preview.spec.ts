@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+﻿import { randomUUID } from 'node:crypto'
 
 import { expect, test } from '@playwright/test'
 import type { APIRequestContext, Page, Route } from '@playwright/test'
@@ -171,6 +171,19 @@ async function preparedC9200CandidateEvent(
   return { eventId, plan, revision }
 }
 
+
+async function preparedManagementEvent(
+  request: APIRequestContext, name: string,
+) {
+  const eventId = await createEvent(request, name)
+  const plan = ciscoPlan(eventId, false)
+  const core = (plan.assignments as JsonRecord[])[0]!
+  core.management_ip = '192.168.10.3'
+  core.management_domain = 'example.com'
+  core.credential_reference = 'credref:' + eventId + ':netops'
+  const revision = await savePlan(request, plan)
+  return { eventId, plan, revision }
+}
 async function openPreview(page: Page, eventId: string, name = 'Cisco Config Preview') {
   await page.goto('/#cisco-preview')
   const eventSelect = page.getByLabel('Event', { exact: true })
@@ -226,7 +239,7 @@ test('shows a unified read-only L2 and L3 review bound to one saved revision', a
   const assignmentSelect = page.locator('#cisco-assignment')
   await expect(assignmentSelect).toBeVisible()
   await expect(assignmentSelect.locator('option:checked')).toContainText('L3-Core')
-  await expect(page.locator('.cisco-metadata')).toContainText(revision.content_hash)
+  await expect(page.locator('.cisco-metadata').first()).toContainText(revision.content_hash)
   await expect(page.locator('.cisco-status-card').filter({ hasText: 'Overall review' })).toContainText('PARTIAL')
   await expect(page.locator('.cisco-status-card').filter({ hasText: 'L2 review' })).toContainText('PARTIAL')
   await expect(page.locator('.cisco-status-card').filter({ hasText: 'L3 review' })).toContainText('PARTIAL')
@@ -402,6 +415,11 @@ test('supports Chinese labels and three responsive viewports', async ({ page, re
   await page.getByLabel('Language').selectOption('zh-CN')
   await expect(page.getByRole('heading', { name: 'Cisco 配置预览', exact: true })).toBeVisible()
   await expect(page.locator('.cisco-status-card').filter({ hasText: '整体审阅' })).toContainText('部分通过')
+  const management = page.getByRole('region', { name: '管理 / SSHv2 / 认证' })
+  await expect(management).toBeVisible()
+  await expect(management).toContainText('管理 VLAN')
+  await expect(management).toContainText('凭据引用')
+  await expect(management).toContainText('Secret 可用性未验证')
   const assembly = page.getByRole('region', { name: '设备配置整合' })
   await expect(assembly).toBeVisible()
   await expect(assembly).toContainText('不完整')
@@ -528,14 +546,14 @@ test('does not render an old L2 response after the assignment changes', async ({
   await openPreview(page, eventId)
   await expect.poll(() => release !== null).toBe(true)
   await page.locator('#cisco-assignment').selectOption(accessId)
-  await expect(page.locator('.cisco-metadata')).toContainText(accessId)
+  await expect(page.locator('.cisco-metadata').first()).toContainText(accessId)
   await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toBeVisible()
   release!()
   await page.waitForLoadState('networkidle')
   expect(pageErrors).toEqual([])
   expect(await unhandledErrors(page)).toEqual([])
-  await expect(page.locator('.cisco-metadata')).toContainText(accessId)
-  await expect(page.locator('.cisco-metadata')).not.toContainText(coreId)
+  await expect(page.locator('.cisco-metadata').first()).toContainText(accessId)
+  await expect(page.locator('.cisco-metadata').first()).not.toContainText(coreId)
   await expect(page.getByRole('table', { name: 'Layer 2 candidates' }).locator('tbody tr').filter({ hasText: 'L3-Core' })).toHaveCount(0)
 })
 
@@ -548,7 +566,7 @@ test('immediately invalidates loaded candidates when the assignment changes', as
   await page.route('**/l2-cli-validation', (route) => holdCoreValidation(route, accessId, releases))
   await page.route('**/l3-cli-validation', (route) => holdCoreValidation(route, accessId, releases))
   await openPreview(page, eventId)
-  await expect(page.locator('.cisco-metadata')).toContainText(coreId)
+  await expect(page.locator('.cisco-metadata').first()).toContainText(coreId)
   await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toBeVisible()
   await page.locator('#cisco-assignment').selectOption(accessId)
   expect(await hasL2CandidateTable(page)).toBe(false)
@@ -558,7 +576,7 @@ test('immediately invalidates loaded candidates when the assignment changes', as
   await page.waitForLoadState('networkidle')
   expect(pageErrors).toEqual([])
   expect(await unhandledErrors(page)).toEqual([])
-  await expect(page.locator('.cisco-metadata')).toContainText(accessId)
+  await expect(page.locator('.cisco-metadata').first()).toContainText(accessId)
   await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toBeVisible()
 })
 
@@ -585,14 +603,14 @@ test('does not render an old revision response after the revision changes', asyn
   await openPreview(page, eventId)
   await expect.poll(() => release !== null).toBe(true)
   await page.locator('#cisco-revision').selectOption(first.id)
-  await expect(page.locator('.cisco-metadata')).toContainText(first.id)
+  await expect(page.locator('.cisco-metadata').first()).toContainText(first.id)
   release!()
   await page.waitForLoadState('networkidle')
   expect(pageErrors).toEqual([])
   expect(await unhandledErrors(page)).toEqual([])
   await expect(page.locator('#cisco-revision')).toHaveValue(first.id)
-  await expect(page.locator('.cisco-metadata')).toContainText(first.id)
-  await expect(page.locator('.cisco-metadata')).not.toContainText(second.id)
+  await expect(page.locator('.cisco-metadata').first()).toContainText(first.id)
+  await expect(page.locator('.cisco-metadata').first()).not.toContainText(second.id)
 })
 
 test('immediately invalidates loaded candidates when the revision changes', async ({ page, request }) => {
@@ -613,7 +631,7 @@ test('immediately invalidates loaded candidates when the revision changes', asyn
   await page.route('**/l2-cli-validation', (route) => holdCoreValidation(route, first.id, releases))
   await page.route('**/l3-cli-validation', (route) => holdCoreValidation(route, first.id, releases))
   await openPreview(page, eventId)
-  await expect(page.locator('.cisco-metadata')).toContainText(second.id)
+  await expect(page.locator('.cisco-metadata').first()).toContainText(second.id)
   await expect(page.getByRole('table', { name: 'Layer 2 candidates' })).toBeVisible()
   await page.locator('#cisco-revision').selectOption(first.id)
   expect(await hasL2CandidateTable(page)).toBe(false)
@@ -623,7 +641,7 @@ test('immediately invalidates loaded candidates when the revision changes', asyn
   expect(pageErrors).toEqual([])
   expect(await unhandledErrors(page)).toEqual([])
   await expect(page.locator('#cisco-revision')).toHaveValue(first.id)
-  await expect(page.locator('.cisco-metadata')).toContainText(first.id)
+  await expect(page.locator('.cisco-metadata').first()).toContainText(first.id)
 })
 
 test('leaves the page during in-flight validation without unhandled errors', async ({ page, request }) => {
@@ -670,7 +688,7 @@ test('switches assignment during in-flight L2 and L3 validation without unhandle
   await openPreview(page, eventId)
   await expect.poll(() => releases.length).toBe(2)
   await page.locator('#cisco-assignment').selectOption(accessId)
-  await expect(page.locator('.cisco-metadata')).toContainText(accessId)
+  await expect(page.locator('.cisco-metadata').first()).toContainText(accessId)
   await expect(page.getByRole('region', { name: 'Layer 3 review' })).toContainText('not applicable')
   for (const release of releases) release()
   await page.waitForLoadState('networkidle')
@@ -708,7 +726,7 @@ test('shows device configuration assembly chapters and cross-layer checks for C9
   const dhcpRow = chapters.locator('tbody tr').filter({ hasText: 'dhcp' }).first()
   await expect(dhcpRow).toContainText('NOT APPLICABLE')
   const managementRow = chapters.locator('tbody tr').filter({ hasText: 'management-auth-ssh' }).first()
-  await expect(managementRow).toContainText('NOT IMPLEMENTED')
+  await expect(managementRow).toContainText('BLOCKED')
   const checks = panel.getByRole('table', { name: 'Cross-layer checks' })
   await expect(checks.locator('tbody tr')).toHaveCount(11)
   const chapter = panel.locator('.cisco-assembly-chapter').filter({ hasText: 'ip-routing' }).first()
@@ -753,7 +771,7 @@ test('shows C9300 assembly completeness without claiming a complete configuratio
   const dhcpRow = chapters.locator('tbody tr').filter({ hasText: 'dhcp' }).first()
   await expect(dhcpRow).toContainText('BLOCKED')
   const managementRow = chapters.locator('tbody tr').filter({ hasText: 'management-auth-ssh' }).first()
-  await expect(managementRow).toContainText('NOT IMPLEMENTED')
+  await expect(managementRow).toContainText('BLOCKED')
   await expect(panel.getByRole('table', { name: 'Cross-layer checks' })).toContainText('BLOCKED')
   await expect(panel.getByText('Hardware is NOT VERIFIED', { exact: false })).toBeVisible()
   await expect(panel.getByRole('button', { name: /copy all|execute|deploy/i })).toHaveCount(0)
@@ -1079,4 +1097,108 @@ test('does not restore a late Core assembly after switching to a non-Core assign
   releaseCore!()
   await page.waitForTimeout(150)
   await expect(panel.locator('pre.cisco-command').filter({ hasText: 'ip routing' })).toHaveCount(0)
+})
+test('shows a blocked management/SSHv2 review without secret or CLI text', async ({ page, request }) => {
+  const { eventId } = await preparedManagementEvent(request, 'R61 management reviewed')
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('BLOCKED')
+  await expect(panel).toContainText('example.com')
+  await expect(panel).toContainText('192.168.10.3')
+  await expect(panel).toContainText('Opaque reference present')
+  await expect(panel).toContainText('Secret availability NOT VERIFIED')
+  await expect(panel).toContainText('PENDING independent review')
+  const table = panel.getByRole('table', { name: 'Management command candidates' })
+  await expect(table.locator('tbody tr')).toHaveCount(9)
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+  await expect(panel).not.toContainText('credref:')
+  await expect(panel).not.toContainText('netops')
+  await expect(page.getByRole('button', { name: /copy all|execute|deploy/i })).toHaveCount(0)
+})
+
+test('does not retain previous management credential metadata after assignment change', async ({ page, request }) => {
+  const { eventId, plan } = await preparedManagementEvent(request, 'R61 management switch')
+  const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toContainText('example.com')
+  await page.locator('#cisco-assignment').selectOption(accessId)
+  await expect(page.locator('#cisco-assignment')).toHaveValue(accessId)
+  await expect(panel).toBeVisible()
+  await expect(panel).not.toContainText('example.com')
+  await expect(panel).toContainText('Missing')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})
+
+test('rejects a management response carrying a forbidden secret field', async ({ page, request }) => {
+  const { eventId } = await preparedManagementEvent(request, 'R61 management secret')
+  await page.route('**/management-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    body['pass' + 'word'] = 'fixture-value'
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('Data binding is inconsistent')
+  await expect(page.locator('body')).not.toContainText('fixture-value')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})
+test('rejects a management VLAN not bound to the selected Saved Revision', async ({ page, request }) => {
+  const { eventId } = await preparedManagementEvent(request, 'R61A management vlan')
+  await page.route('**/management-intent', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    body.management_vlan = 20
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('Data binding is inconsistent')
+  await expect(panel).toContainText('management-vlan')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})
+
+test('rejects a forged reviewed management candidate', async ({ page, request }) => {
+  const { eventId } = await preparedManagementEvent(request, 'R61A management forged')
+  await page.route('**/management-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json() as JsonRecord
+    const candidates = body.candidates as JsonRecord[]
+    candidates[0]!.status = 'candidate'
+    candidates[0]!.independent_verdict = 'pass'
+    candidates[0]!.evidence_review_state = 'independently-reviewed'
+    candidates[0]!.candidate_text_present = true
+    body.summary = { total: 9, passed: 1, blocked: 8, failed: 0 }
+    body.overall_status = 'partial'
+    await route.fulfill({ status: 200, headers: response.headers(), json: body })
+  })
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toBeVisible()
+  await expect(panel).toContainText('Data binding is inconsistent')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})
+test('rebinds management metadata when the Saved Revision changes', async ({ page, request }) => {
+  const { eventId, plan } = await preparedManagementEvent(request, 'R61A management revision')
+  const secondPlan = structuredClone(plan)
+  const secondCore = (secondPlan.assignments as JsonRecord[])[0]!
+  secondCore.management_domain = 'second.example.com'
+  const second = await savePlan(request, secondPlan)
+  await openPreview(page, eventId)
+  const panel = page.getByRole('region', { name: 'Management / SSHv2 / Authentication' })
+  await expect(panel).toContainText('second.example.com')
+  const firstRevision = await request.get(
+    '/api/v1/events/' + eventId + '/plan-revisions',
+    { headers: { Origin: 'http://127.0.0.1:8765' } },
+  )
+  const revisions = await firstRevision.json() as JsonRecord[]
+  const first = revisions.find((item) => String(item.id) !== second.id)!
+  await page.locator('#cisco-revision').selectOption(String(first.id))
+  await expect(panel).toContainText('example.com')
+  await expect(panel).not.toContainText('second.example.com')
+  await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
 })

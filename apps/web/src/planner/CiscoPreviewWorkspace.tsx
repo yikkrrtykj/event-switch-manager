@@ -48,6 +48,12 @@ import type {
   ConfigurationAssembly,
 } from './configAssembly'
 import {
+  fetchManagementReview,
+  parseManagementError,
+  validateManagementReview,
+} from './managementAuth'
+import type { ManagementReview } from './managementAuth'
+import {
   canLoadCandidates as canLoadL3Candidates,
   fetchCandidates as fetchL3Candidates,
   fetchValidation as fetchL3Validation,
@@ -90,6 +96,12 @@ type AssemblyView =
   | { kind: 'invalid'; problems: string[]; assembly?: ConfigurationAssembly }
   | { kind: 'error'; error: PreviewError }
   | { kind: 'ready'; assembly: ConfigurationAssembly }
+
+type ManagementView =
+  | { kind: 'loading' }
+  | { kind: 'invalid'; problems: string[]; review?: ManagementReview }
+  | { kind: 'error'; error: PreviewError }
+  | { kind: 'ready'; review: ManagementReview }
 
 const statusKey: Record<SubsystemStatus, MessageKey> = {
   pass: 'overallPass',
@@ -220,6 +232,7 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
   const [l2, setL2] = useState<L2View>({ kind: 'loading' })
   const [l3, setL3] = useState<L3View>({ kind: 'loading' })
   const [assembly, setAssembly] = useState<AssemblyView>({ kind: 'loading' })
+  const [management, setManagement] = useState<ManagementView>({ kind: 'loading' })
   const [error, setError] = useState<PreviewError | null>(null)
   const [stage, setStage] = useState<'loading-revisions' | 'loading-revision' | 'ready'>('loading-revisions')
   const [bootAttempt, setBootAttempt] = useState(0)
@@ -239,6 +252,7 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
     setL2({ kind: 'loading' })
     setL3({ kind: 'loading' })
     setAssembly({ kind: 'loading' })
+    setManagement({ kind: 'loading' })
     setError(null)
     void (async () => {
       try {
@@ -267,6 +281,7 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
     setL2({ kind: 'loading' })
     setL3({ kind: 'loading' })
     setAssembly({ kind: 'loading' })
+    setManagement({ kind: 'loading' })
     setError(null)
     void (async () => {
       try {
@@ -295,6 +310,7 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
     setL2({ kind: 'loading' })
     setL3(assignment.isCore ? { kind: 'loading' } : { kind: 'na', reason: 'non-core' })
     setAssembly({ kind: 'loading' })
+    setManagement({ kind: 'loading' })
     void (async () => {
       const [l2Result, l3Result] = await Promise.allSettled([
         loadL2(binding, controller.signal),
@@ -309,12 +325,19 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
       else if (l3Result.status === 'rejected' && !isAbort(l3Result.reason)) {
         setL3({ kind: 'error', error: parsePreviewError(l3Result.reason) })
       }
-      try {
-        const value = await fetchConfigAssembly(
+      const [assemblyResult, managementResult] = await Promise.allSettled([
+        fetchConfigAssembly(
           binding.eventId, binding.revision.id, binding.assignment.assignmentId,
           controller.signal,
-        )
-        if (controller.signal.aborted || sequence !== requestSequence.current) return
+        ),
+        fetchManagementReview(
+          binding.eventId, binding.revision.id, binding.assignment.assignmentId,
+          controller.signal,
+        ),
+      ])
+      if (controller.signal.aborted || sequence !== requestSequence.current) return
+      if (assemblyResult.status === 'fulfilled') {
+        const value = assemblyResult.value
         const l2View = l2Result.status === 'fulfilled' ? l2Result.value : null
         const l3View = l3Result.status === 'fulfilled' ? l3Result.value : null
         const trust: AssemblyTrustInputs = {
@@ -326,9 +349,23 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
         setAssembly(problems.length
           ? { kind: 'invalid', problems, assembly: value }
           : { kind: 'ready', assembly: value })
-      } catch (failure) {
-        if (controller.signal.aborted || isAbort(failure)) return
-        setAssembly({ kind: 'error', error: parseAssemblyError(failure) as PreviewError })
+      } else if (!isAbort(assemblyResult.reason)) {
+        setAssembly({
+          kind: 'error',
+          error: parseAssemblyError(assemblyResult.reason) as PreviewError,
+        })
+      }
+      if (managementResult.status === 'fulfilled') {
+        const review = managementResult.value
+        const problems = validateManagementReview(review, binding)
+        setManagement(problems.length
+          ? { kind: 'invalid', problems }
+          : { kind: 'ready', review })
+      } else if (!isAbort(managementResult.reason)) {
+        setManagement({
+          kind: 'error',
+          error: parseManagementError(managementResult.reason) as PreviewError,
+        })
       }
     })().catch((failure: unknown) => {
       if (controller.signal.aborted || isAbort(failure) || sequence !== requestSequence.current) return
@@ -363,6 +400,7 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
     setL2({ kind: 'loading' })
     setL3({ kind: 'loading' })
     setAssembly({ kind: 'loading' })
+    setManagement({ kind: 'loading' })
     setError(null)
   }
 
@@ -511,6 +549,8 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
         <L3Section view={l3} />
       </section>
     </div>}
+
+    {revision && selectedAssignment && <ManagementPanel view={management} />}
 
     {revision && selectedAssignment && <AssemblyPanel view={assembly} />}
 
@@ -758,6 +798,112 @@ function assemblyCheckTone(status: string): string {
   if (status === 'FAIL') return 'danger'
   if (status === 'BLOCKED') return 'warning'
   return 'neutral'
+}
+
+function managementTone(status: string): string {
+  if (status === 'PLANNED' || status === 'PARTIAL') return 'warning'
+  if (status === 'VALIDATED' || status === 'PASS') return 'success'
+  if (status === 'BLOCKED' || status === 'FAIL') return 'danger'
+  return 'neutral'
+}
+
+function ManagementFacts({ review }: { review: ManagementReview }) {
+  const { t } = useMessages()
+  const intent = review.intent
+  const credential = intent.authentication.credential_reference
+  return <>
+    <dl className="cisco-metadata">
+      <div><dt>{t('ciscoManagementVlan')}</dt><dd>{intent.management_vlan}</dd></div>
+      <div><dt>{t('ciscoManagementIp')}</dt><dd>{intent.reachability.management_ip ?? t('ciscoNotAvailable')}</dd></div>
+      <div><dt>{t('ciscoManagementDomain')}</dt><dd>{intent.management_domain ?? t('ciscoNotAvailable')}</dd></div>
+      <div><dt>{t('ciscoManagementReachability')}</dt><dd>
+        <Badge tone={managementTone(intent.reachability.status)}>{intent.reachability.status}</Badge>
+        {intent.reachability.management_subnet && <span className="muted"> · {intent.reachability.management_subnet}</span>}
+      </dd></div>
+      <div><dt>{t('ciscoManagementSoftwareStatus')}</dt><dd>
+        <Badge tone={managementTone(intent.software_validation_status)}>{intent.software_validation_status}</Badge>
+        <span className="muted"> · {intent.validation_scope} · {t('ciscoManagementHardwareStatus')}: {intent.hardware_status}</span>
+      </dd></div>
+      <div><dt>{t('ciscoManagementSsh')}</dt><dd>
+        <Badge tone={managementTone(intent.ssh_policy.status)}>{intent.ssh_policy.status}</Badge>
+        <span className="muted"> · {t('ciscoManagementSshV2')} · {t('ciscoManagementTelnetOff')} · {t('ciscoManagementPlaintextOff')}</span>
+      </dd></div>
+      <div><dt>{t('ciscoManagementLocalAuth')}</dt><dd>
+        <Badge tone={managementTone(intent.authentication.status)}>{intent.authentication.status}</Badge>
+        <span className="muted"> · {intent.authentication.method}</span>
+      </dd></div>
+      <div><dt>{t('ciscoManagementAaa')}</dt><dd>
+        <Badge tone={managementTone(intent.aaa.status)}>{intent.aaa.status}</Badge>
+        <span className="muted"> · {intent.aaa.mode} · {t('ciscoManagementSecretNotAvailable')}</span>
+      </dd></div>
+      <div><dt>{t('ciscoManagementConsole')}</dt><dd>
+        <Badge tone={managementTone(intent.console_recovery.status)}>{intent.console_recovery.status}</Badge>
+        <span className="muted"> · {t('ciscoManagementConsoleNotExecuted')}</span>
+      </dd></div>
+      <div><dt>{t('ciscoManagementCredential')}</dt><dd>
+        {credential.present ? t('ciscoManagementCredentialPresent') : t('ciscoManagementCredentialMissing')}
+        {' · '}
+        {credential.event_scoped ? t('ciscoManagementCredentialEventScoped') : t('ciscoManagementCredentialCrossEvent')}
+        <span className="muted"> · {t('ciscoManagementSecretNotAvailable')} · {t('ciscoManagementProvider')}</span>
+      </dd></div>
+      <div><dt>{t('ciscoManagementEvidence')}</dt><dd>{t('ciscoManagementEvidencePending')} · <code>{intent.evidence_registry_id}</code></dd></div>
+    </dl>
+    <p className="cisco-partial-note" role="status">
+      {t('ciscoManagementSafety')} {t('ciscoManagementCredentialMetadataOnly')}
+    </p>
+    <h3>{t('ciscoManagementCandidates')}</h3>
+    <p className="cisco-table-hint muted">{t('ciscoManagementNoCli')}</p>
+    <div className="table-region">
+      <Table label={t('ciscoManagementCandidates')}>
+        <thead><tr>
+          <th scope="col">{t('ciscoManagementTopic')}</th>
+          <th scope="col">{t('ciscoCandidateStatus')}</th>
+          <th scope="col">{t('ciscoIndependentVerdict')}</th>
+          <th scope="col">{t('ciscoManagementEvidenceReview')}</th>
+          <th scope="col">{t('ciscoManagementSecretBearing')}</th>
+          <th scope="col">{t('ciscoBlockingReasons')}</th>
+        </tr></thead>
+        <tbody>{review.report.candidates.map((candidate) => <tr key={candidate.candidate_id}>
+          <th scope="row"><code>{candidate.topic}</code></th>
+          <td>{candidate.status}</td>
+          <td>{candidate.independent_verdict}</td>
+          <td>{candidate.evidence_review_state}</td>
+          <td>{candidate.secret_bearing ? t('ciscoValueYes') : t('ciscoValueNo')}</td>
+          <td>{candidate.blocking_reasons.length
+            ? candidate.blocking_reasons.map((reason) => <code className="cisco-reason" key={reason}>{reason}</code>)
+            : <span className="muted">{t('ciscoNotAvailable')}</span>}</td>
+        </tr>)}</tbody>
+      </Table>
+    </div>
+    <h3>{t('ciscoManagementBlockers')}</h3>
+    <ul className="cisco-assembly-list">{intent.reason_codes.map((reason) => <li key={reason}><code>{reason}</code></li>)}</ul>
+  </>
+}
+
+function ManagementPanel({ view }: { view: ManagementView }) {
+  const { t } = useMessages()
+  if (view.kind === 'loading') return <Loading>{t('ciscoLoadingReview')}</Loading>
+  if (view.kind === 'error') return <section className="panel cisco-error" aria-label={t('ciscoManagementTitle')} role="alert">
+    <h2>{t('ciscoManagementTitle')}</h2>
+    <p>{t(previewErrorKey(view.error))}</p>
+    {view.error.reasonCode && <p><span className="muted">{t('ciscoReasonCode')}</span> <code>{view.error.reasonCode}</code></p>}
+    {view.error.failures.map((failure) => <p key={failure}><code>{failure}</code></p>)}
+  </section>
+  if (view.kind === 'invalid') return <section className="panel cisco-error" aria-label={t('ciscoManagementTitle')} role="region">
+    <h2>{t('ciscoManagementTitle')}</h2>
+    <h3>{t('ciscoDataInconsistent')}</h3>
+    <p>{t('ciscoDataInconsistentHelp')}</p>
+    <ProblemList problems={view.problems} keys={{}} />
+    {view.review && <ManagementFacts review={view.review} />}
+  </section>
+  return <section className="panel cisco-management" aria-label={t('ciscoManagementTitle')}>
+    <div className="section-head">
+      <h2>{t('ciscoManagementTitle')}</h2>
+      <Badge tone={managementTone(view.review.intent.status)}>{view.review.intent.status}</Badge>
+    </div>
+    <p className="cisco-scope-note">{t('ciscoManagementScopeNote')}</p>
+    <ManagementFacts review={view.review} />
+  </section>
 }
 
 function AssemblyPanel({ view }: { view: AssemblyView }) {
