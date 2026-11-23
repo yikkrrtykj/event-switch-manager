@@ -7,6 +7,18 @@ export const L3_CONTRACT = 'cis-03-cisco-l3-cli-candidate-v1'
 export const L3_VALIDATION_CONTRACT = 'cis-03-03-independent-cli-validation-v1'
 export const L3_REGISTRY_ID = 'cis-03-l1-command-evidence-v1'
 export const L3_REGISTRY_FINGERPRINT = '27d9c46f610b974de5570fb13e115260e2d109475a8d967704de9bb9ca6ef00b'
+export const L3_UNREVIEWED_REGISTRY_ID = 'cis-03-l1-command-evidence-unreviewed-v1'
+export const L3_UNREVIEWED_REGISTRY_FINGERPRINT = '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945'
+
+// Frozen Catalyst 9300 reviewed scope.  This mirrors the backend selection
+// boundary; an unsupported 9300 identity must not inherit the reviewed rows.
+const L3_9300_PIDS = new Set([
+  'C9300-24T', 'C9300-24P', 'C9300L-24T-4G', 'C9300L-24T-4G-E',
+  'C9300L-24P-4X', 'C9300L-24P-4X-E', 'C9300X-24Y', 'C9300X-24Y-A',
+])
+const L3_9300_RELEASE = '17.12.4'
+const L3_9300_LICENSES = new Set(['network essentials', 'network advantage'])
+const L3_KNOWN_FAMILIES = new Set(['catalyst-9300', 'catalyst-9200'])
 
 export const sourceFields = [
   'event_id', 'saved_revision_uuid', 'revision_number', 'revision_canonical_hash',
@@ -234,12 +246,27 @@ export interface L3CandidateDocument {
 export interface CoreAssignment {
   assignmentId: string
   hostname: string
+  family: string | null
   physicalDeviceId: string
   pid: string | null
+  verifiedSerial: string | null
   image: string | null
   license: string | null
   stackIdentity: string
   assignment: RecordValue
+}
+
+export interface L3RegistryExpectation {
+  registryId: string
+  registryFingerprint: string
+  evidenceApproved: boolean
+  identity: {
+    hostname: string
+    family: string
+    exactPid: string
+    softwareImage: string
+    softwareLicense: string
+  }
 }
 
 export interface ReviewBinding {
@@ -378,12 +405,46 @@ export function coreAssignments(plan: Plan): CoreAssignment[] {
     const identity = members.length ? `stack:${members.length}` : 'standalone'
     return [{
       assignmentId: String(assignment.id), hostname: String(assignment.hostname ?? ''),
+      family: assignment.family === null || assignment.family === undefined ? null : String(assignment.family),
       physicalDeviceId, pid: device.model === null || device.model === undefined ? null : String(device.model),
+      verifiedSerial: device.verified_serial === null || device.verified_serial === undefined
+        ? null : String(device.verified_serial),
       image: software.image === undefined ? null : String(software.image),
       license: software.license === undefined ? null : String(software.license),
       stackIdentity: identity, assignment,
     } satisfies CoreAssignment]
   })
+}
+
+export function expectedRegistryBinding(binding: ReviewBinding): L3RegistryExpectation | null {
+  const core = coreAssignments(binding.revision.plan)
+    .find((item) => item.assignmentId === binding.assignmentId)
+  if (
+    !core || !core.family || !core.pid || !core.verifiedSerial ||
+    !core.image || !core.license || !L3_KNOWN_FAMILIES.has(core.family)
+  ) return null
+  const exactPid = core.pid.toUpperCase()
+  const reviewed9300 = core.family === 'catalyst-9300' &&
+    L3_9300_PIDS.has(exactPid) &&
+    core.image === L3_9300_RELEASE &&
+    L3_9300_LICENSES.has(core.license.toLowerCase())
+  return {
+    registryId: reviewed9300 ? L3_REGISTRY_ID : L3_UNREVIEWED_REGISTRY_ID,
+    registryFingerprint: reviewed9300 ? L3_REGISTRY_FINGERPRINT : L3_UNREVIEWED_REGISTRY_FINGERPRINT,
+    evidenceApproved: reviewed9300,
+    identity: {
+      hostname: core.hostname,
+      family: core.family,
+      exactPid,
+      softwareImage: core.image,
+      softwareLicense: core.license,
+    },
+  }
+}
+
+export function isUnreviewedRegistry(report: L3ValidationReport): boolean {
+  return report.source.command_evidence_registry_id === L3_UNREVIEWED_REGISTRY_ID &&
+    report.source.command_evidence_registry_fingerprint === L3_UNREVIEWED_REGISTRY_FINGERPRINT
 }
 
 function deviceOrObject(value: unknown): RecordValue {
@@ -456,6 +517,7 @@ export function sourceComplete(value: unknown): value is L3Source {
 
 export function validateReport(report: L3ValidationReport, binding: ReviewBinding): ReviewProblem[] {
   const problems: ReviewProblem[] = []
+  const expected = expectedRegistryBinding(binding)
   const actualSource = ordinaryRecord(report.source)
   const expectedSource = ordinaryRecord(report.expected_source)
   const actualComplete = sourceComplete(report.source)
@@ -472,8 +534,8 @@ export function validateReport(report: L3ValidationReport, binding: ReviewBindin
     actualSource.revision_number !== binding.revision.number ||
     actualSource.revision_canonical_hash !== binding.revision.content_hash ||
     actualSource.assignment_id !== binding.assignmentId ||
-    actualSource.command_evidence_registry_id !== L3_REGISTRY_ID ||
-    actualSource.command_evidence_registry_fingerprint !== L3_REGISTRY_FINGERPRINT ||
+    actualSource.command_evidence_registry_id !== (expected?.registryId ?? '') ||
+    actualSource.command_evidence_registry_fingerprint !== (expected?.registryFingerprint ?? '') ||
     actualSource.l3_render_contract_id !== L3_CONTRACT ||
     actualSource.l3_render_contract_version !== 1
   )) problems.push('source-binding')
@@ -482,9 +544,15 @@ export function validateReport(report: L3ValidationReport, binding: ReviewBindin
     sourceFields.some((field) => actualSource![field] !== expectedSource![field])
   ) problems.push('expected-source')
   if (report.assignment_id !== binding.assignmentId) problems.push('report-assignment')
-  if (report.device.assignment_id !== binding.assignmentId || report.device.role !== 'core') {
-    problems.push('report-device')
-  }
+  if (
+    !expected ||
+    report.device.assignment_id !== binding.assignmentId || report.device.role !== 'core' ||
+    report.device.hostname !== expected.identity.hostname ||
+    report.device.family !== expected.identity.family ||
+    (report.device.exact_pid ?? '').toUpperCase() !== expected.identity.exactPid ||
+    report.device.software_image !== expected.identity.softwareImage ||
+    report.device.software_license !== expected.identity.softwareLicense
+  ) problems.push('report-device')
   if (!integrityComplete(report.integrity)) problems.push('report-integrity')
   if (
     report.safety.candidate_only !== true || report.safety.executable !== false ||
@@ -505,6 +573,19 @@ export function validateReport(report: L3ValidationReport, binding: ReviewBindin
     report.overall_status === 'pass' &&
     (report.summary.failed > 0 || report.summary.blocked > 0)
   ) problems.push('report-summary')
+  if (expected && !expected.evidenceApproved) {
+    // The unreviewed-platform Registry contains no evidence rows.  A legitimate
+    // report can therefore contain BLOCKED candidates only; this is checked
+    // independently of the ordinary source-equality checks above.
+    if (
+      report.overall_status === 'pass' ||
+      report.summary.passed !== 0 ||
+      report.summary.base_candidates_passed !== 0 ||
+      report.summary.base_categories_passed !== 0 ||
+      report.candidates.some((candidate) => candidate.independent_verdict === 'pass') ||
+      report.candidates.some((candidate) => candidate.evidence.review_state !== null)
+    ) problems.push('report-candidates')
+  }
   return problems
 }
 
@@ -520,6 +601,7 @@ export function validateDocument(
   report: L3ValidationReport, document: L3CandidateDocument, binding: ReviewBinding,
 ): ReviewProblem[] {
   const problems: ReviewProblem[] = []
+  const expected = expectedRegistryBinding(binding)
   if (document.contract_id !== L3_CONTRACT || document.l3_render_schema_version !== 1) {
     problems.push('document-contract')
   }
@@ -532,6 +614,8 @@ export function validateDocument(
     source.l3_intent_fingerprint !== report.source.l3_intent_fingerprint ||
     source.command_evidence_registry_id !== report.source.command_evidence_registry_id ||
     source.command_evidence_registry_fingerprint !== report.source.command_evidence_registry_fingerprint ||
+    source.command_evidence_registry_id !== (expected?.registryId ?? '') ||
+    source.command_evidence_registry_fingerprint !== (expected?.registryFingerprint ?? '') ||
     document.l3_render_fingerprint !== report.source.l3_render_fingerprint
   ) problems.push('document-source')
   if (document.assignment_id !== report.assignment_id || binding.assignmentId !== document.assignment_id) {
@@ -545,7 +629,13 @@ export function validateDocument(
     document.device.exact_pid !== report.device.exact_pid ||
     document.device.software_image !== report.device.software_image ||
     document.device.software_license !== report.device.software_license ||
-    document.device.stack_identity !== report.device.stack_identity
+    document.device.stack_identity !== report.device.stack_identity ||
+    !expected ||
+    document.device.hostname !== expected.identity.hostname ||
+    document.device.family !== expected.identity.family ||
+    (document.device.exact_pid ?? '').toUpperCase() !== expected.identity.exactPid ||
+    document.device.software_image !== expected.identity.softwareImage ||
+    document.device.software_license !== expected.identity.softwareLicense
   ) problems.push('document-device')
   if (
     document.safety.candidate_only !== true || document.safety.executable !== false ||
@@ -568,6 +658,11 @@ export function validateDocument(
     document.summary.blocked !== blockedCount ||
     document.summary.unsupported !== unsupportedCount
   ) problems.push('document-candidates')
+  if (expected && !expected.evidenceApproved && (
+    document.summary.candidates !== 0 ||
+    document.candidates.some((candidate) => candidate.status === 'candidate') ||
+    document.candidates.some((candidate) => candidate.candidate_text !== null)
+  )) problems.push('document-candidates')
   for (const candidate of document.candidates) {
     const checked = report.candidates.find((item) => item.candidate_id === candidate.candidate_id)
     if (!checked) { problems.push('document-candidates'); continue }

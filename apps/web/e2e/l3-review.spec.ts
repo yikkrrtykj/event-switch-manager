@@ -19,7 +19,22 @@ async function createEvent(request: APIRequestContext, name: string) {
   return (await response.json() as { id: string }).id
 }
 
-function l3Plan(eventId: string): JsonRecord {
+type CorePlanOptions = {
+  pid?: string
+  family?: string
+  image?: string
+  license?: string
+  withRelay?: boolean
+}
+
+function l3Plan(eventId: string, options: CorePlanOptions = {}): JsonRecord {
+  const {
+    pid = 'C9300L-24P-4X',
+    family = 'catalyst-9300',
+    image = '17.12.4',
+    license = 'Network Advantage',
+    withRelay = true,
+  } = options
   const coreAssignment = id()
   const accessAssignment = id()
   const firewallAssignment = id()
@@ -47,13 +62,13 @@ function l3Plan(eventId: string): JsonRecord {
     event_id: eventId,
     management_vlan: 10,
     physical_devices: [
-      { id: coreDevice, vendor: 'cisco', model: 'C9300L-24P-4X', verified_serial: 'R44-CORE-' + serialSuffix },
+      { id: coreDevice, vendor: 'cisco', model: pid, verified_serial: 'R44-CORE-' + serialSuffix },
       { id: accessDevice, vendor: 'cisco', model: 'C9300L-24T-4G', verified_serial: 'R44-ACCESS-' + serialSuffix },
       { id: firewallDevice, vendor: 'hillstone', model: 'SG6000', verified_serial: 'R44-FW-' + serialSuffix },
     ],
     assignments: [
-      { id: coreAssignment, hostname: 'L3-Core', role: 'core', family: 'catalyst-9300',
-        physical_device_id: coreDevice, software: { image: '17.12.4', license: 'Network Advantage' } },
+      { id: coreAssignment, hostname: 'L3-Core', role: 'core', family,
+        physical_device_id: coreDevice, software: { image, license } },
       { id: accessAssignment, hostname: 'L3-Access', role: 'access', family: 'catalyst-9300',
         physical_device_id: accessDevice, software: { image: '17.12.4', license: 'Network Advantage' },
         management_ip: '192.168.10.2' },
@@ -90,8 +105,12 @@ function l3Plan(eventId: string): JsonRecord {
       { subnet_id: subnet10, address: '192.168.10.1', svi_id: vlan10Svi },
       { subnet_id: subnet20, address: '192.168.20.1', svi_id: vlan20Svi },
     ],
-    dhcp_pools: [{ id: pool20, subnet_id: subnet20, start: '192.168.20.100', end: '192.168.20.150' }],
-    dhcp_relays: [{ subnet_id: subnet20, svi_id: vlan20Svi, servers: ['192.168.10.5'] }],
+    dhcp_pools: withRelay
+      ? [{ id: pool20, subnet_id: subnet20, start: '192.168.20.100', end: '192.168.20.150' }]
+      : [],
+    dhcp_relays: withRelay
+      ? [{ subnet_id: subnet20, svi_id: vlan20Svi, servers: ['192.168.10.5'] }]
+      : [],
     vlan_access_policies: [],
     links: [{ id: link, endpoints: [coreTransitPort, firewallTransitPort] }],
     static_routes: [
@@ -138,11 +157,19 @@ async function openReview(page: Page, eventId: string) {
   await expect(page.getByRole('heading', { name: 'Independent validation report' })).toBeVisible()
 }
 
-async function preparedEvent(request: APIRequestContext, name: string) {
+async function preparedEvent(
+  request: APIRequestContext, name: string, options: CorePlanOptions = {},
+) {
   const eventId = await createEvent(request, name)
-  const plan = l3Plan(eventId)
+  const plan = l3Plan(eventId, options)
   const revision = await savePlan(request, plan)
   return { eventId, plan, revision }
+}
+
+async function preparedC9200Event(request: APIRequestContext, name: string) {
+  return preparedEvent(request, name, {
+    pid: 'C9200L-24P-4X', family: 'catalyst-9200', withRelay: false,
+  })
 }
 
 async function injectValidationResponse(
@@ -214,6 +241,194 @@ test('shows a saved revision read-only 9 PASS / 1 BLOCKED review', async ({ page
 
   await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i })).toHaveCount(0)
   await expect(page.getByRole('link', { name: /download|deploy|execute/i })).toHaveCount(0)
+})
+
+test('shows a real C9200 saved revision as all-BLOCKED on the fixed unreviewed registry', async ({ page, request }) => {
+  const { eventId, plan, revision } = await preparedC9200Event(request, 'R52A C9200 review')
+  const assignmentId = String((plan.assignments as JsonRecord[])[0]!.id)
+  const validation = await request.get(
+    events + '/' + eventId + '/plan-revisions/' + revision.id +
+    '/assignments/' + assignmentId + '/l3-cli-validation',
+    { headers },
+  )
+  expect(validation.status(), await validation.text()).toBe(200)
+  expect(validation.headers()['x-validation-scope']).toBe('full')
+  const report = await validation.json() as JsonRecord
+  const source = report.source as JsonRecord
+  const summary = report.summary as JsonRecord
+  expect(source.command_evidence_registry_id).toBe('cis-03-l1-command-evidence-unreviewed-v1')
+  expect(source.command_evidence_registry_fingerprint).toBe(
+    '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+  )
+  expect(report.overall_status).toBe('partial')
+  expect(summary).toMatchObject({ total: 9, passed: 0, failed: 0, blocked: 9 })
+  expect((report.candidates as JsonRecord[]).every((item) => item.independent_verdict === 'blocked'))
+    .toBe(true)
+  expect((report.candidates as JsonRecord[]).every((item) => (item.evidence as JsonRecord).review_state === null))
+    .toBe(true)
+
+  await openReview(page, eventId)
+  const counts = page.locator('dl.l3-counts')
+  await expect(counts.locator('div').filter({ hasText: /^Total/ })).toContainText('9')
+  await expect(counts.locator('div').filter({ hasText: /^Passed/ })).toContainText('0')
+  await expect(counts.locator('div').filter({ hasText: /^BLOCKED/ })).toContainText('9')
+  await expect(page.getByText('PARTIAL', { exact: true })).toBeVisible()
+  await expect(page.getByText('Platform evidence unreviewed', { exact: true })).toBeVisible()
+  await expect(page.getByText('Production validation scope', { exact: true })).toBeVisible()
+  await expect(page.getByText('Production scope', { exact: true })).toHaveCount(0)
+  const table = page.getByRole('table', { name: 'Candidates' })
+  await expect(table.locator('tbody tr')).toHaveCount(9)
+  await expect(table.getByText('PASS', { exact: true })).toHaveCount(0)
+  await expect(table.getByText('BLOCKED', { exact: true })).toHaveCount(18)
+  await expect(page.locator('pre.l3-command')).toHaveCount(0)
+  const first = table.locator('tbody tr').first()
+  await first.getByText('Details', { exact: true }).click()
+  await expect(first.getByText('Command text unavailable or withheld for this candidate.')).toBeVisible()
+  await expect(first.locator('pre')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i }))
+    .toHaveCount(0)
+
+  for (const width of [390, 1366, 1920]) {
+    await page.setViewportSize({ width, height: 900 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
+      .toBeLessThanOrEqual(1)
+  }
+})
+
+test('does not keep 9300 command text when switching to a C9200 saved revision', async ({ page, request }) => {
+  const r9300 = await preparedEvent(request, 'R52A switch 9300')
+  const r9200 = await preparedC9200Event(request, 'R52A switch 9200')
+  await openReview(page, r9300.eventId)
+  const passRow = page.getByRole('table', { name: 'Candidates' })
+    .locator('tbody tr').filter({ hasText: 'ip-routing' }).first()
+  await passRow.getByText('Details', { exact: true }).click()
+  await expect(passRow.locator('pre.l3-command')).toContainText('ip routing')
+
+  await page.getByLabel('Event', { exact: true }).selectOption(r9200.eventId)
+  await expect(page.getByText('Platform evidence unreviewed', { exact: true })).toBeVisible()
+  await expect(page.locator('pre.l3-command')).toHaveCount(0)
+  await expect(page.getByRole('table', { name: 'Candidates' }).getByText('PASS', { exact: true }))
+    .toHaveCount(0)
+})
+
+test('rejects a 9300 report that claims the unreviewed sentinel', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(request, 'R52A sentinel on 9300')
+  const candidateCalls = await injectValidationResponse(page, (report) => {
+    const source = report.source as JsonRecord
+    source.command_evidence_registry_id = 'cis-03-l1-command-evidence-unreviewed-v1'
+    source.command_evidence_registry_fingerprint =
+      '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945'
+  })
+  await openInjectedReview(page, eventId)
+  await expect.poll(candidateCalls).toBe(0)
+})
+
+test('rejects a C9200 report that claims the 9300 registry', async ({ page, request }) => {
+  const { eventId } = await preparedC9200Event(request, 'R52A 9300 on C9200')
+  const candidateCalls = await injectValidationResponse(page, (report) => {
+    const source = report.source as JsonRecord
+    source.command_evidence_registry_id = 'cis-03-l1-command-evidence-v1'
+    source.command_evidence_registry_fingerprint =
+      '27d9c46f610b974de5570fb13e115260e2d109475a8d967704de9bb9ca6ef00b'
+  })
+  await openInjectedReview(page, eventId)
+  await expect.poll(candidateCalls).toBe(0)
+})
+
+test('rejects a forged Registry ID', async ({ page, request }) => {
+  const { eventId } = await preparedC9200Event(request, 'R52A forged registry')
+  let candidateCalls = 0
+  await page.route('**/l3-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const report = await response.json() as JsonRecord
+    const source = report.source as JsonRecord
+    source.command_evidence_registry_id = 'arbitrary-forged-registry'
+    await route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'X-Validation-Scope': 'full' },
+      body: JSON.stringify(report),
+    })
+  })
+  await page.route('**/l3-cli-candidates', (route) => {
+    candidateCalls += 1
+    return route.fulfill({ status: 500, json: { detail: 'must not be called' } })
+  })
+  await openInjectedReview(page, eventId)
+  await expect.poll(() => candidateCalls).toBe(0)
+})
+
+test('rejects a correct Registry ID with the wrong fingerprint', async ({ page, request }) => {
+  const { eventId } = await preparedC9200Event(request, 'R52A wrong fingerprint')
+  let candidateCalls = 0
+  await page.route('**/l3-cli-validation', async (route) => {
+    const response = await route.fetch()
+    const report = await response.json() as JsonRecord
+    const source = report.source as JsonRecord
+    source.command_evidence_registry_fingerprint = '0'.repeat(64)
+    await route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json', 'X-Validation-Scope': 'full' },
+      body: JSON.stringify(report),
+    })
+  })
+  await page.route('**/l3-cli-candidates', (route) => {
+    candidateCalls += 1
+    return route.fulfill({ status: 500, json: { detail: 'must not be called' } })
+  })
+  await openInjectedReview(page, eventId)
+  await expect.poll(() => candidateCalls).toBe(0)
+})
+
+test('rejects a sentinel report containing a PASS candidate', async ({ page, request }) => {
+  const { eventId } = await preparedC9200Event(request, 'R52A sentinel PASS')
+  const candidateCalls = await injectValidationResponse(page, (report) => {
+    const candidates = report.candidates as JsonRecord[]
+    candidates[0]!.independent_verdict = 'pass'
+    const summary = report.summary as JsonRecord
+    summary.passed = 1
+    summary.blocked = Number(summary.blocked) - 1
+  })
+  await openInjectedReview(page, eventId)
+  await expect.poll(candidateCalls).toBe(0)
+})
+
+for (const [field, value] of [
+  ['family', 'catalyst-9300'],
+  ['exact_pid', 'C9300L-24P-4X'],
+  ['software_image', '17.12.5'],
+  ['software_license', 'Network Essentials'],
+] as const) {
+  test(`rejects a C9200 report with a changed ${field}`, async ({ page, request }) => {
+    const { eventId } = await preparedC9200Event(request, `R52A device ${field}`)
+    const candidateCalls = await injectValidationResponse(page, (report) => {
+      ;(report.device as JsonRecord)[field] = value
+    })
+    await openInjectedReview(page, eventId)
+    await expect.poll(candidateCalls).toBe(0)
+  })
+}
+
+test('rejects a sentinel candidate document that injects CLI text', async ({ page, request }) => {
+  const { eventId } = await preparedC9200Event(request, 'R52A sentinel CLI')
+  await page.route('**/l3-cli-candidates', async (route) => {
+    const response = await route.fetch()
+    const document = await response.json() as JsonRecord
+    const candidates = document.candidates as JsonRecord[]
+    candidates[0]!.status = 'candidate'
+    candidates[0]!.candidate_text = 'ip routing'
+    const summary = document.summary as JsonRecord
+    summary.candidates = 1
+    summary.blocked = Number(summary.blocked) - 1
+    await route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(document),
+    })
+  })
+  await page.goto('/#l3-review')
+  await page.getByLabel('Event', { exact: true }).selectOption(eventId)
+  await expect(page.getByRole('heading', { name: 'L3 data binding is inconsistent' })).toBeVisible()
+  await expect(page.locator('pre.l3-command')).toHaveCount(0)
 })
 
 test('clears old results when revision and event change', async ({ page, request }) => {

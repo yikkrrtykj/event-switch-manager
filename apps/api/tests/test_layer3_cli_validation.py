@@ -38,10 +38,16 @@ from event_switch_manager.planning.layer3_cli_validation import (
     independent_report_fingerprint,
     validate_l3_candidates,
 )
+from event_switch_manager.planning.layer3_command_evidence import (
+    CommandEvidenceRegistry,
+)
 from event_switch_manager.planning.layer3_intent import (
     L3DeviceIntent,
     Layer3Intent,
     build_layer3_intent,
+)
+from event_switch_manager.planning.layer3_registry_selection import (
+    select_l3_registry,
 )
 from event_switch_manager.planning.plan import PlanRevision
 
@@ -66,8 +72,11 @@ def _fixture(
     revision = revision_for(payload)
     intent = build_layer3_intent(revision)
     core = next(item for item in intent.devices if item.identity.hostname == "L3-Core")
-    document = build_document(revision, intent, core.identity.assignment_id)
-    expected = expected_source(revision, intent, document)
+    registry = select_l3_registry(core.identity).registry
+    document = build_document(
+        revision, intent, core.identity.assignment_id, registry=registry,
+    )
+    expected = expected_source(revision, intent, document, registry)
     return revision, intent, core, document, expected
 
 
@@ -77,13 +86,20 @@ def build_document(
     assignment_id: UUID,
     *,
     baseline: PlanRevision | None = None,
+    registry: CommandEvidenceRegistry | None = None,
 ) -> L3CandidateDocument:
     from event_switch_manager.planning.layer3_cli_candidates import (
         build_l3_cli_candidates,
     )
 
+    if registry is None:
+        device = next(
+            item for item in intent.devices
+            if item.identity.assignment_id == assignment_id
+        )
+        registry = select_l3_registry(device.identity).registry
     return build_l3_cli_candidates(
-        revision, intent, assignment_id, baseline=baseline,
+        revision, intent, assignment_id, registry, baseline=baseline,
     )
 
 
@@ -95,6 +111,16 @@ def _report(
     assignment_id: UUID,
     **kwargs: Any,
 ) -> L3ValidationReport:
+    if "registry" not in kwargs and not kwargs.get("test_only_registry"):
+        device = next(
+            (
+                item for item in intent.devices
+                if item.identity.assignment_id == assignment_id
+            ),
+            None,
+        )
+        if device is not None:
+            kwargs["registry"] = select_l3_registry(device.identity).registry
     return validate_l3_candidates(
         revision, intent, document, expected, assignment_id, **kwargs,
     )
@@ -1081,6 +1107,7 @@ def test_forged_evidence_with_unsupported_device_is_not_masked() -> None:
     forged, forged_expected = replace_candidate_and_refresh_source(
         revision, intent, document,
         document.candidates.index(candidate), changed,
+        registry=select_l3_registry(core.identity).registry,
     )
     report = _report(
         revision, intent, forged, forged_expected, core.identity.assignment_id,

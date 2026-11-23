@@ -3,8 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api'
 import type { Revision } from './model'
 import {
-  canLoadCandidates, coreAssignments, fetchValidation, filterReviewRows, overallKeys, parseReviewError,
-  reviewErrorKey, reviewRows, validateDocument, validateReport, verdictKeys,
+  canLoadCandidates, coreAssignments, expectedRegistryBinding, fetchValidation, filterReviewRows,
+  isUnreviewedRegistry, overallKeys, parseReviewError, reviewErrorKey, reviewRows, validateDocument,
+  validateReport, verdictKeys, L3_UNREVIEWED_REGISTRY_FINGERPRINT, L3_UNREVIEWED_REGISTRY_ID,
 } from './l3Review'
 import type {
   L3CandidateDocument, L3CandidateValidation, L3Integrity, L3Source, L3SourceField,
@@ -17,6 +18,7 @@ const assignmentId = '33333333-3333-4333-8333-333333333333'
 const otherAssignmentId = '44444444-4444-4444-8444-444444444444'
 const hash = 'a'.repeat(64)
 const registryHash = '27d9c46f610b974de5570fb13e115260e2d109475a8d967704de9bb9ca6ef00b'
+const unreviewedRegistryHash = L3_UNREVIEWED_REGISTRY_FINGERPRINT
 
 const revision: Revision = {
   id: revisionId, number: 1, content_hash: hash, created_at: '2026-11-22T00:00:00Z',
@@ -24,7 +26,7 @@ const revision: Revision = {
   plan: {
     schema_version: 1, event_id: eventId, management_vlan: 10,
     physical_devices: [
-      { id: 'device-core', vendor: 'cisco', model: 'C9300L-24P-4X' },
+      { id: 'device-core', vendor: 'cisco', model: 'C9300L-24P-4X', verified_serial: 'R52-CORE-0001' },
       { id: 'device-access', vendor: 'cisco', model: 'C9300L-24T-4G' },
       { id: 'device-other', vendor: 'hillstone', model: 'SG6000' },
     ],
@@ -145,6 +147,76 @@ function document(): L3CandidateDocument {
 
 const binding: ReviewBinding = { eventId, revision, assignmentId }
 
+function c9200Revision(): Revision {
+  const copied = structuredClone(revision)
+  const devices = copied.plan.physical_devices as Record<string, unknown>[]
+  devices[0]!.model = 'C9200L-24P-4X'
+  const assignments = copied.plan.assignments as Record<string, unknown>[]
+  assignments[0]!.family = 'catalyst-9200'
+  return copied
+}
+
+const unreviewedBinding: ReviewBinding = {
+  eventId, revision: c9200Revision(), assignmentId,
+}
+
+function unreviewedCandidate(id: string, category: string): L3CandidateValidation {
+  const base = candidate(id, category, 'blocked')
+  return {
+    ...base,
+    evidence: { ...base.evidence, evidence_id: null, topic: null, review_state: null, scope_ok: false },
+  }
+}
+
+function unreviewedReport(): L3ValidationReport {
+  const value = report()
+  const source = {
+    ...sourceFields,
+    command_evidence_registry_id: L3_UNREVIEWED_REGISTRY_ID,
+    command_evidence_registry_fingerprint: unreviewedRegistryHash,
+  }
+  return {
+    ...value,
+    source: { ...source },
+    expected_source: { ...source },
+    device: { ...value.device, family: 'catalyst-9200', exact_pid: 'C9200L-24P-4X' },
+    candidates: [
+      unreviewedCandidate('c1', 'ip-routing'),
+      {
+        ...unreviewedCandidate('c2', 'dhcp-helper-address'),
+        target_kind: 'svi', target_stable_id: 'svi-1', target_name: 'Vlan20',
+      },
+    ],
+    summary: {
+      total: 2, passed: 0, failed: 0, blocked: 2, not_run: 0,
+      base_categories_passed: 0, base_categories_failed: 0,
+      base_candidates_passed: 0, base_candidates_failed: 0,
+      dhcp_helper_blocked: false,
+    },
+    overall_status: 'partial',
+  }
+}
+
+function unreviewedDocument(): L3CandidateDocument {
+  const value = document()
+  const source = {
+    ...value.source,
+    command_evidence_registry_id: L3_UNREVIEWED_REGISTRY_ID,
+    command_evidence_registry_fingerprint: unreviewedRegistryHash,
+  }
+  const candidates = value.candidates.map((item) => ({
+    ...item, status: 'blocked' as const, candidate_text: null,
+  }))
+  return {
+    ...value,
+    source,
+    device: { ...value.device, family: 'catalyst-9200', exact_pid: 'C9200L-24P-4X' },
+    candidates,
+    render_state: 'blocked',
+    summary: { ...value.summary, candidates: 0, blocked: 2, unsupported: 0 },
+  }
+}
+
 afterEach(() => {
   vi.unstubAllGlobals()
 })
@@ -155,6 +227,107 @@ describe('L3 review data contracts', () => {
     expect(overallKeys.partial).toBe('overallPartial')
     expect(overallKeys.partial).not.toBe(overallKeys.pass)
     expect(verdictKeys.pass).toBe('verdictPass')
+  })
+
+  it('binds a reviewed 9300 identity to the frozen registry and a C9200 identity to the fixed sentinel', () => {
+    expect(expectedRegistryBinding(binding)).toMatchObject({
+      registryId: 'cis-03-l1-command-evidence-v1',
+      registryFingerprint: registryHash,
+      evidenceApproved: true,
+    })
+    expect(expectedRegistryBinding(unreviewedBinding)).toMatchObject({
+      registryId: L3_UNREVIEWED_REGISTRY_ID,
+      registryFingerprint: unreviewedRegistryHash,
+      evidenceApproved: false,
+    })
+    expect(validateReport(report(), binding)).toEqual([])
+    const sentinel = unreviewedReport()
+    expect(validateReport(sentinel, unreviewedBinding)).toEqual([])
+    expect(isUnreviewedRegistry(sentinel)).toBe(true)
+    expect(validateDocument(sentinel, unreviewedDocument(), unreviewedBinding)).toEqual([])
+  })
+
+  it('rejects a sentinel on 9300, a 9300 registry on C9200, and forged registry contracts', () => {
+    const sentinelOn9300 = report()
+    sentinelOn9300.source = {
+      ...sentinelOn9300.source,
+      command_evidence_registry_id: L3_UNREVIEWED_REGISTRY_ID,
+      command_evidence_registry_fingerprint: unreviewedRegistryHash,
+    }
+    expect(validateReport(sentinelOn9300, binding)).toContain('source-binding')
+
+    const reviewedRegistryOnC9200 = unreviewedReport()
+    reviewedRegistryOnC9200.source = {
+      ...reviewedRegistryOnC9200.source,
+      command_evidence_registry_id: 'cis-03-l1-command-evidence-v1',
+    }
+    expect(validateReport(reviewedRegistryOnC9200, unreviewedBinding)).toContain('source-binding')
+
+    for (const source of [
+      { command_evidence_registry_id: 'forged-registry', command_evidence_registry_fingerprint: unreviewedRegistryHash },
+      { command_evidence_registry_id: L3_UNREVIEWED_REGISTRY_ID, command_evidence_registry_fingerprint: '0'.repeat(64) },
+      { command_evidence_registry_id: 'cis-03-l1-command-evidence-v1', command_evidence_registry_fingerprint: unreviewedRegistryHash },
+    ]) {
+      const forged = unreviewedReport()
+      forged.source = { ...forged.source, ...source }
+      expect(validateReport(forged, unreviewedBinding)).toContain('source-binding')
+      expect(validateDocument(forged, unreviewedDocument(), unreviewedBinding)).toContain('document-source')
+    }
+  })
+
+  it('rejects a report device that differs from the trusted C9200 identity', () => {
+    for (const change of [
+      { family: 'catalyst-9300' },
+      { exact_pid: 'C9300L-24P-4X' },
+      { software_image: '17.12.5' },
+      { software_license: 'Network Essentials' },
+    ]) {
+      const forged = unreviewedReport()
+      forged.device = { ...forged.device, ...change }
+      expect(validateReport(forged, unreviewedBinding)).toContain('report-device')
+    }
+  })
+
+  it('rejects PASS candidates, reviewed evidence and PASS overall in a sentinel report', () => {
+    const pass = unreviewedReport()
+    pass.candidates[0] = candidate('c1', 'ip-routing', 'pass')
+    pass.summary = { ...pass.summary, passed: 1, blocked: 1 }
+    expect(validateReport(pass, unreviewedBinding)).toContain('report-candidates')
+
+    const reviewed = unreviewedReport()
+    reviewed.candidates[0] = {
+      ...reviewed.candidates[0]!,
+      evidence: { ...reviewed.candidates[0]!.evidence, review_state: 'independently-reviewed' },
+    }
+    expect(validateReport(reviewed, unreviewedBinding)).toContain('report-candidates')
+
+    const overall = unreviewedReport()
+    overall.overall_status = 'pass'
+    overall.summary = {
+      ...overall.summary, blocked: 0, passed: 2,
+      base_categories_passed: 2, base_candidates_passed: 2,
+    }
+    expect(validateReport(overall, unreviewedBinding)).toContain('report-candidates')
+  })
+
+  it('rejects CLI text or a candidate status in a sentinel candidate document', () => {
+    const text = unreviewedDocument()
+    text.candidates[0] = {
+      ...text.candidates[0]!, status: 'candidate', candidate_text: 'ip routing',
+    }
+    text.summary = { ...text.summary, candidates: 1, blocked: 1 }
+    const problems = validateDocument(unreviewedReport(), text, unreviewedBinding)
+    expect(problems).toContain('document-candidates')
+    expect(problems).toContain('candidate-text')
+  })
+
+  it('fails closed when the trusted C9200 identity is incomplete', () => {
+    const incomplete = structuredClone(unreviewedBinding.revision)
+    const devices = incomplete.plan.physical_devices as Record<string, unknown>[]
+    delete devices[0]!.verified_serial
+    expect(expectedRegistryBinding({ ...unreviewedBinding, revision: incomplete })).toBeNull()
+    expect(validateReport(unreviewedReport(), { ...unreviewedBinding, revision: incomplete }))
+      .toContain('report-device')
   })
 
   it('rejects a forged revision number in ActualSource even when ExpectedSource is unchanged', () => {

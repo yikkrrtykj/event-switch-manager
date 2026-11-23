@@ -66,6 +66,10 @@ from .layer3_intent import (
     Layer3Intent,
     build_layer3_intent,
 )
+from .layer3_registry_selection import (
+    RegistrySelectionError,
+    assert_production_registry,
+)
 from .plan import PlanRevision, canonical_plan, plan_hash
 from .types import Record
 
@@ -751,19 +755,19 @@ def _assert_integrity(
             raise ValidationIntegrityError("blocked-candidate-carries-text")
     if document.l3_render_fingerprint != independent_render_fingerprint(document):
         raise ValidationIntegrityError("document-fingerprint-mismatch")
-    if not test_only_registry:
-        if registry is not DEFAULT_REGISTRY:
-            raise ValidationIntegrityError("untrusted-production-registry")
-    elif registry.production:
+    if test_only_registry and registry.production:
         raise ValidationIntegrityError("test-only-path-rejects-production-registry")
-    if not test_only_registry and not registry.production:
-        raise ValidationIntegrityError("non-production-registry-not-allowed")
     device = next(
         (item for item in trusted.devices if item.identity.assignment_id == assignment_id),
         None,
     )
     if device is None:
         raise ValidationIntegrityError("assignment-not-in-intent")
+    if not test_only_registry:
+        try:
+            assert_production_registry(registry, device.identity)
+        except RegistrySelectionError as exc:
+            raise ValidationIntegrityError(exc.reason_code) from None
     expected_device = _trusted_device_ref(device)
     if (
         document.device.assignment_id != expected_device.assignment_id

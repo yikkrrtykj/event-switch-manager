@@ -19,7 +19,22 @@ async function createEvent(request: APIRequestContext, name: string) {
   return (await response.json() as { id: string }).id
 }
 
-function ciscoPlan(eventId: string, withDhcp = true): JsonRecord {
+type CiscoCoreOptions = {
+  pid?: string
+  family?: string
+  image?: string
+  license?: string
+}
+
+function ciscoPlan(
+  eventId: string, withDhcp = true, options: CiscoCoreOptions = {},
+): JsonRecord {
+  const {
+    pid = 'C9300L-24P-4X',
+    family = 'catalyst-9300',
+    image = '17.12.4',
+    license = 'Network Advantage',
+  } = options
   const coreAssignment = id()
   const accessAssignment = id()
   const firewallAssignment = id()
@@ -47,13 +62,13 @@ function ciscoPlan(eventId: string, withDhcp = true): JsonRecord {
     event_id: eventId,
     management_vlan: 10,
     physical_devices: [
-      { id: coreDevice, vendor: 'cisco', model: 'C9300L-24P-4X', verified_serial: 'R49-CORE-' + serialSuffix },
+      { id: coreDevice, vendor: 'cisco', model: pid, verified_serial: 'R49-CORE-' + serialSuffix },
       { id: accessDevice, vendor: 'cisco', model: 'C9300L-24T-4G', verified_serial: 'R49-ACCESS-' + serialSuffix },
       { id: firewallDevice, vendor: 'hillstone', model: 'SG6000', verified_serial: 'R49-FW-' + serialSuffix },
     ],
     assignments: [
-      { id: coreAssignment, hostname: 'L3-Core', role: 'core', family: 'catalyst-9300',
-        physical_device_id: coreDevice, software: { image: '17.12.4', license: 'Network Advantage' } },
+      { id: coreAssignment, hostname: 'L3-Core', role: 'core', family,
+        physical_device_id: coreDevice, software: { image, license } },
       { id: accessAssignment, hostname: 'L2-Access', role: 'access', family: 'catalyst-9300',
         physical_device_id: accessDevice, software: { image: '17.12.4', license: 'Network Advantage' },
         management_ip: '192.168.10.2' },
@@ -120,9 +135,12 @@ async function savePlan(request: APIRequestContext, plan: JsonRecord) {
   return await response.json() as SavedRevision
 }
 
-async function preparedEvent(request: APIRequestContext, name: string, withDhcp = true) {
+async function preparedEvent(
+  request: APIRequestContext, name: string, withDhcp = true,
+  options: CiscoCoreOptions = {},
+) {
   const eventId = await createEvent(request, name)
-  const plan = ciscoPlan(eventId, withDhcp)
+  const plan = ciscoPlan(eventId, withDhcp, options)
   const revision = await savePlan(request, plan)
   return { eventId, plan, revision }
 }
@@ -214,6 +232,42 @@ test('shows a unified read-only L2 and L3 review bound to one saved revision', a
   await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i })).toHaveCount(0)
   await expect(page.getByRole('link', { name: /download|deploy|execute/i })).toHaveCount(0)
   await expect(assignmentSelect.locator('option')).toHaveCount(2)
+})
+
+test('shows a real C9200 L3 review as PARTIAL/BLOCKED with the unreviewed sentinel', async ({ page, request }) => {
+  const { eventId } = await preparedEvent(
+    request, 'R52A C9200 unified preview', false,
+    { pid: 'C9200L-24P-4X', family: 'catalyst-9200' },
+  )
+  await openPreview(page, eventId)
+  const l3Card = page.locator('.cisco-status-card').filter({ hasText: 'L3 review' })
+  await expect(l3Card).toContainText('PARTIAL')
+  const l3Region = page.getByRole('region', { name: 'Layer 3 review' })
+  await expect(l3Region).toContainText('This platform has no independently reviewed L3 command evidence')
+  const l3Table = page.getByRole('table', { name: 'Layer 3 candidates' })
+  await expect(l3Table).toBeVisible()
+  await expect(l3Table.locator('tbody tr')).toHaveCount(9)
+  await expect(l3Table.getByText('PASS', { exact: true })).toHaveCount(0)
+  await expect(l3Table.getByText('BLOCKED', { exact: true })).toHaveCount(18)
+  await expect(l3Region.locator('pre.cisco-command')).toHaveCount(0)
+  await expect(page.locator('.cisco-source-panel')).toContainText(
+    'cis-03-l1-command-evidence-unreviewed-v1',
+  )
+  await expect(page.locator('.cisco-source-panel')).toContainText(
+    '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+  )
+  const first = l3Table.locator('tbody tr').first()
+  await first.getByText('Details', { exact: true }).click()
+  await expect(first.getByText('Command text is withheld for this candidate.', { exact: true })).toBeVisible()
+  await expect(first.locator('pre')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i }))
+    .toHaveCount(0)
+
+  for (const width of [390, 1366, 1920]) {
+    await page.setViewportSize({ width, height: 900 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
+      .toBeLessThanOrEqual(1)
+  }
 })
 
 test('shows L3 as not applicable for a non-Core Cisco assignment', async ({ page, request }) => {

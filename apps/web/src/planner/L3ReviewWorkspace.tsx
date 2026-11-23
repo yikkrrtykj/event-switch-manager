@@ -6,9 +6,9 @@ import type { MessageKey } from '../messages'
 import type { Revision, Summary } from './model'
 import {
   candidateStatusKeys, canLoadCandidates, coreAssignments, fetchCandidates, fetchValidation,
-  filterReviewRows, isAbort, listRevisions, overallKeys, parseReviewError, problemKeys,
-  readRevision, reviewCategories, reviewErrorKey, reviewRows, validateDocument, validateReport,
-  verdictKeys,
+  filterReviewRows, isAbort, isUnreviewedRegistry, listRevisions, overallKeys, parseReviewError,
+  problemKeys, readRevision, reviewCategories, reviewErrorKey, reviewRows, validateDocument,
+  validateReport, verdictKeys,
 } from './l3Review'
 import type {
   CoreAssignment, L3CandidateDocument, L3ValidationReport, ReviewBinding, ReviewError,
@@ -143,6 +143,7 @@ export function L3ReviewWorkspace({ event, navigate }: { event: EventRecord; nav
   }, [assignmentId, event.id, revision, validationAttempt])
 
   const selectedCore = cores.find((item) => item.assignmentId === assignmentId)
+  const unreviewedRegistry = report !== null && !reportProblems && isUnreviewedRegistry(report)
   const rows = report && !reportProblems ? reviewRows(report, document) : []
   const filtered = filterReviewRows(rows, categoryFilter, statusFilter)
   const categories = reviewCategories(rows)
@@ -163,7 +164,10 @@ export function L3ReviewWorkspace({ event, navigate }: { event: EventRecord; nav
         <div className="status-strip">
           <Badge tone="neutral">{t('l3ReadOnly')}</Badge>
           <Badge tone="warning">{t('hardwareNotVerified')}</Badge>
-          {report && <Badge tone="success">{t('l3ProductionScope')}</Badge>}
+          {report && <Badge tone={unreviewedRegistry ? 'warning' : 'success'}>
+            {t(unreviewedRegistry ? 'l3ProductionScopeOnly' : 'l3ProductionScope')}
+          </Badge>}
+          {unreviewedRegistry && <Badge tone="warning">{t('l3UnreviewedRegistry')}</Badge>}
         </div>
       </div>
       <div className="actions">
@@ -172,6 +176,9 @@ export function L3ReviewWorkspace({ event, navigate }: { event: EventRecord; nav
       </div>
     </div>
     <p className="l3-scope-note" role="note">{t('l3SavedRevisionOnly')}</p>
+    {unreviewedRegistry && <p className="l3-scope-note l3-unreviewed-note" role="note">
+      {t('l3UnreviewedRegistryNote')}
+    </p>}
 
     {phase === 'loading-revisions' && <Loading>{t('l3LoadingReview')}</Loading>}
     {revisions && revisions.length > 0 && <section className="panel l3-controls" aria-label={t('l3ReviewControls')}>
