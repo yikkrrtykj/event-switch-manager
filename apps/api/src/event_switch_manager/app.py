@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import router
+from .config_assembly_api import router as assembly_router
 from .database import create_database_engine, upgrade_database
 from .l2_validation_api import router as validation_router
 from .layer3_api import router as layer3_router
@@ -186,6 +187,7 @@ def create_app(settings: Settings) -> FastAPI:
     app.include_router(validation_router)
     app.include_router(layer3_router)
     app.include_router(layer3_cli_router)
+    app.include_router(assembly_router)
     _install_openapi_component_compatibility(app)
 
     web_dist = settings.web_dist.resolve()

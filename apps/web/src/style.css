@@ -606,3 +606,39 @@ dialog:has(.port-editor) { width: min(68rem, calc(100% - 1rem)); }
 @media (max-width: 38rem) {
   .cisco-table-hint { display: block; }
 }
+
+/* R59 device configuration assembly */
+.cisco-assembly { margin-top: .8rem; }
+.cisco-assembly .section-head { align-items: flex-start; }
+.cisco-assembly .cisco-scope-note { margin-top: .4rem; }
+.cisco-assembly .table-region { max-height: 32rem; }
+.cisco-assembly table { min-width: 70rem; }
+.cisco-assembly table th,
+.cisco-assembly table td { vertical-align: top; }
+.cisco-assembly table th:nth-child(1),
+.cisco-assembly table td:nth-child(1) { min-width: 10rem; }
+.cisco-assembly table th:nth-child(4),
+.cisco-assembly table td:nth-child(4),
+.cisco-assembly table th:nth-child(9),
+.cisco-assembly table td:nth-child(9) { min-width: 9rem; }
+.cisco-assembly [data-slot="badge"] { white-space: nowrap; }
+.cisco-assembly .cisco-reason,
+.cisco-assembly td > code { white-space: normal; overflow-wrap: anywhere; }
+.cisco-assembly-complete { color: var(--success); background: var(--success-surface); border: 1px solid var(--border); border-radius: var(--radius); padding: .45rem .6rem; }
+.cisco-assembly-chapters { display: grid; gap: .55rem; }
+.cisco-assembly-chapter { border: 1px solid var(--border); border-radius: var(--radius); padding: .5rem .6rem; }
+.cisco-assembly-chapter summary { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; min-height: 2rem; cursor: pointer; }
+.cisco-assembly-chapter-note { margin: .35rem 0; color: var(--muted-foreground); font-size: var(--size-small); }
+.cisco-assembly-command { margin: .4rem 0; }
+.cisco-assembly-command p { margin: 0 0 .15rem; font-size: var(--size-small); overflow-wrap: anywhere; }
+.cisco-assembly-list { margin: .4rem 0; padding-inline-start: 1.2rem; }
+.cisco-assembly-list li { margin-bottom: .2rem; overflow-wrap: anywhere; }
+.cisco-assembly-lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
+.cisco-assembly-lists h3 { margin-top: .6rem; }
+.cisco-assembly-source { margin-top: .3rem; }
+@media (max-width: 900px) {
+  .cisco-assembly-lists { grid-template-columns: minmax(0, 1fr); }
+  .cisco-assembly table { width: max-content; min-width: 0; }
+  .cisco-assembly table th,
+  .cisco-assembly table td { white-space: nowrap; }
+}
