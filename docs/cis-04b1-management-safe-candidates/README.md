@@ -1,10 +1,11 @@
 ﻿# CIS-04B-1 — First staged Management CLI candidates
 
-Status: **staged/PENDING independent review; production management CLI remains BLOCKED**
+Status: **AI document-syntax review recorded; production authorization PENDING; management CLI BLOCKED**
 
 This milestone prepares four management Evidence rows for a future reviewed
-production registry. No independent reviewer has approved the staged rows, so no
-production review is activated and production remains **0 PASS / 9 BLOCKED**.
+production registry. An AI independent read-only **document-syntax review** is
+recorded in a real GitHub comment, but no production activation approval has
+been granted. Production remains **0 PASS / 9 BLOCKED**.
 The isolated test-only path proves the intended target of 1 PASS / 8 BLOCKED
 without making it available to the API or UI.
 
@@ -53,23 +54,46 @@ cis-04b1-management-command-evidence-staged-v1
 565d4ded43aa867f0e46bc16797d9ea6d6d9817286b8323a295adb94014489c2
 ```
 
-## Review binding
+## Review provenance
 
-`ManagementReviewAttestation` binds each staged row to:
+### R63A independent document-syntax review
 
-- Evidence ID and exact corrected Content Digest.
-- Reviewer, review date, findings and official source URL.
-- Explicit AI-review disclosure where applicable.
+A real GitHub comment records the externally supplied AI document review:
 
-The fixed approved manifest is deliberately empty. A manifest must contain
-exactly four distinct, complete attestations with matching digest/source; any
-missing, duplicate, unknown, forged or stale entry raises
-`ManagementReviewError`. Evidence content changes automatically invalidate old
-attestations because the digest no longer matches.
+`https://github.com/yikkrrtykj/event-switch-manager/pull/40#issuecomment-7110303139`
 
-`production_management_registry()` returns the original draft registry while
-the approved manifest is empty. It never activates a registry based only on a
-client-provided ID/fingerprint or `test_only_registry=True`.
+```text
+Review type: AI-independent-read-only-document-review
+Reviewer: ChatGPT (GPT-6) — independent read-only AI documentation reviewer
+Review date: 2026-11-23
+Scope: DOCUMENT_SYNTAX_ONLY
+Production authorization: NOT GRANTED
+```
+
+It confirms documentation syntax/scope only: both commands are global
+configuration commands in IOS XE 17.12.x; Domain Name does not enable SSH; and
+SSH Version does not replace RSA key, Authentication, VTY or Console Recovery
+verification. It explicitly does not verify hardware, running License or all
+device/PID combinations.
+
+`DOCUMENT_REVIEW_RECORDS` contains four server-fixed records bound to the four
+staged digests and the real comment URL. `review_status()` reports these as
+`DOCUMENT-SYNTAX-REVIEWED`, never `REVIEWED`. They do not authorize production.
+
+### Production authorization boundary
+
+`ManagementReviewAttestation` remains a caller-supplied structural object. Its
+`complete` property proves field presence only, not review identity or
+authority. `build_reviewed_registry()` is test-only: without the explicit
+test-only flag it raises, and even test-only registries must use a
+`cis-04b1-management-test-only-*` ID. A complete-looking forged AI/Cisco
+TAC/human attestation cannot activate production.
+
+`PRODUCTION_APPROVED_RECORDS` and `MANAGEMENT_APPROVED_REVIEWS` are empty.
+`production_management_registry()` returns the original PENDING draft registry.
+Production Reviewed Registry activation requires a separate server-fixed,
+versioned manifest with `PRODUCTION_ACTIVATION` scope and real provenance; that
+is not present.
 
 ## Isolated candidate result
 

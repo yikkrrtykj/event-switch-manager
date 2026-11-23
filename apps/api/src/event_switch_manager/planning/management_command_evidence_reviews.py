@@ -1,4 +1,4 @@
-"""CIS-04B-1 staged management Evidence review binding.
+﻿"""CIS-04B-1 staged management Evidence review binding.
 
 The four corrected Evidence rows below have exact Cisco IOS XE 17.12.x URLs
 for the command sections.  They remain PENDING in the draft registry until a
@@ -68,7 +68,7 @@ class ManagementReviewError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ManagementReviewAttestation:
-    """A fixed external review attestation for exactly one Evidence digest."""
+    """A caller-supplied structural attestation; it is not production authority."""
 
     evidence_id: str
     content_digest: str
@@ -77,9 +77,13 @@ class ManagementReviewAttestation:
     findings: tuple[str, ...]
     source_url: str
     ai_review_disclosure: str
+    review_type: str = "AI-independent-read-only-document-review"
+    approval_scope: str = "DOCUMENT_SYNTAX_ONLY"
+    record_id: str = ""
 
     @property
     def complete(self) -> bool:
+        """Structural completeness only. This never grants production authority."""
         return bool(
             self.evidence_id
             and len(self.content_digest) == 64
@@ -91,8 +95,55 @@ class ManagementReviewAttestation:
         )
 
 
-# Deliberately empty: no independent review has been granted for R63.
+@dataclass(frozen=True, slots=True)
+class ManagementReviewRecord:
+    """Server-fixed review provenance record.
+
+    A structurally complete record is still not production authorization unless
+    it is present in the server-fixed ``PRODUCTION_APPROVED_RECORDS`` manifest
+    with ``production_authorized=True`` and an approved scope.
+    """
+
+    record_id: str
+    evidence_id: str
+    content_digest: str
+    review_type: str
+    reviewer: str
+    reviewed_at: str
+    findings: tuple[str, ...]
+    evidence_source_url: str
+    review_record_url: str
+    approval_scope: str
+    production_authorized: bool
+
+    @property
+    def structural_complete(self) -> bool:
+        return bool(
+            self.record_id
+            and self.evidence_id
+            and len(self.content_digest) == 64
+            and self.review_type
+            and self.reviewer
+            and self.reviewed_at
+            and self.findings
+            and self.evidence_source_url.startswith("https://www.cisco.com/")
+            and self.review_record_url.startswith("https://github.com/")
+            and self.approval_scope
+        )
+
+
+# Deliberately empty: no production authorization has been granted for R63.
 MANAGEMENT_APPROVED_REVIEWS: tuple[ManagementReviewAttestation, ...] = ()
+PRODUCTION_APPROVED_RECORDS: tuple[ManagementReviewRecord, ...] = ()
+R63A_REVIEW_RECORD_URL = (
+    "https://github.com/yikkrrtykj/event-switch-manager/pull/40"
+    "#issuecomment-7110303139"
+)
+R63A_AI_REVIEWER = (
+    "ChatGPT (GPT-6) — independent read-only AI documentation reviewer"
+)
+R63A_AI_REVIEW_TYPE = "AI-independent-read-only-document-review"
+R63A_AI_REVIEW_DATE = "2026-11-23"
 
 
 def _reviewed_row(
@@ -227,20 +278,78 @@ for _row in MANAGEMENT_EVIDENCE_DRAFT_REGISTRY.rows:
 if R63_STAGED_REGISTRY.fingerprint != R63_STAGED_REGISTRY_FINGERPRINT:
     raise ManagementReviewError("management-review-staged-registry-fingerprint-drift")
 
+_R63A_AI_FINDINGS: tuple[str, ...] = (
+    "Catalyst 9300/9200 ip domain name is supported by IOS XE 17.12.x documentation",
+    "Catalyst 9300/9200 ip ssh version 2 is supported by IOS XE 17.12.x documentation",
+    "Both reviewed commands are Global Configuration Mode commands",
+    "Domain Name does not mean the SSH server is enabled",
+    "SSH Version does not replace RSA key, Authentication, VTY or Console Recovery verification",
+    "No actual hardware or running License verification was performed",
+)
+
+# Server-fixed provenance for the externally supplied AI document-syntax review.
+# These records are DOCUMENT_SYNTAX_ONLY and are not production authorization.
+DOCUMENT_REVIEW_RECORDS: tuple[ManagementReviewRecord, ...] = tuple(
+    ManagementReviewRecord(
+        record_id=f"r63a-ai-document-{evidence_id}",
+        evidence_id=evidence_id,
+        content_digest=R63_STAGED_DIGESTS[evidence_id],
+        review_type=R63A_AI_REVIEW_TYPE,
+        reviewer=R63A_AI_REVIEWER,
+        reviewed_at=R63A_AI_REVIEW_DATE,
+        findings=_R63A_AI_FINDINGS,
+        evidence_source_url=_CORRECTED_BY_ID[evidence_id].source_url,
+        review_record_url=R63A_REVIEW_RECORD_URL,
+        approval_scope="DOCUMENT_SYNTAX_ONLY",
+        production_authorized=False,
+    )
+    for evidence_id in R63_REVIEWED_EVIDENCE_IDS
+)
+
+
+def document_review_record_valid(record: ManagementReviewRecord) -> bool:
+    row = _CORRECTED_BY_ID.get(record.evidence_id)
+    return bool(
+        record.structural_complete
+        and record.approval_scope == "DOCUMENT_SYNTAX_ONLY"
+        and not record.production_authorized
+        and row is not None
+        and record.content_digest == row.content_digest()
+        and record.evidence_source_url == row.source_url
+        and record.review_record_url == R63A_REVIEW_RECORD_URL
+        and record.review_type == R63A_AI_REVIEW_TYPE
+        and record.reviewer == R63A_AI_REVIEWER
+        and record.reviewed_at == R63A_AI_REVIEW_DATE
+    )
+
+
+def production_review_record_valid(record: ManagementReviewRecord) -> bool:
+    row = _CORRECTED_BY_ID.get(record.evidence_id)
+    return bool(
+        record.structural_complete
+        and record.production_authorized
+        and record.approval_scope == "PRODUCTION_ACTIVATION"
+        and row is not None
+        and record.content_digest == row.content_digest()
+        and record.evidence_source_url == row.source_url
+    )
+
 
 def review_status(evidence_id: str) -> str:
-    for attestation in MANAGEMENT_APPROVED_REVIEWS:
-        if attestation.evidence_id == evidence_id:
+    """Production review status is fail-closed to server-authorized records."""
+    for record in PRODUCTION_APPROVED_RECORDS:
+        if production_review_record_valid(record) and record.evidence_id == evidence_id:
             return "REVIEWED"
+    for record in DOCUMENT_REVIEW_RECORDS:
+        if (record.evidence_id == evidence_id
+                and document_review_record_valid(record)):
+            return "DOCUMENT-SYNTAX-REVIEWED"
     return "PENDING"
 
 
-def build_reviewed_registry(
+def _review_rows_from_attestations(
     attestations: tuple[ManagementReviewAttestation, ...],
-    *,
-    registry_id: str = R63_REVIEWED_REGISTRY_ID,
-) -> ManagementEvidenceRegistry:
-    """Build a reviewed registry only from a complete fixed four-row manifest."""
+) -> tuple[ManagementEvidenceRow, ...]:
     by_id = {row.evidence_id: row for row in R63_CORRECTED_ROWS}
     seen: set[str] = set()
     reviewed: list[ManagementEvidenceRow] = []
@@ -265,17 +374,63 @@ def build_reviewed_registry(
     if seen != set(R63_REVIEWED_EVIDENCE_IDS) or len(reviewed) != 4:
         raise ManagementReviewError("management-review-incomplete-manifest")
     reviewed_by_id = {row.evidence_id: row for row in reviewed}
+    return tuple(
+        reviewed_by_id.get(row.evidence_id, row) for row in R63_STAGED_ROWS
+    )
+
+
+def build_reviewed_registry(
+    attestations: tuple[ManagementReviewAttestation, ...],
+    *,
+    registry_id: str = R63_REVIEWED_REGISTRY_ID,
+    test_only: bool = False,
+) -> ManagementEvidenceRegistry:
+    """Build a test-only reviewed registry, never a production authorization."""
+    if not test_only:
+        raise ManagementReviewError(
+            "management-review-production-authorization-required",
+        )
+    if not registry_id.startswith("cis-04b1-management-test-only-"):
+        raise ManagementReviewError("management-review-test-only-registry-id")
+    return ManagementEvidenceRegistry(
+        _review_rows_from_attestations(attestations),
+        registry_id=registry_id,
+        production=False,
+    )
+
+
+def build_production_reviewed_registry() -> ManagementEvidenceRegistry:
+    """Build only from the server-fixed production-authorized record manifest."""
+    if not PRODUCTION_APPROVED_RECORDS:
+        raise ManagementReviewError(
+            "management-review-production-authorization-pending",
+        )
+    if len(PRODUCTION_APPROVED_RECORDS) != 4:
+        raise ManagementReviewError("management-review-incomplete-manifest")
+    by_id = {row.evidence_id: row for row in R63_CORRECTED_ROWS}
+    reviewed: list[ManagementEvidenceRow] = []
+    for record in PRODUCTION_APPROVED_RECORDS:
+        if not production_review_record_valid(record):
+            raise ManagementReviewError("management-review-production-record-invalid")
+        reviewed.append(by_id[record.evidence_id].with_review(
+            reviewer=record.reviewer,
+            reviewed_at=record.reviewed_at,
+            findings=record.findings,
+        ))
+    reviewed_by_id = {row.evidence_id: row for row in reviewed}
     rows = tuple(
         reviewed_by_id.get(row.evidence_id, row) for row in R63_STAGED_ROWS
     )
-    return ManagementEvidenceRegistry(rows, registry_id=registry_id, production=False)
+    return ManagementEvidenceRegistry(
+        rows, registry_id=R63_REVIEWED_REGISTRY_ID, production=False,
+    )
 
 
 def production_management_registry() -> ManagementEvidenceRegistry:
     """Return the production registry; no manifest means no reviewed activation."""
-    if not MANAGEMENT_APPROVED_REVIEWS:
+    if not PRODUCTION_APPROVED_RECORDS:
         return MANAGEMENT_EVIDENCE_DRAFT_REGISTRY
-    return build_reviewed_registry(MANAGEMENT_APPROVED_REVIEWS)
+    return build_production_reviewed_registry()
 
 
 def test_only_reviewed_registry() -> ManagementEvidenceRegistry:
@@ -289,15 +444,25 @@ def test_only_reviewed_registry() -> ManagementEvidenceRegistry:
             findings=("test-only R63 reviewed fixture",),
             source_url=row.source_url,
             ai_review_disclosure="test-only; not an independent production review",
+            review_type="TEST-ONLY",
+            approval_scope="TEST_ONLY",
+            record_id="test-only",
         )
         for row in R63_CORRECTED_ROWS
-    ), registry_id="cis-04b1-management-test-only-reviewed-v1")
+    ), registry_id="cis-04b1-management-test-only-reviewed-v1", test_only=True)
 
 
 __all__ = [
+    "DOCUMENT_REVIEW_RECORDS",
     "MANAGEMENT_APPROVED_REVIEWS",
     "ManagementReviewAttestation",
     "ManagementReviewError",
+    "ManagementReviewRecord",
+    "PRODUCTION_APPROVED_RECORDS",
+    "R63A_AI_REVIEW_DATE",
+    "R63A_AI_REVIEWER",
+    "R63A_AI_REVIEW_TYPE",
+    "R63A_REVIEW_RECORD_URL",
     "R63_CORRECTED_ROWS",
     "R63_OLD_DIGESTS",
     "R63_REVIEWED_EVIDENCE_IDS",
@@ -307,8 +472,11 @@ __all__ = [
     "R63_STAGED_REGISTRY",
     "R63_STAGED_REGISTRY_ID",
     "R63_STAGED_ROWS",
+    "build_production_reviewed_registry",
     "build_reviewed_registry",
+    "document_review_record_valid",
     "production_management_registry",
+    "production_review_record_valid",
     "review_status",
     "test_only_reviewed_registry",
     "URL_9200_CONFIG_SSH",

@@ -25,16 +25,24 @@ from event_switch_manager.planning.management_command_evidence import (
     ManagementCommandTopic,
 )
 from event_switch_manager.planning.management_command_evidence_reviews import (
+    DOCUMENT_REVIEW_RECORDS,
     MANAGEMENT_APPROVED_REVIEWS,
+    PRODUCTION_APPROVED_RECORDS,
     R63_CORRECTED_ROWS,
     R63_OLD_DIGESTS,
     R63_REVIEWED_EVIDENCE_IDS,
     R63_STAGED_DIGESTS,
     R63_STAGED_REGISTRY,
     R63_STAGED_REGISTRY_FINGERPRINT,
+    R63A_AI_REVIEW_DATE,
+    R63A_AI_REVIEW_TYPE,
+    R63A_AI_REVIEWER,
+    R63A_REVIEW_RECORD_URL,
     ManagementReviewAttestation,
     ManagementReviewError,
+    build_production_reviewed_registry,
     build_reviewed_registry,
+    document_review_record_valid,
     production_management_registry,
     review_status,
 )
@@ -116,23 +124,31 @@ def test_no_production_review_is_activated() -> None:
         "7ad9d17396f8cd8ed2c18c70b3ca021a3932800d54b94eef9c5d22405694d640"
     )
     assert production.renderable_count == 0
-    assert all(review_status(evidence_id) == "PENDING"
+    assert all(review_status(evidence_id) == "DOCUMENT-SYNTAX-REVIEWED"
+               for evidence_id in R63_REVIEWED_EVIDENCE_IDS)
+    assert all(review_status(evidence_id) != "REVIEWED"
                for evidence_id in R63_REVIEWED_EVIDENCE_IDS)
     assert sum(1 for row in R63_STAGED_REGISTRY.rows
                if row.review_state.value == "pending-independent-review") == 18
 
 
 def test_fixed_manifest_builds_a_reviewed_registry_and_invalidates_tampering() -> None:
-    registry = build_reviewed_registry(_attestations(), registry_id=(
-        "cis-04b1-management-test-only-reviewed-v1"
-    ))
+    registry = build_reviewed_registry(
+        _attestations(),
+        registry_id="cis-04b1-management-test-only-reviewed-v1",
+        test_only=True,
+    )
     assert registry.registry_id == "cis-04b1-management-test-only-reviewed-v1"
     assert registry.renderable_count == 4
     assert sum(1 for row in registry.rows if row.renderable) == 4
 
     incomplete = _attestations()[:3]
     with pytest.raises(ManagementReviewError) as error:
-        build_reviewed_registry(incomplete)
+        build_reviewed_registry(
+            incomplete,
+            registry_id="cis-04b1-management-test-only-reviewed-v1",
+            test_only=True,
+        )
     assert error.value.reason_code == "management-review-incomplete-manifest"
 
     wrong_digest = _attestations()[0]
@@ -140,19 +156,31 @@ def test_fixed_manifest_builds_a_reviewed_registry_and_invalidates_tampering() -
         wrong_digest.evidence_id
     ])
     with pytest.raises(ManagementReviewError) as error:
-        build_reviewed_registry((wrong_digest, *_attestations()[1:]))
+        build_reviewed_registry(
+            (wrong_digest, *_attestations()[1:]),
+            registry_id="cis-04b1-management-test-only-reviewed-v1",
+            test_only=True,
+        )
     assert error.value.reason_code == "management-review-digest-mismatch"
 
     forged = replace(_attestations()[0], reviewer="")
     with pytest.raises(ManagementReviewError) as error:
-        build_reviewed_registry((forged, *_attestations()[1:]))
+        build_reviewed_registry(
+            (forged, *_attestations()[1:]),
+            registry_id="cis-04b1-management-test-only-reviewed-v1",
+            test_only=True,
+        )
     assert error.value.reason_code == "management-review-attestation-incomplete"
 
     wrong_source = replace(
         _attestations()[0], source_url="https://example.invalid/review",
     )
     with pytest.raises(ManagementReviewError) as error:
-        build_reviewed_registry((wrong_source, *_attestations()[1:]))
+        build_reviewed_registry(
+            (wrong_source, *_attestations()[1:]),
+            registry_id="cis-04b1-management-test-only-reviewed-v1",
+            test_only=True,
+        )
     assert error.value.reason_code == "management-review-attestation-incomplete"
 
 
@@ -279,3 +307,138 @@ def test_test_only_reviewed_registry_cannot_be_selected_by_production() -> None:
     }
     assert report.overall_status == "blocked"
     assert all(item.candidate_text is None for item in document.candidates)
+def test_ai_document_review_records_are_document_syntax_only() -> None:
+    assert len(DOCUMENT_REVIEW_RECORDS) == 4
+    assert R63A_AI_REVIEW_TYPE == "AI-independent-read-only-document-review"
+    assert R63A_AI_REVIEWER.startswith("ChatGPT (GPT-6)")
+    assert R63A_AI_REVIEW_DATE == "2026-11-23"
+    assert R63A_REVIEW_RECORD_URL.startswith(
+        "https://github.com/yikkrrtykj/event-switch-manager/pull/40#issuecomment-"
+    )
+    for record in DOCUMENT_REVIEW_RECORDS:
+        assert record.evidence_id in R63_REVIEWED_EVIDENCE_IDS
+        assert record.content_digest == R63_STAGED_DIGESTS[record.evidence_id]
+        assert record.approval_scope == "DOCUMENT_SYNTAX_ONLY"
+        assert record.production_authorized is False
+        assert record.review_record_url == R63A_REVIEW_RECORD_URL
+        assert record.review_type == R63A_AI_REVIEW_TYPE
+        assert record.reviewer == R63A_AI_REVIEWER
+        assert record.reviewed_at == R63A_AI_REVIEW_DATE
+        assert document_review_record_valid(record) is True
+        assert record.findings
+    assert PRODUCTION_APPROVED_RECORDS == ()
+    with pytest.raises(ManagementReviewError) as error:
+        build_production_reviewed_registry()
+    assert error.value.reason_code == (
+        "management-review-production-authorization-pending"
+    )
+
+
+@pytest.mark.parametrize("reviewer", [
+    "Cisco TAC",
+    "ChatGPT (GPT-6) — independent read-only AI documentation reviewer",
+    "A. Human Independent Reviewer",
+])
+def test_complete_looking_forged_attestations_cannot_authorize_production(
+    reviewer: str,
+) -> None:
+    forged_attestation = replace(
+        _attestations()[0],
+        reviewer=reviewer,
+        reviewed_at="2026-11-23",
+        findings=("fabricated but structurally complete review finding",),
+    )
+    with pytest.raises(ManagementReviewError) as error:
+        build_reviewed_registry((
+            forged_attestation, *_attestations()[1:],
+        ))
+    assert error.value.reason_code == (
+        "management-review-production-authorization-required"
+    )
+    assert review_status(forged_attestation.evidence_id) != "REVIEWED"
+    assert production_management_registry().renderable_count == 0
+
+
+def test_complete_looking_forged_attestation_is_test_only_isolated() -> None:
+    forged_attestation = replace(
+        _attestations()[0],
+        reviewer="Cisco TAC",
+        reviewed_at="2099-12-31",
+        findings=("forged test-only review",),
+    )
+    isolated = build_reviewed_registry(
+        (forged_attestation, *_attestations()[1:]),
+        test_only=True,
+        registry_id="cis-04b1-management-test-only-forged-v1",
+    )
+    assert isolated.renderable_count == 4
+    assert production_management_registry().renderable_count == 0
+    # Test-only naming is required even for isolated reviewed fixtures.
+    with pytest.raises(ManagementReviewError) as error:
+        build_reviewed_registry(
+            _attestations(), test_only=True,
+            registry_id="cis-04b1-management-command-evidence-reviewed-v1",
+        )
+    assert error.value.reason_code == "management-review-test-only-registry-id"
+
+
+@pytest.mark.parametrize("field", ["reviewer", "reviewed_at", "findings"])
+def test_incomplete_reviewer_fields_are_rejected(field: str) -> None:
+    base = _attestations()[0]
+    if field == "reviewer":
+        attestation = replace(base, reviewer="")
+    elif field == "reviewed_at":
+        attestation = replace(base, reviewed_at="")
+    else:
+        attestation = replace(base, findings=())
+    with pytest.raises(ManagementReviewError) as error:
+        build_reviewed_registry(
+            (attestation, *_attestations()[1:]),
+            test_only=True,
+            registry_id="cis-04b1-management-test-only-reviewed-v1",
+        )
+    assert error.value.reason_code == "management-review-attestation-incomplete"
+def test_fabricated_date_findings_and_unapproved_source_are_rejected() -> None:
+    fabricated = replace(
+        _attestations()[0],
+        reviewer="Cisco TAC",
+        reviewed_at="2099-12-31",
+        findings=("fabricated findings with no independent provenance",),
+    )
+    with pytest.raises(ManagementReviewError) as error:
+        build_reviewed_registry((
+            fabricated, *_attestations()[1:],
+        ))
+    assert error.value.reason_code == (
+        "management-review-production-authorization-required"
+    )
+
+
+def test_duplicate_and_unknown_evidence_ids_are_rejected() -> None:
+    attestations = _attestations()
+    with pytest.raises(ManagementReviewError) as error:
+        build_reviewed_registry(
+            (attestations[0], *attestations),
+            test_only=True,
+            registry_id="cis-04b1-management-test-only-reviewed-v1",
+        )
+    assert error.value.reason_code == "management-review-evidence-duplicate"
+    unknown = replace(attestations[0], evidence_id="mgmt-unknown-evidence")
+    with pytest.raises(ManagementReviewError) as error:
+        build_reviewed_registry(
+            (unknown, *attestations[1:]),
+            test_only=True,
+            registry_id="cis-04b1-management-test-only-reviewed-v1",
+        )
+    assert error.value.reason_code == "management-review-evidence-unknown"
+
+
+def test_changed_evidence_invalidates_document_review_record() -> None:
+    record = DOCUMENT_REVIEW_RECORDS[0]
+    changed = replace(record, content_digest=R63_OLD_DIGESTS[record.evidence_id])
+    assert document_review_record_valid(changed) is False
+    assert document_review_record_valid(record) is True
+    # Server-fixed provenance remains unchanged and never becomes production.
+    assert review_status(record.evidence_id) == "DOCUMENT-SYNTAX-REVIEWED"
+    assert review_status(record.evidence_id) != "REVIEWED"
+    assert review_status("mgmt-unknown-evidence") == "PENDING"
