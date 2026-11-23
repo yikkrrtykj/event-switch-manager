@@ -34,9 +34,17 @@ import type {
   PreviewError,
   SubsystemStatus,
 } from './ciscoPreview'
-import { fetchConfigAssembly, parseAssemblyError, validateAssembly } from './configAssembly'
+import {
+  CONFIG_ASSEMBLY_PROBLEM_KEYS,
+  fetchConfigAssembly,
+  parseAssemblyError,
+  validateAssembly,
+} from './configAssembly'
 import type {
+  AssemblyL2Trust,
+  AssemblyL3Trust,
   AssemblySectionStatus,
+  AssemblyTrustInputs,
   ConfigurationAssembly,
 } from './configAssembly'
 import {
@@ -79,7 +87,7 @@ type L3View =
 
 type AssemblyView =
   | { kind: 'loading' }
-  | { kind: 'invalid'; problems: string[] }
+  | { kind: 'invalid'; problems: string[]; assembly?: ConfigurationAssembly }
   | { kind: 'error'; error: PreviewError }
   | { kind: 'ready'; assembly: ConfigurationAssembly }
 
@@ -307,13 +315,16 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
           controller.signal,
         )
         if (controller.signal.aborted || sequence !== requestSequence.current) return
-        const l2Report = l2Result.status === 'fulfilled' && l2Result.value &&
-          'report' in l2Result.value ? l2Result.value.report ?? null : null
-        const l3Report = l3Result.status === 'fulfilled' && l3Result.value &&
-          'report' in l3Result.value ? l3Result.value.report ?? null : null
-        const problems = validateAssembly(value, binding, l2Report, l3Report)
+        const l2View = l2Result.status === 'fulfilled' ? l2Result.value : null
+        const l3View = l3Result.status === 'fulfilled' ? l3Result.value : null
+        const trust: AssemblyTrustInputs = {
+          l2: trustedL2(l2View),
+          l3: trustedL3(l3View),
+          l3Applicable: assignment.isCore,
+        }
+        const problems = validateAssembly(value, binding, trust)
         setAssembly(problems.length
-          ? { kind: 'invalid', problems }
+          ? { kind: 'invalid', problems, assembly: value }
           : { kind: 'ready', assembly: value })
       } catch (failure) {
         if (controller.signal.aborted || isAbort(failure)) return
@@ -505,6 +516,18 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
 
     {revision && selectedAssignment && <SourcePanel l2={l2} l3={l3} />}
   </main>
+}
+
+function trustedL2(view: L2View | null | undefined): AssemblyL2Trust | null {
+  return view?.kind === 'ready' && view.document
+    ? { report: view.report, document: view.document }
+    : null
+}
+
+function trustedL3(view: L3View | null | undefined): AssemblyL3Trust | null {
+  return view?.kind === 'ready' && view.document
+    ? { report: view.report, document: view.document }
+    : null
 }
 
 async function loadL2(binding: PreviewBinding, signal: AbortSignal): Promise<L2View | null> {
@@ -750,7 +773,13 @@ function AssemblyPanel({ view }: { view: AssemblyView }) {
     <h2>{t('ciscoAssemblyTitle')}</h2>
     <h3>{t('ciscoDataInconsistent')}</h3>
     <p>{t('ciscoDataInconsistentHelp')}</p>
-    <ProblemList problems={view.problems} keys={{}} />
+    <ProblemList
+      problems={view.problems}
+      keys={CONFIG_ASSEMBLY_PROBLEM_KEYS as Record<string, MessageKey>}
+    />
+    <h3>{t('ciscoAssemblyRestrictedTitle')}</h3>
+    <p>{t('ciscoAssemblyRestrictedHelp')}</p>
+    {view.assembly && <AssemblyRestrictedSummary assembly={view.assembly} />}
   </section>
   const a = view.assembly
   return <section className="panel cisco-assembly" aria-label={t('ciscoAssemblyTitle')}>
@@ -870,6 +899,74 @@ function AssemblyPanel({ view }: { view: AssemblyView }) {
     <p className="cisco-source-note">{t('ciscoAssemblyFullConfigNote')} {t('ciscoAssemblyNoFullScript')}</p>
     <p className="cisco-source-note">{t('ciscoAssemblyHardwareNote')}</p>
   </section>
+}
+
+function AssemblyRestrictedSummary({ assembly }: { assembly: ConfigurationAssembly }) {
+  const { t } = useMessages()
+  const a = assembly
+  return <>
+    <p className="cisco-partial-note" role="status">
+      <strong>{t('ciscoAssemblyNotComplete')}</strong> {t('ciscoAssemblyIncomplete')}
+    </p>
+    <dl className="cisco-counts">
+      <div><dt>{t('ciscoAssemblyRequiredSections')}</dt><dd>{a.completeness.required_sections}</dd></div>
+      <div><dt>{t('ciscoAssemblyValidatedSections')}</dt><dd>{a.completeness.validated_sections}</dd></div>
+      <div><dt>{t('ciscoAssemblyPartialSections')}</dt><dd>{a.completeness.partial_sections}</dd></div>
+      <div><dt>{t('ciscoAssemblyBlockedSections')}</dt><dd>{a.completeness.blocked_sections}</dd></div>
+      <div><dt>{t('ciscoAssemblyNotImplementedSections')}</dt><dd>{a.completeness.not_implemented_sections}</dd></div>
+      <div><dt>{t('ciscoAssemblyNotApplicableSections')}</dt><dd>{a.completeness.not_applicable_sections}</dd></div>
+    </dl>
+    <div className="table-region">
+      <Table label={t('ciscoAssemblySections')}>
+        <thead><tr>
+          <th scope="col">{t('ciscoAssemblySection')}</th>
+          <th scope="col">{t('ciscoAssemblyRequired')}</th>
+          <th scope="col">{t('ciscoAssemblyApplicability')}</th>
+          <th scope="col">{t('ciscoAssemblyStatus')}</th>
+          <th scope="col">{t('ciscoAssemblyCandidates')}</th>
+          <th scope="col">{t('ciscoAssemblyMissing')}</th>
+        </tr></thead>
+        <tbody>{a.sections.map((section) => <tr key={section.section_id}>
+          <th scope="row"><code>{section.section_id}</code></th>
+          <td>{section.required ? t('ciscoAssemblyRequired') : t('ciscoAssemblyNotApplicable')}</td>
+          <td>{section.applicability}</td>
+          <td><Badge tone={assemblyStatusTone(section.status)}>{t(assemblyStatusKey(section.status))}</Badge></td>
+          <td>{section.candidate_count}</td>
+          <td>{section.missing_count}</td>
+        </tr>)}</tbody>
+      </Table>
+    </div>
+    <h3>{t('ciscoAssemblyCrossChecks')}</h3>
+    <div className="table-region">
+      <Table label={t('ciscoAssemblyCrossChecks')}>
+        <thead><tr>
+          <th scope="col">{t('ciscoAssemblyCheck')}</th>
+          <th scope="col">{t('ciscoAssemblyCheckStatus')}</th>
+          <th scope="col">{t('ciscoAssemblyCheckDetails')}</th>
+        </tr></thead>
+        <tbody>{a.cross_layer_checks.map((check) => <tr key={check.check_id}>
+          <th scope="row"><code>{check.check_id}</code></th>
+          <td><Badge tone={assemblyCheckTone(check.status)}>{check.status}</Badge></td>
+          <td>{check.detail}</td>
+        </tr>)}</tbody>
+      </Table>
+    </div>
+    <div className="cisco-assembly-lists">
+      <section aria-label={t('ciscoAssemblyMissingFeatures')}>
+        <h3>{t('ciscoAssemblyMissingFeatures')}</h3>
+        {a.completeness.missing_features.length
+          ? <ul className="cisco-assembly-list">{a.completeness.missing_features.map((item) => <li key={item}><code>{item}</code></li>)}</ul>
+          : <p className="empty">{t('ciscoNoCandidates')}</p>}
+      </section>
+      <section aria-label={t('ciscoAssemblyBlockers')}>
+        <h3>{t('ciscoAssemblyBlockers')}</h3>
+        {a.completeness.blockers.length
+          ? <ul className="cisco-assembly-list">{a.completeness.blockers.map((item) => <li key={item}><code>{item}</code></li>)}</ul>
+          : <p className="empty">{t('ciscoAssemblyNoBlockers')}</p>}
+      </section>
+    </div>
+    <p className="cisco-source-note">{t('ciscoAssemblyHardwareNote')}</p>
+  </>
 }
 
 function SourcePanel({ l2, l3 }: { l2: L2View; l3: L3View }) {

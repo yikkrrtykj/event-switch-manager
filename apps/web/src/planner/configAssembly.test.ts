@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { PreviewBinding } from './ciscoPreview'
 import type { ConfigurationAssembly } from './configAssembly'
 import {
+  assemblyContentFingerprint,
   CONFIG_ASSEMBLY_CHECKS, CONFIG_ASSEMBLY_CONTRACT, CONFIG_ASSEMBLY_SECTIONS,
   validateAssembly,
 } from './configAssembly'
@@ -36,22 +37,22 @@ function fixture(): ConfigurationAssembly {
     l3_intent: hash('f'), l3_render: hash('0'), l3_validation: hash('1'),
   }
   const sectionStatuses: Record<string, string> = {
-    'vlan-definitions': 'VALIDATED_SECTION',
+    'vlan-definitions': 'BLOCKED',
     'stp-vtp': 'BLOCKED',
-    'physical-interfaces': 'PARTIAL',
-    'access-trunk-vlans': 'VALIDATED_SECTION',
+    'physical-interfaces': 'BLOCKED',
+    'access-trunk-vlans': 'BLOCKED',
     'port-channels-lacp': 'NOT_APPLICABLE',
     'portfast-bpdu-poe': 'NOT_APPLICABLE',
-    'ip-routing': 'VALIDATED_SECTION',
-    'svi': 'PARTIAL',
-    'routes': 'VALIDATED_SECTION',
+    'ip-routing': 'NOT_APPLICABLE',
+    'svi': 'NOT_APPLICABLE',
+    'routes': 'NOT_APPLICABLE',
     dhcp: 'NOT_APPLICABLE',
     'management-auth-ssh': 'NOT_IMPLEMENTED',
     'snmp-syslog-ntp': 'NOT_IMPLEMENTED',
   }
   const required = new Set([
     'vlan-definitions', 'stp-vtp', 'physical-interfaces', 'access-trunk-vlans',
-    'ip-routing', 'svi', 'routes', 'management-auth-ssh',
+    'management-auth-ssh',
   ])
   const sections = CONFIG_ASSEMBLY_SECTIONS.map((sectionId) => ({
     section_id: sectionId,
@@ -71,7 +72,7 @@ function fixture(): ConfigurationAssembly {
     source_fingerprints: { ...sourceFingerprints },
     candidates: [],
   })) as ConfigurationAssembly['sections']
-  return {
+  const value = {
     assembly_schema_version: 1,
     contract_id: CONFIG_ASSEMBLY_CONTRACT,
     source: {
@@ -116,23 +117,32 @@ function fixture(): ConfigurationAssembly {
     sections,
     cross_layer_checks: CONFIG_ASSEMBLY_CHECKS.map((checkId) => ({
       check_id: checkId,
-      status: checkId === 'dhcp-relay-issue-30' || checkId === 'default-route-evidence-gate'
-        ? 'NOT_APPLICABLE' : 'PASS',
+      status: 'NOT_APPLICABLE',
       reason_codes: [],
       detail: 'fixture',
     })),
     completeness: {
       status: 'BLOCKED',
       complete: false,
-      required_sections: 8,
-      validated_sections: 4,
-      partial_sections: 2,
-      blocked_sections: 1,
-      not_applicable_sections: 3,
+      required_sections: 5,
+      validated_sections: 0,
+      partial_sections: 0,
+      blocked_sections: 4,
+      not_applicable_sections: 6,
       not_implemented_sections: 2,
-      missing_sections: ['stp-vtp', 'physical-interfaces', 'svi', 'management-auth-ssh'],
-      missing_features: ['stp-vtp', 'physical-interfaces', 'svi', 'management-auth-ssh', 'snmp-syslog-ntp'],
-      blockers: ['stp-vtp:BLOCKED', 'management-auth-ssh:NOT_IMPLEMENTED'],
+      missing_sections: [
+        'vlan-definitions', 'stp-vtp', 'physical-interfaces',
+        'access-trunk-vlans', 'management-auth-ssh',
+      ],
+      missing_features: [
+        'vlan-definitions', 'stp-vtp', 'physical-interfaces',
+        'access-trunk-vlans', 'management-auth-ssh', 'snmp-syslog-ntp',
+      ],
+      blockers: [
+        'vlan-definitions:BLOCKED', 'stp-vtp:BLOCKED',
+        'physical-interfaces:BLOCKED', 'access-trunk-vlans:BLOCKED',
+        'management-auth-ssh:NOT_IMPLEMENTED',
+      ],
     },
     safety: {
       read_only: true,
@@ -159,6 +169,8 @@ function fixture(): ConfigurationAssembly {
     full_config_generated: false,
     assembly_fingerprint: hash('4'),
   } as ConfigurationAssembly
+  value.assembly_fingerprint = assemblyContentFingerprint(value)
+  return value
 }
 
 describe('configuration assembly contract', () => {
@@ -178,10 +190,21 @@ describe('configuration assembly contract', () => {
     expect(validateAssembly(missing, binding)).toContain('assembly-section-set')
   })
 
-  it('rejects a tampered source fingerprint', () => {
+  it('rejects a tampered source fingerprint and a forged content hash', () => {
     const value = fixture()
     value.source.l3_validation_fingerprint = 'tampered'
     expect(validateAssembly(value, binding)).toContain('assembly-source-fingerprint')
+    const hashForgery = fixture()
+    hashForgery.assembly_fingerprint = '1'.repeat(64)
+    expect(validateAssembly(hashForgery, binding)).toContain('assembly-content-fingerprint')
+  })
+
+  it('fails closed when independent L2/L3 reports are missing', () => {
+    const problems = validateAssembly(fixture(), binding, {
+      l2: null, l3: null, l3Applicable: true,
+    })
+    expect(problems).toContain('assembly-l2-trust-gate')
+    expect(problems).toContain('assembly-l3-trust-gate')
   })
 
   it('rejects command text on a blocked candidate', () => {

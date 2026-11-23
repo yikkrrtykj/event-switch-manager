@@ -22,6 +22,16 @@ production Evidence Registries and independent validation reports from the
 trusted database and frozen server objects. Client-supplied Registry IDs,
 fingerprints, candidate text, verdicts or device identity are rejected.
 
+R59A additionally requires the browser to reuse the already-validated L2/L3
+report and candidate documents, not the Assembly's self-declaration. Every
+Assembly candidate must match its source layer, ID, category, target, status,
+independent verdict, fingerprint and exact text bytes. Missing or invalid
+reports/documents put the assembly in a restricted metadata-only state: no CLI
+is shown. The assembly fingerprint is recomputed from canonical JSON using a
+cross-language fixed vector; a well-formed but forged 64-hex value is rejected.
+Section/check ID sets, statistics, `COMPLETE`, required/optional chapter rules
+and the 11 cross-layer checks are re-derived from the actual chapter evidence.
+
 ## Capability gap inventory (CIS-01/02/03)
 
 | Area | Existing verified path | CIS-04A treatment | Remaining gap |
