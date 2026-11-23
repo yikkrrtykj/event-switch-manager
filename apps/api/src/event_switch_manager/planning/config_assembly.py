@@ -68,6 +68,14 @@ from .layer3_intent import (
     L3DeviceIntent,
     Layer3Intent,
 )
+from .management_command_evidence import (
+    MANAGEMENT_EVIDENCE_ROWS,
+)
+from .management_intent import (
+    ManagementInputError,
+    ManagementIntent,
+    build_management_intent,
+)
 from .plan import EventPlan, PlanRevision
 from .types import Record
 
@@ -129,7 +137,7 @@ SECTION_CAPABILITY_MATRIX: Mapping[str, tuple[str, bool]] = {
     "svi": ("CIS-03", True),
     "routes": ("CIS-03", True),
     "dhcp": ("CIS-01/CIS-03", True),
-    "management-auth-ssh": ("CIS-03", False),
+    "management-auth-ssh": ("CIS-03/CIS-04B", True),
     "snmp-syslog-ntp": ("CIS-03", False),
 }
 
@@ -523,10 +531,9 @@ def _applicability(
 ) -> tuple[bool, AssemblyApplicability]:
     _cis_reference, implemented = SECTION_CAPABILITY_MATRIX[section_id]
     if not implemented:
-        return (
-            section_id == "management-auth-ssh",
-            AssemblyApplicability.NOT_IMPLEMENTED,
-        )
+        return False, AssemblyApplicability.NOT_IMPLEMENTED
+    if section_id == "management-auth-ssh":
+        return True, AssemblyApplicability.APPLICABLE
     if section_id in L3_SECTION_CATEGORIES:
         if not l3_applicable:
             return False, AssemblyApplicability.NOT_APPLICABLE
@@ -711,6 +718,7 @@ def _build_sections(
     l3_device: L3DeviceIntent,
     l3_document: L3CandidateDocument,
     l3_report: L3ValidationReport,
+    management: ManagementIntent,
     assignment_id: UUID,
     l3_applicable: bool,
 ) -> tuple[AssemblySection, ...]:
@@ -818,6 +826,57 @@ def _build_sections(
             source_fingerprints=fingerprints,
             candidates=selected,
         ))
+    management_evidence = tuple(
+        row for row in MANAGEMENT_EVIDENCE_ROWS
+        if management.identity.family == row.family.value
+        and management.identity.exact_pid is not None
+        and management.identity.exact_pid.upper() in {
+            pid.upper() for pid in row.pids
+        }
+        and management.identity.software_image is not None
+        and management.identity.software_image.casefold() in {
+            release.casefold() for release in row.releases
+        }
+        and management.identity.software_license is not None
+        and management.identity.software_license.casefold() in {
+            license_name.casefold() for license_name in row.licenses
+        }
+    )
+    management_references = tuple(
+        SectionEvidenceReference(
+            kind="syntax",
+            reference_id=row.evidence_id,
+            detail=f"{row.topic.value} · {row.review_state.value}",
+        )
+        for row in management_evidence
+    ) + (
+        SectionEvidenceReference(
+            kind="preview",
+            reference_id="management-intent",
+            detail=management.intent_fingerprint,
+        ),
+        SectionEvidenceReference(
+            kind="registry",
+            reference_id=management.evidence_registry_id,
+            detail=management.evidence_registry_fingerprint,
+        ),
+    )
+    sections = [
+        section.model_copy(update={
+            "required": True,
+            "applicability": AssemblyApplicability.APPLICABLE,
+            "status": AssemblySectionStatus.BLOCKED,
+            "missing_count": 1,
+            "reason_codes": _dedupe((
+                *management.reason_codes,
+                "management-evidence-pending",
+                "management-credential-secret-not-available",
+                "management-console-recovery-not-verified",
+            )),
+            "evidence_references": management_references,
+        }) if section.section_id == "management-auth-ssh" else section
+        for section in sections
+    ]
     return tuple(sections)
 
 
@@ -1418,6 +1477,10 @@ def build_config_assembly(
         assignment.role is DeviceRole.CORE
         and (assignment.family is not None)
     )
+    try:
+        management = build_management_intent(revision, l2_intent, assignment_id)
+    except ManagementInputError as exc:
+        raise AssemblyInputError(exc.reason_code) from None
     sections = _build_sections(
         l2_intent=l2_intent,
         l2_preview=l2_preview,
@@ -1427,6 +1490,7 @@ def build_config_assembly(
         l3_device=l3_device,
         l3_document=l3_document,
         l3_report=l3_report,
+        management=management,
         assignment_id=assignment_id,
         l3_applicable=l3_applicable,
     )

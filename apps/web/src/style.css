@@ -642,3 +642,19 @@ dialog:has(.port-editor) { width: min(68rem, calc(100% - 1rem)); }
   .cisco-assembly table th,
   .cisco-assembly table td { white-space: nowrap; }
 }
+/* R61 management / SSHv2 / authentication review */
+.cisco-management { margin-top: .8rem; }
+.cisco-management .section-head { align-items: flex-start; }
+.cisco-management .cisco-metadata { margin-top: .5rem; }
+.cisco-management .table-region { max-height: 28rem; margin-top: .5rem; }
+.cisco-management table { min-width: 58rem; }
+.cisco-management table th,
+.cisco-management table td { vertical-align: top; }
+.cisco-management [data-slot="badge"] { white-space: nowrap; }
+.cisco-management .cisco-reason { white-space: normal; overflow-wrap: anywhere; }
+.cisco-management .cisco-assembly-list { margin-top: .4rem; }
+@media (max-width: 900px) {
+  .cisco-management table { width: max-content; min-width: 0; }
+  .cisco-management table th,
+  .cisco-management table td { white-space: nowrap; }
+}

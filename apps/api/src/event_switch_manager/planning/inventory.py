@@ -7,7 +7,13 @@ from pydantic import BeforeValidator, StringConstraints, field_validator
 
 from event_switch_manager.domain import DeviceFamily, DeviceRole
 from event_switch_manager.integrations import Capability, Support
-from event_switch_manager.schemas import Hostname, LocationText, SerialNumber
+from event_switch_manager.schemas import (
+    CredentialReferenceId,
+    Hostname,
+    LocationText,
+    ManagementDomain,
+    SerialNumber,
+)
 
 from .types import Name, PortName, PositiveInt, Record, VlanId
 
@@ -43,6 +49,8 @@ class EventDeviceAssignment(Record):
     physical_device_id: UUID | None = None
     software: SoftwareProfile | None = None
     management_ip: IPv4Address | None = None
+    management_domain: ManagementDomain | None = None
+    credential_reference: CredentialReferenceId | None = None
     location: LocationText | None = None
     routing_enabled: bool | None = None
 

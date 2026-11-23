@@ -1,4 +1,4 @@
-# CIS-04A Device Configuration Assembly foundation
+﻿# CIS-04A Device Configuration Assembly foundation
 
 CIS-04A turns the existing L2/L3 review contracts into one chaptered, read-only
 **Device Configuration Assembly** for exactly one Cisco Assignment of one
@@ -75,7 +75,7 @@ The header binds:
 | `svi` | L3 | Core |
 | `routes` | L3 | Core |
 | `dhcp` | L3 | When relays exist |
-| `management-auth-ssh` | none | Yes, currently not implemented |
+| `management-auth-ssh` | CIS-04B management intent / PENDING evidence | Yes, BLOCKED |
 | `snmp-syslog-ntp` | none | Optional, currently not implemented |
 
 Every chapter reports `required`, `applicability`, `candidate_count`,

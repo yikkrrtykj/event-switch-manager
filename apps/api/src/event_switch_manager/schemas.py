@@ -14,6 +14,32 @@ Hostname = Annotated[
 SerialNumber = Annotated[
     str, StringConstraints(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9-]+$")
 ]
+ManagementDomain = Annotated[
+    str,
+    StringConstraints(
+        min_length=3,
+        max_length=253,
+        pattern=(
+            r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+            r"[A-Za-z]{2,63}$"
+        ),
+        strip_whitespace=False,
+    ),
+]
+CredentialReferenceId = Annotated[
+    str,
+    StringConstraints(
+        min_length=44,
+        max_length=128,
+        pattern=(
+            r"^credref:"
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:"
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        ),
+        strip_whitespace=False,
+    ),
+]
 
 
 class PlanningRecord(BaseModel):

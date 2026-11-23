@@ -193,12 +193,14 @@ def _l3_section_totals(assembly: ConfigurationAssembly) -> tuple[int, int, int]:
 
 def test_capability_gap_matrix_drives_not_implemented_chapters() -> None:
     assert set(SECTION_CAPABILITY_MATRIX) == set(SECTION_IDS)
-    assert SECTION_CAPABILITY_MATRIX["management-auth-ssh"] == ("CIS-03", False)
+    assert SECTION_CAPABILITY_MATRIX["management-auth-ssh"] == (
+        "CIS-03/CIS-04B", True,
+    )
     assert SECTION_CAPABILITY_MATRIX["snmp-syslog-ntp"] == ("CIS-03", False)
     assert all(
         implemented
         for section_id, (_, implemented) in SECTION_CAPABILITY_MATRIX.items()
-        if section_id not in {"management-auth-ssh", "snmp-syslog-ntp"}
+        if section_id != "snmp-syslog-ntp"
     )
 
 
@@ -250,10 +252,12 @@ def test_c9300_assembly_sections_cross_checks_and_no_full_config(client: TestCli
     assert _section(assembly, "svi").status is AssemblySectionStatus.VALIDATED_SECTION
     assert _section(assembly, "routes").status is AssemblySectionStatus.VALIDATED_SECTION
     assert _section(assembly, "dhcp").status is AssemblySectionStatus.BLOCKED
-    assert _section(assembly, "management-auth-ssh").status is (
-        AssemblySectionStatus.NOT_IMPLEMENTED
-    )
-    assert _section(assembly, "management-auth-ssh").required is True
+    management = _section(assembly, "management-auth-ssh")
+    assert management.status is AssemblySectionStatus.BLOCKED
+    assert management.required is True
+    assert management.missing_count == 1
+    assert "management-evidence-pending" in management.reason_codes
+    assert management.evidence_references
     assert "management-auth-ssh" in assembly.completeness.missing_features
     assert len(assembly.cross_layer_checks) == 11
     assert all(item.check_id for item in assembly.cross_layer_checks)
@@ -376,7 +380,7 @@ def test_non_core_assignment_has_no_l3_pass_and_does_not_boost_completeness(
     assert _section(assembly, "svi").status is AssemblySectionStatus.NOT_APPLICABLE
     assert _section(assembly, "routes").status is AssemblySectionStatus.NOT_APPLICABLE
     assert _section(assembly, "management-auth-ssh").status is (
-        AssemblySectionStatus.NOT_IMPLEMENTED
+        AssemblySectionStatus.BLOCKED
     )
     assert _l3_section_totals(assembly) == (0, 0, 0)
     assert assembly.completeness.complete is False
