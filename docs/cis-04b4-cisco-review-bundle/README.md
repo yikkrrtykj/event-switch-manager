@@ -182,3 +182,37 @@ bundles and deterministic content digest behavior remain unchanged.
   invalidation.
 - Production Management remains **0 PASS / 9 BLOCKED**; Domain-only production
   activation is not performed.
+## Review and merge gate (R72 postmortem / R73)
+
+PR #43 was merged after a clean preflight, but `gh pr ready` triggered an
+asynchronous Codex review after the preflight. A new P2 thread was created
+before Merge but the thread list was not re-read before Merge. The P2 finding
+was real: complete filenames were passed through the component-level
+64-character sanitizer, which could truncate the Revision suffix and `.json`
+extension.
+
+Required gate for future PRs:
+
+1. Preflight: exact repository, clean worktree, Base/HEAD/Tree, merge base, PR
+   state, CI bound to HEAD and current Review Threads.
+2. Ready: perform only when authorized.
+3. Wait while automatic review is queued or in progress; do not treat an early
+   zero-thread sample as completion.
+4. After review settles, read all Review Threads, Review Decision and Required
+   Checks. A green `gh pr checks` does not mean zero unresolved threads.
+5. Handle every new finding; stale CI PASS is not resolution.
+6. Immediately before Merge, re-read HEAD, Review Decision, Review Threads and
+   Required Checks. If ambiguous, do not merge.
+7. Merge with the authorized method and exact head match.
+8. Post-merge, re-read Review Threads, Merge Parents/Tree and main CI. A late
+   finding must be recorded and stops final acceptance.
+
+R73 filename rule: `safeFilenamePart()` keeps its 64-character per-component
+limit. Complete Content-Disposition basenames are handled by
+`safeCompleteFilename()`: remove directories/illegal characters, preserve the
+full basename including `-r<revision>.json`, never slice the whole basename to
+64 characters, and reject over-length/malformed names in favour of a safe
+Revision-aware fallback.
+
+Gate closure does not imply production authorization, hardware verification,
+device connection, full configuration generation or deployment approval.

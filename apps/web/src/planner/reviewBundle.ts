@@ -42,10 +42,30 @@ export interface ReviewBundleDownload {
 }
 
 const UNSAFE_FILENAME = /[^A-Za-z0-9._-]+/g
+const UNSAFE_COMPLETE_FILENAME = /[^A-Za-z0-9._-]+/g
+export const MAX_SAFE_FILENAME_LENGTH = 200
+export const FALLBACK_REVIEW_FILENAME = 'cisco-config-review-report.json'
 
 export function safeFilenamePart(value: string, fallback: string): string {
   const cleaned = value.replace(UNSAFE_FILENAME, '-').replace(/^[-._]+|[-._]+$/g, '')
   return cleaned.slice(0, 64) || fallback
+}
+
+/** Sanitize a complete server filename without truncating its revision/extension. */
+export function safeCompleteFilename(value: string): string | null {
+  const basename = value.split(/[\\/]/).at(-1)?.trim() ?? ''
+  if (!basename) return null
+  const cleaned = basename
+    .replace(UNSAFE_COMPLETE_FILENAME, '-')
+    .replace(/^[-._]+|[-._]+$/g, '')
+  if (
+    !cleaned ||
+    cleaned.length > MAX_SAFE_FILENAME_LENGTH ||
+    !/\.json$/i.test(cleaned)
+  ) {
+    return null
+  }
+  return cleaned
 }
 
 export function reviewBundleFilename(
@@ -61,8 +81,7 @@ export function filenameFromDisposition(value: string | null): string | null {
   const match = /filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/i.exec(value)
   const candidate = match?.[1] ?? match?.[2]?.trim()
   if (!candidate) return null
-  const basename = candidate.split(/[\\/]/).at(-1)?.trim() || ''
-  return safeFilenamePart(basename, 'cisco-config-review-report.json')
+  return safeCompleteFilename(candidate)
 }
 
 export function reviewBundleUrl(
@@ -89,7 +108,9 @@ export async function fetchReviewBundle(
   }
   const blob = await response.blob()
   const disposition = response.headers.get('content-disposition')
-  const filename = filenameFromDisposition(disposition) ?? fallbackFilename
+  const safeFallback = safeCompleteFilename(fallbackFilename) ??
+    FALLBACK_REVIEW_FILENAME
+  const filename = filenameFromDisposition(disposition) ?? safeFallback
   return {
     blob,
     filename,
