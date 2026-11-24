@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  FALLBACK_REVIEW_FILENAME,
+  MAX_SAFE_FILENAME_LENGTH,
   canDownloadReviewBundle,
   fetchReviewBundle,
   filenameFromDisposition,
   isReviewBundleAssignment,
   reviewBundleFilename,
   reviewBundleUrl,
+  safeCompleteFilename,
   safeFilenamePart,
 } from './reviewBundle'
 
@@ -66,6 +69,80 @@ describe('Cisco review bundle download', () => {
       'attachment; filename="../../unsafe.json"',
     )).toBe('unsafe.json')
     expect(filenameFromDisposition(null)).toBeNull()
+  })
+
+  it('preserves a long complete filename without truncating revision or extension', () => {
+    const name = 'cisco-config-review-International-Championship-Finals-2026-Main-Core-C9300-r12.json'
+    expect(filenameFromDisposition(
+      'attachment; filename="' + name + '"',
+    )).toBe(name)
+    expect(safeCompleteFilename(name)).toBe(name)
+    expect(name.endsWith('-r12.json')).toBe(true)
+  })
+
+  it('keeps Revision 12 and 13 distinct even at the 64-character component limits', () => {
+    const event = 'e'.repeat(64)
+    const device = 'd'.repeat(64)
+    const r12 = 'cisco-config-review-' + event + '-' + device + '-r12.json'
+    const r13 = 'cisco-config-review-' + event + '-' + device + '-r13.json'
+    expect(r12.length).toBeLessThan(MAX_SAFE_FILENAME_LENGTH)
+    expect(filenameFromDisposition('attachment; filename="' + r12 + '"')).toBe(r12)
+    expect(filenameFromDisposition('attachment; filename="' + r13 + '"')).toBe(r13)
+    expect(r12).not.toBe(r13)
+    expect(r12.endsWith('-r12.json')).toBe(true)
+    expect(r13.endsWith('-r13.json')).toBe(true)
+  })
+
+  it('falls back instead of truncating an oversized or malformed filename', () => {
+    const oversized = 'a'.repeat(MAX_SAFE_FILENAME_LENGTH + 1) + '.json'
+    expect(filenameFromDisposition(
+      'attachment; filename="' + oversized + '"',
+    )).toBeNull()
+    expect(safeCompleteFilename(oversized)).toBeNull()
+    expect(filenameFromDisposition('attachment; filename="report.cfg"')).toBeNull()
+    expect(filenameFromDisposition(
+      'attachment; filename="bad<>:?*.json"',
+    )).toBe('bad-.json')
+    expect(filenameFromDisposition(
+      'attachment; filename="' + 'a'.repeat(300) + '.json' + '"',
+    )).toBeNull()
+  })
+
+  it('uses the safe Revision-aware fallback when the header is absent', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', {
+      status: 200,
+    })))
+    const fallback = 'cisco-config-review-Event-Device-r12.json'
+    const value = await fetchReviewBundle(
+      'event', 'revision', 'assignment', undefined, fallback,
+    )
+    expect(value.filename).toBe(fallback)
+    expect(value.filename.endsWith('.json')).toBe(true)
+  })
+
+  it('uses a safe fallback for an oversized header and never returns a path', async () => {
+    const oversized = 'a'.repeat(MAX_SAFE_FILENAME_LENGTH + 1) + '.json'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', {
+      status: 200,
+      headers: {
+        'Content-Disposition': 'attachment; filename="' + oversized + '"',
+      },
+    })))
+    const fallback = 'cisco-config-review-Event-Device-r12.json'
+    const value = await fetchReviewBundle(
+      'event', 'revision', 'assignment', undefined, fallback,
+    )
+    expect(value.filename).toBe(fallback)
+    expect(value.filename).not.toContain('..')
+    expect(value.filename.endsWith('.json')).toBe(true)
+  })
+
+  it('keeps the existing fallback for Chinese component names', () => {
+    expect(reviewBundleFilename('中文事件', 'L3 Core', 12, 'evt1234')).toBe(
+      'cisco-config-review-event-evt1234-L3-Core-r12.json',
+    )
+    expect(safeFilenamePart('中文事件', 'event-fallback')).toBe('event-fallback')
+    expect(FALLBACK_REVIEW_FILENAME.endsWith('.json')).toBe(true)
   })
 
   it('binds the download URL to the exact event/revision/assignment', () => {

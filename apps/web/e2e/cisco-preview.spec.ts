@@ -1,4 +1,4 @@
-﻿import { randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
 import { expect, test } from '@playwright/test'
@@ -1235,7 +1235,11 @@ test('rejects injected management candidate text without displaying CLI', async 
   await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
 })
 test('downloads a read-only review bundle only for the selected saved revision', async ({ page, request }) => {
-  const { eventId, plan, revision } = await preparedManagementEvent(request, 'R71 review download', true)
+  const { eventId, plan, revision } = await preparedManagementEvent(
+    request,
+    'International Championship Finals 2026 Main Core C9300 Review Download',
+    true,
+  )
   await openPreview(page, eventId)
   const downloadButton = page.getByRole('button', { name: 'Download review report' })
   await expect(downloadButton).toBeEnabled()
@@ -1244,6 +1248,8 @@ test('downloads a read-only review bundle only for the selected saved revision',
     downloadButton.click(),
   ])
   expect(download.suggestedFilename()).toMatch(/^cisco-config-review-.*-r1\.json$/)
+  expect(download.suggestedFilename().length).toBeGreaterThan(64)
+  expect(download.suggestedFilename()).not.toContain('..')
   const path = await download.path()
   expect(path).not.toBeNull()
   const bundle = JSON.parse(readFileSync(path!, 'utf8')) as JsonRecord
