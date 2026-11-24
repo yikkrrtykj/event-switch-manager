@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Iterator
 from dataclasses import replace
@@ -151,6 +152,17 @@ def _approval_records() -> tuple[DomainReadonlyApprovalRecord, ...]:
     return tuple(records)
 
 
+def _legacy_four_evidence_records() -> tuple[reviews.ManagementReviewRecord, ...]:
+    return tuple(
+        replace(
+            record,
+            record_id=f"r65-{record.evidence_id}",
+            production_authorized=True,
+            approval_scope="PRODUCTION_ACTIVATION",
+        )
+        for record in DOCUMENT_REVIEW_RECORDS
+    )
+
 def _install_valid_approval(monkeypatch: pytest.MonkeyPatch) -> None:
     records = _approval_records()
     monkeypatch.setattr(reviews, "DOMAIN_APPROVED_RECORDS", records)
@@ -179,6 +191,79 @@ def _assert_fails_closed(
     )
     assert production_management_registry().renderable_count == 0
     assert review_status("mgmt-9300-domain-name-v1") == (
+        "DOCUMENT-SYNTAX-REVIEWED"
+    )
+
+
+def test_legacy_four_evidence_builder_requires_explicit_isolation() -> None:
+    with pytest.raises(reviews.ManagementReviewError) as error:
+        reviews.build_production_reviewed_registry()
+    assert error.value.reason_code == (
+        "management-legacy-production-authorization-removed"
+    )
+
+def test_empty_domain_with_valid_legacy_manifest_stays_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reviews, "DOMAIN_APPROVED_RECORDS", ())
+    monkeypatch.setattr(
+        reviews, "PRODUCTION_APPROVED_RECORDS", _legacy_four_evidence_records(),
+    )
+    selector = production_management_registry()
+    assert selector.registry_id == MANAGEMENT_EVIDENCE_DRAFT_REGISTRY.registry_id
+    assert selector.renderable_count == 0
+    assert all(
+        review_status(evidence_id) != "REVIEWED"
+        for evidence_id in reviews.R63_REVIEWED_EVIDENCE_IDS
+    )
+    assert review_status("mgmt-9300-ssh-version-v1") == (
+        "DOCUMENT-SYNTAX-REVIEWED"
+    )
+
+
+def test_invalid_domain_with_valid_legacy_manifest_stays_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reviews, "DOMAIN_APPROVED_RECORDS", _approval_records()[:1],
+    )
+    monkeypatch.setattr(
+        reviews, "PRODUCTION_APPROVED_RECORDS", _legacy_four_evidence_records(),
+    )
+    selector = production_management_registry()
+    assert selector.registry_id == MANAGEMENT_EVIDENCE_DRAFT_REGISTRY.registry_id
+    assert selector.renderable_count == 0
+    assert review_status("mgmt-9300-domain-name-v1") != "REVIEWED"
+    assert review_status("mgmt-9300-ssh-version-v1") != "REVIEWED"
+    assert review_status("mgmt-9300-ssh-version-v1") == (
+        "DOCUMENT-SYNTAX-REVIEWED"
+    )
+
+
+def test_api_ignores_valid_legacy_manifest_without_domain(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reviews, "DOMAIN_APPROVED_RECORDS", ())
+    monkeypatch.setattr(
+        reviews, "PRODUCTION_APPROVED_RECORDS", _legacy_four_evidence_records(),
+    )
+    event_id = _event(client)
+    plan, core = _plan(event_id)
+    revision = _save(client, event_id, plan)
+    base = (
+        API + f"/events/{event_id}/plan-revisions/{revision['id']}"
+        f"/assignments/{core['id']}"
+    )
+    intent = client.get(base + "/management-intent")
+    report = client.get(base + "/management-cli-validation")
+    assert intent.status_code == report.status_code == 200
+    assert intent.json()["evidence_registry_id"] == (
+        MANAGEMENT_EVIDENCE_DRAFT_REGISTRY.registry_id
+    )
+    assert report.json()["summary"] == {
+        "total": 9, "passed": 0, "blocked": 9, "failed": 0,
+    }
+    assert review_status("mgmt-9300-ssh-version-v1") == (
         "DOCUMENT-SYNTAX-REVIEWED"
     )
 
@@ -358,7 +443,7 @@ def test_valid_domain_manifest_selects_domain_only_registry(
     # The Domain-only contract takes precedence over the legacy four-Evidence
     # fixture and never inherits SSH review authorization.
     monkeypatch.setattr(
-        reviews, "PRODUCTION_APPROVED_RECORDS", DOCUMENT_REVIEW_RECORDS,
+        reviews, "PRODUCTION_APPROVED_RECORDS", _legacy_four_evidence_records(),
     )
     assert production_management_registry().registry_id == (
         DOMAIN_ONLY_PRODUCTION_REGISTRY_ID
@@ -488,15 +573,20 @@ def test_pid_sku_and_license_evidence_levels() -> None:
     assert management_license_evidence(
         "C9300L-24P-4X-E", None,
     ).active_license_evidence is ManagementLicenseEvidenceLevel.UNKNOWN
-    verified = management_license_evidence(
-        "C9300L-24P-4X-E",
-        "Network Essentials",
-        device_verified_license="Network Essentials",
+    # R68 has no caller-string path to DEVICE_VERIFIED: the unverified
+    # promotion argument is not part of the function signature.
+    assert "device_verified_license" not in inspect.signature(
+        management_license_evidence,
+    ).parameters
+    assert all(
+        evidence.active_license_verified is False
+        for evidence in (
+            documented,
+            management_license_evidence("C9300L-24P-4X-E", "Network Essentials"),
+            management_license_evidence("C9300L-24P-4X-E", None),
+            management_license_evidence("C9300L-24P-4X-E", "LAN Base"),
+        )
     )
-    assert verified.active_license_evidence is (
-        ManagementLicenseEvidenceLevel.DEVICE_VERIFIED
-    )
-    assert verified.active_license_verified is True
 
 
 def test_supplemental_dns_evidence_and_frozen_digests() -> None:

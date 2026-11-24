@@ -1,4 +1,4 @@
-# CIS-04B-3 — Domain-only Read-only Authorization Foundation
+﻿# CIS-04B-3 — Domain-only Read-only Authorization Foundation
 
 Status: **software foundation and isolated validation only; production authorization PENDING**
 
@@ -144,6 +144,31 @@ license is `UNKNOWN`; a license outside Network Essentials/Advantage is
 `UNSUPPORTED`.  A completely separate hardware/runtime gate is required before
 any future device configuration or deployment.
 
+## R68A trust-boundary closure
+
+The legacy R63/R65 four-Evidence contract is fully removed from the production
+selector and production review status:
+
+- `production_management_registry()` returns Draft whenever no complete valid
+  Domain-only Manifest exists.
+- A valid legacy `PRODUCTION_APPROVED_RECORDS` Manifest cannot become a
+  fallback and cannot grant production `REVIEWED`.
+- `review_status()` production authority is Domain-only Manifest only.
+- `build_production_reviewed_registry()` is quarantined behind an explicit
+  `test_only=True` argument and is used only by isolated R65 regression tests.
+- SSH Version Evidence cannot become production REVIEWED through any legacy
+  path.
+
+License verification provenance is also tightened:
+
+- `management_license_evidence()` has no caller-supplied
+  `device_verified_license` argument.
+- A plain string cannot promote a Declared License to DEVICE_VERIFIED.
+- `active_license_verified` remains false for every R68 planning path.
+- `DEVICE_VERIFIED` remains only a future enum state requiring a separate,
+  source-bound device verification contract.
+- `DOCUMENTED_COMPATIBILITY` is explicitly family-command-documentation scope
+  only, not proof of per-PID/per-License command authorization.
 ## Supplemental DNS evidence
 
 Added as read-only supplemental evidence without changing the original R63

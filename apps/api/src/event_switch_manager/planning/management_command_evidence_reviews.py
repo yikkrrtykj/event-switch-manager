@@ -707,16 +707,9 @@ def review_status(evidence_id: str) -> str:
         for domain_record in domain_manifest:
             if domain_record.evidence_id == evidence_id:
                 return "REVIEWED"
-    elif PRODUCTION_APPROVED_RECORDS:
-        try:
-            legacy_manifest = _validate_production_manifest(
-                PRODUCTION_APPROVED_RECORDS,
-            )
-        except ManagementReviewError:
-            legacy_manifest = ()
-        for legacy_record in legacy_manifest:
-            if legacy_record.evidence_id == evidence_id:
-                return "REVIEWED"
+    # Legacy R63/R65 PRODUCTION_APPROVED_RECORDS is intentionally never
+    # consulted by the production review status path.  It remains only for
+    # explicitly isolated R65 fixture builders.
     for document_record in DOCUMENT_REVIEW_RECORDS:
         if (document_record.evidence_id == evidence_id
                 and document_review_record_valid(document_record)):
@@ -776,8 +769,18 @@ def build_reviewed_registry(
     )
 
 
-def build_production_reviewed_registry() -> ManagementEvidenceRegistry:
-    """Legacy R63/R65 four-Evidence fixture builder; not R68 authorization."""
+def build_production_reviewed_registry(
+    *, test_only: bool = False,
+) -> ManagementEvidenceRegistry:
+    """Legacy R63/R65 four-Evidence fixture builder; not R68 authorization.
+
+    The legacy builder is explicitly quarantined behind ``test_only=True`` and
+    is not a production selector or production review authority.
+    """
+    if not test_only:
+        raise ManagementReviewError(
+            "management-legacy-production-authorization-removed",
+        )
     manifest = _validate_production_manifest(PRODUCTION_APPROVED_RECORDS)
     by_id = {row.evidence_id: row for row in R63_CORRECTED_ROWS}
     reviewed: list[ManagementEvidenceRow] = []
@@ -812,9 +815,9 @@ def production_management_registry() -> ManagementEvidenceRegistry:
             )
         except ManagementReviewError:
             return MANAGEMENT_EVIDENCE_DRAFT_REGISTRY
-    if not PRODUCTION_APPROVED_RECORDS:
-        return MANAGEMENT_EVIDENCE_DRAFT_REGISTRY
-    return build_production_reviewed_registry()
+    # No Domain-only authorization means Draft.  The legacy four-Evidence
+    # manifest is never a production fallback, even when structurally valid.
+    return MANAGEMENT_EVIDENCE_DRAFT_REGISTRY
 
 
 def test_only_reviewed_registry() -> ManagementEvidenceRegistry:

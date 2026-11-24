@@ -64,11 +64,18 @@ class ManagementPidKind(StrEnum):
 
 
 class ManagementLicenseEvidenceLevel(StrEnum):
+    # DOCUMENTED_COMPATIBILITY is family-level command documentation only.
+    # It is not proof of per-PID/per-License command authorization.
     DOCUMENTED_COMPATIBILITY = "DOCUMENTED_COMPATIBILITY"
     DECLARED_NOT_DEVICE_VERIFIED = "DECLARED_NOT_DEVICE_VERIFIED"
+    # Future state only.  No R68 software path can emit this value without a
+    # separately designed, source-bound device verification contract.
     DEVICE_VERIFIED = "DEVICE_VERIFIED"
     UNKNOWN = "UNKNOWN"
     UNSUPPORTED = "UNSUPPORTED"
+
+
+LICENSE_COMPATIBILITY_SCOPE = "family-command-documentation-only"
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,13 +292,13 @@ def is_ordering_sku(pid: str | None) -> bool:
 def management_license_evidence(
     pid: str | None,
     declared_license: str | None,
-    *,
-    device_verified_license: str | None = None,
 ) -> ManagementLicenseEvidence:
     """Classify license evidence without promoting ordering defaults.
 
-    Only a caller that has independent device evidence may pass
-    ``device_verified_license``.  Production planning code does not do so.
+    There is deliberately no caller-supplied ``device_verified_license``
+    argument in R68.  A plain string equality can never promote a Declared
+    License to Device-Verified.  DEVICE_VERIFIED remains a future state that
+    requires a separate source-bound device verification design.
     """
     scope = resolve_management_pid(pid)
     source_url = scope.source_url if scope else URL_9300_RELEASE_NOTES
@@ -342,15 +349,6 @@ def management_license_evidence(
             source_url=source_url,
             note="Declared license is outside the reviewed base license scope.",
         )
-    verified = bool(
-        device_verified_license
-        and device_verified_license.casefold() == normalized
-    )
-    active_level = (
-        ManagementLicenseEvidenceLevel.DEVICE_VERIFIED
-        if verified
-        else ManagementLicenseEvidenceLevel.DECLARED_NOT_DEVICE_VERIFIED
-    )
     return ManagementLicenseEvidence(
         family=scope.family,
         input_pid=scope.input_pid,
@@ -359,12 +357,17 @@ def management_license_evidence(
         ordering_sku=scope.ordering_sku,
         ordering_default_license=scope.default_license,
         feature_compatibility=ManagementLicenseEvidenceLevel.DOCUMENTED_COMPATIBILITY,
-        active_license_evidence=active_level,
-        active_license_verified=verified,
+        active_license_evidence=(
+            ManagementLicenseEvidenceLevel.DECLARED_NOT_DEVICE_VERIFIED
+        ),
+        active_license_verified=False,
         source_url=source_url,
         note=(
-            "Release-note/default ordering license is not an Active License; "
-            "the Saved Revision license is declared, not device-verified."
+            "DOCUMENTED_COMPATIBILITY is family-level command documentation "
+            f"({LICENSE_COMPATIBILITY_SCOPE}), not per-PID/per-License "
+            "authorization. The ordering/default license is not an Active "
+            "License; the Saved Revision license is declared, not "
+            "device-verified."
         ),
     )
 
@@ -414,6 +417,7 @@ __all__ = [
     "DECLARED_HARDWARE_PIDS",
     "DECLARED_ORDERING_SKUS",
     "DOMAIN_DNS_SUPPLEMENTS",
+    "LICENSE_COMPATIBILITY_SCOPE",
     "DomainDnsSupplementalEvidence",
     "ManagementLicenseEvidence",
     "ManagementLicenseEvidenceLevel",
