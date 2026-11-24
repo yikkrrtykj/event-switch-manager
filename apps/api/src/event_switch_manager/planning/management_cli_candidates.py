@@ -27,6 +27,7 @@ from .management_command_evidence import (
 from .management_command_evidence_reviews import (
     production_management_registry,
 )
+from .management_domain_scope import is_ordering_sku
 from .management_intent import (
     ManagementIntent,
     management_intent_fingerprint,
@@ -305,6 +306,8 @@ def _topic_blockers(
             reasons.append("management-domain-not-planned")
         elif not _safe_management_domain(intent.management_domain):
             reasons.append("management-domain-invalid")
+        if is_ordering_sku(intent.identity.exact_pid):
+            reasons.append("management-ordering-sku-not-exact-device-pid")
         return tuple(reasons)
     if topic is ManagementCommandTopic.LOCAL_USERNAME:
         reasons.extend(("credential-secret-not-available", "secret-command-not-renderable"))
@@ -528,6 +531,8 @@ def _validation_topic_blockers(
             reasons.append("management-domain-not-planned")
         elif not _safe_management_domain(intent.management_domain):
             reasons.append("management-domain-invalid")
+        if is_ordering_sku(intent.identity.exact_pid):
+            reasons.append("management-ordering-sku-not-exact-device-pid")
         return tuple(reasons)
     if topic is ManagementCommandTopic.LOCAL_USERNAME:
         reasons.extend((

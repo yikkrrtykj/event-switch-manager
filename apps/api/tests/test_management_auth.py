@@ -39,6 +39,7 @@ from event_switch_manager.planning.management_command_evidence_reviews import (
     DOCUMENT_REVIEW_RECORDS,
     R63_REVIEWED_REGISTRY_ID,
     ManagementReviewRecord,
+    build_production_reviewed_registry,
 )
 from event_switch_manager.planning.management_intent import build_management_intent
 from event_switch_manager.planning.plan import EventPlan, canonical_plan, plan_hash
@@ -662,59 +663,41 @@ def _temporary_production_manifest() -> tuple[ManagementReviewRecord, ...]:
     )
 
 
-def test_api_readiness_under_temporary_production_manifest(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+def test_legacy_four_evidence_isolated_fixture_still_validates(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         reviews_module,
         "PRODUCTION_APPROVED_RECORDS",
         _temporary_production_manifest(),
     )
-    event_id = _event(client, "R65 production readiness")
-    plan, core = _plan_with_management(event_id)
-    revision = _save(client, event_id, plan)
-    base = (
-        API + f"/events/{event_id}/plan-revisions/{revision['id']}"
-        f"/assignments/{core['id']}"
+    plan, core = _plan_with_management("00000000-0000-0000-0000-000000000099")
+    registry = build_production_reviewed_registry(test_only=True)
+    assert registry.registry_id == R63_REVIEWED_REGISTRY_ID
+    assert registry.renderable_count == 4
+    revision, _l2, intent = _intent(plan, core["id"], registry)
+    document = build_management_cli_candidates(
+        revision, intent, registry, test_only_registry=True,
     )
-    intent = client.get(base + "/management-intent")
-    assert intent.status_code == 200, intent.text
-    body = intent.json()
-    assert body["evidence_registry_id"] == R63_REVIEWED_REGISTRY_ID
-    assert body["evidence_status"] == "PARTIAL"
-    document = client.get(base + "/management-cli-candidates")
-    assert document.status_code == 200, document.text
-    doc = document.json()
-    report = client.get(base + "/management-cli-validation")
-    assert report.status_code == 200, report.text
-    validation = report.json()
-    assert doc["summary"] == {
+    report = validate_management_candidates(
+        revision, intent, document, registry, test_only_registry=True,
+    )
+    assert document.summary.model_dump() == {
         "total": 9, "candidates": 1, "blocked": 8, "skipped": 0,
     }
-    assert validation["summary"] == {
+    assert report.summary.model_dump() == {
         "total": 9, "passed": 1, "blocked": 8, "failed": 0,
     }
-    assert validation["overall_status"] == "partial"
     domain = next(
-        item for item in doc["candidates"]
-        if item["topic"] == "management-domain-name"
+        item for item in document.candidates
+        if item.topic == "management-domain-name"
     )
-    assert domain["status"] == "candidate"
-    assert domain["candidate_text"] == "ip domain name example.com"
-    assert all(
-        item["candidate_text"] is None for item in doc["candidates"]
-        if item["topic"] != "management-domain-name"
-    )
-    assembly = client.get(base + "/config-assembly-preview")
-    assert assembly.status_code == 200, assembly.text
-    chapter = next(
-        item for item in assembly.json()["sections"]
-        if item["section_id"] == "management-auth-ssh"
-    )
-    assert chapter["required"] is True
-    assert chapter["status"] == "BLOCKED"
-    # Monkeypatch is restored after this test; the real selector remains draft.
-    monkeypatch.setattr(reviews_module, "PRODUCTION_APPROVED_RECORDS", ())
+    assert domain.candidate_text == "ip domain name example.com"
+    # The legacy manifest remains isolated and never becomes the production
+    # selector or a production review-status authority.
     assert reviews_module.production_management_registry().registry_id == (
         "cis-04b-management-command-evidence-draft-v1"
+    )
+    assert reviews_module.review_status("mgmt-9300-ssh-version-v1") == (
+        "DOCUMENT-SYNTAX-REVIEWED"
     )

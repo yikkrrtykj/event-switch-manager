@@ -11,14 +11,24 @@ approved fixed manifests and for isolated tests; it never activates itself.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from dataclasses import dataclass, replace
 
 from ..domain import DeviceFamily
 from .management_command_evidence import (
     MANAGEMENT_EVIDENCE_DRAFT_REGISTRY,
+    MANAGEMENT_LICENSES,
+    MANAGEMENT_RELEASE,
     ManagementCommandTopic,
     ManagementEvidenceRegistry,
     ManagementEvidenceRow,
+)
+from .management_domain_scope import (
+    DECLARED_HARDWARE_PIDS,
+    DOMAIN_DNS_SUPPLEMENTS,
+    ManagementLicenseEvidenceLevel,
 )
 
 R63_STAGED_REGISTRY_ID = (
@@ -37,6 +47,152 @@ R63_REVIEWED_TOPIC_IDS: tuple[str, ...] = (
     "management-domain-name",
     "management-ssh-version",
 )
+
+# R68: a separate Domain-only read-only authorization contract.  This is not
+# the R63/R65 four-Evidence production activation contract.  The formal
+# approval collection is deliberately empty.
+DOMAIN_ONLY_PRODUCTION_REGISTRY_ID = (
+    "cis-04b3-management-command-evidence-domain-only-v1"
+)
+DOMAIN_ONLY_ISOLATED_REGISTRY_ID = (
+    "cis-04b3-management-command-evidence-domain-only-isolated-v1"
+)
+DOMAIN_ONLY_APPROVAL_SCOPE = "PRODUCTION_READONLY_CANDIDATE_DISPLAY"
+DOMAIN_ONLY_REVIEW_SCOPE = "DOMAIN_NAME_COMMAND_ONLY"
+DOMAIN_ONLY_LICENSE_SCOPE: tuple[str, ...] = MANAGEMENT_LICENSES
+DOMAIN_ONLY_REQUIRED_LICENSE_LEVEL = (
+    ManagementLicenseEvidenceLevel.DECLARED_NOT_DEVICE_VERIFIED.value
+)
+DOMAIN_ONLY_EVIDENCE_IDS: tuple[str, ...] = (
+    "mgmt-9300-domain-name-v1",
+    "mgmt-9200-domain-name-v1",
+)
+DOMAIN_ONLY_APPROVAL_RECORD_IDS: tuple[str, ...] = (
+    "r68-domain-readonly-9300-domain-name",
+    "r68-domain-readonly-9200-domain-name",
+)
+DOMAIN_ONLY_EXPECTED_PIDS: dict[DeviceFamily, tuple[str, ...]] = {
+    DeviceFamily.CATALYST_9300: DECLARED_HARDWARE_PIDS[
+        DeviceFamily.CATALYST_9300
+    ],
+    DeviceFamily.CATALYST_9200: DECLARED_HARDWARE_PIDS[
+        DeviceFamily.CATALYST_9200
+    ],
+}
+DOMAIN_ONLY_TEST_REVIEWER = "TEST-ONLY-DOMAIN-ONLY-AUTHORIZATION"
+DOMAIN_ONLY_TEST_DATE = "2026-11-24"
+DOMAIN_ONLY_TEST_FINDINGS: tuple[str, ...] = (
+    "isolated domain-only readiness fixture",
+    "domain-name command only; no SSH or deployment authorization",
+    "hardware and active license are not device-verified",
+)
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+@dataclass(frozen=True, slots=True)
+class DomainReadonlyApprovalRecord:
+    """Server-fixed domain-only approval provenance.
+
+    A structurally complete record is not enough: it must be one of exactly
+    two server-fixed manifest entries, bind the exact Evidence digest/source,
+    bind the supplemental DNS evidence, and bind the exact hardware PID and
+    declared-license scope.  The manifest is never populated by a request.
+    """
+
+    record_id: str
+    evidence_id: str
+    content_digest: str
+    family: DeviceFamily
+    release: str
+    exact_device_pids: tuple[str, ...]
+    declared_license_scope: tuple[str, ...]
+    license_evidence_level: str
+    reviewer: str
+    reviewed_at: str
+    review_scope: str
+    findings: tuple[str, ...]
+    evidence_source_url: str
+    supplemental_evidence_digest: str
+    approval_source_url: str
+    approval_scope: str
+    production_authorized: bool
+    approval_payload_digest: str = ""
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "record_id": self.record_id,
+            "evidence_id": self.evidence_id,
+            "content_digest": self.content_digest,
+            "family": self.family.value,
+            "release": self.release,
+            "exact_device_pids": list(self.exact_device_pids),
+            "declared_license_scope": list(self.declared_license_scope),
+            "license_evidence_level": self.license_evidence_level,
+            "reviewer": self.reviewer,
+            "reviewed_at": self.reviewed_at,
+            "review_scope": self.review_scope,
+            "findings": list(self.findings),
+            "evidence_source_url": self.evidence_source_url,
+            "supplemental_evidence_digest": self.supplemental_evidence_digest,
+            "approval_source_url": self.approval_source_url,
+            "approval_scope": self.approval_scope,
+            "production_authorized": self.production_authorized,
+        }
+
+    def payload_digest(self) -> str:
+        canonical = json.dumps(
+            self.payload(), ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def with_payload_digest(self) -> DomainReadonlyApprovalRecord:
+        return replace(
+            self,
+            approval_payload_digest=self.payload_digest(),
+        )
+
+    @property
+    def structurally_complete(self) -> bool:
+        return bool(
+            self.record_id
+            and self.evidence_id
+            and len(self.content_digest) == 64
+            and self.release == MANAGEMENT_RELEASE
+            and self.exact_device_pids
+            and self.declared_license_scope
+            and self.license_evidence_level == DOMAIN_ONLY_REQUIRED_LICENSE_LEVEL
+            and self.reviewer
+            and _DATE_RE.fullmatch(self.reviewed_at)
+            and self.review_scope == DOMAIN_ONLY_REVIEW_SCOPE
+            and self.findings
+            and self.evidence_source_url.startswith("https://www.cisco.com/")
+            and len(self.supplemental_evidence_digest) == 64
+            and self.approval_source_url.startswith(
+                "https://github.com/yikkrrtykj/event-switch-manager/",
+            )
+            and self.approval_scope == DOMAIN_ONLY_APPROVAL_SCOPE
+            and self.production_authorized is True
+            and len(self.approval_payload_digest) == 64
+            and self.approval_payload_digest == self.payload_digest()
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DomainApprovalProvenance:
+    """Server-fixed reviewer/date/source/findings expected for one approval."""
+
+    reviewer: str
+    reviewed_at: str
+    approval_source_url: str
+    findings: tuple[str, ...]
+    review_scope: str = DOMAIN_ONLY_REVIEW_SCOPE
+
+
+# Deliberately empty.  R68 does not grant production authorization.
+DOMAIN_APPROVED_RECORDS: tuple[DomainReadonlyApprovalRecord, ...] = ()
+DOMAIN_ONLY_APPROVAL_PROVENANCE: dict[str, DomainApprovalProvenance] = {}
+
 
 URL_9300_CONFIG_SSH = (
     "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
@@ -370,9 +526,139 @@ def validate_document_review_record_set(
 
 validate_document_review_record_set()
 
+_DOMAIN_ROW_BY_ID = {
+    row.evidence_id: row
+    for row in R63_CORRECTED_ROWS
+    if row.evidence_id in DOMAIN_ONLY_EVIDENCE_IDS
+}
+_DOMAIN_RECORD_ID_BY_FAMILY = {
+    DeviceFamily.CATALYST_9300: "r68-domain-readonly-9300-domain-name",
+    DeviceFamily.CATALYST_9200: "r68-domain-readonly-9200-domain-name",
+}
+
+
+def _isolated_domain_only_registry() -> ManagementEvidenceRegistry:
+    reviewed = {
+        evidence_id: _DOMAIN_ROW_BY_ID[evidence_id].with_review(
+            reviewer=DOMAIN_ONLY_TEST_REVIEWER,
+            reviewed_at=DOMAIN_ONLY_TEST_DATE,
+            findings=DOMAIN_ONLY_TEST_FINDINGS,
+        )
+        for evidence_id in DOMAIN_ONLY_EVIDENCE_IDS
+    }
+    rows = tuple(
+        reviewed.get(row.evidence_id, row) for row in R63_STAGED_ROWS
+    )
+    return ManagementEvidenceRegistry(
+        rows,
+        registry_id=DOMAIN_ONLY_ISOLATED_REGISTRY_ID,
+        production=False,
+    )
+
+
+DOMAIN_ONLY_ISOLATED_REGISTRY = _isolated_domain_only_registry()
+DOMAIN_ONLY_ISOLATED_FINGERPRINT = (
+    DOMAIN_ONLY_ISOLATED_REGISTRY.fingerprint
+)
+
+
+def test_only_domain_only_registry() -> ManagementEvidenceRegistry:
+    """Isolated two-reviewed Domain-only registry; never selected by production."""
+    return DOMAIN_ONLY_ISOLATED_REGISTRY
+
+
+def domain_approval_record_valid(
+    record: DomainReadonlyApprovalRecord,
+) -> bool:
+    """Validate one fixed Domain-only approval record without self-authority."""
+    row = _DOMAIN_ROW_BY_ID.get(record.evidence_id)
+    if row is None:
+        return False
+    expected_record_id = _DOMAIN_RECORD_ID_BY_FAMILY.get(row.family)
+    provenance = DOMAIN_ONLY_APPROVAL_PROVENANCE.get(record.record_id or "")
+    return bool(
+        record.structurally_complete
+        and provenance is not None
+        and record.record_id == expected_record_id
+        and record.family is row.family
+        and record.content_digest == R63_STAGED_DIGESTS[record.evidence_id]
+        and record.content_digest == row.content_digest()
+        and record.evidence_source_url == row.source_url
+        and record.reviewer == provenance.reviewer
+        and record.reviewed_at == provenance.reviewed_at
+        and record.approval_source_url == provenance.approval_source_url
+        and record.findings == provenance.findings
+        and record.review_scope == provenance.review_scope
+        and record.exact_device_pids == DOMAIN_ONLY_EXPECTED_PIDS[row.family]
+        and record.declared_license_scope == DOMAIN_ONLY_LICENSE_SCOPE
+        and record.license_evidence_level == DOMAIN_ONLY_REQUIRED_LICENSE_LEVEL
+        and record.supplemental_evidence_digest
+        == DOMAIN_DNS_SUPPLEMENTS[row.family].content_digest()
+    )
+
+
+def _validate_domain_manifest(
+    records: tuple[DomainReadonlyApprovalRecord, ...],
+) -> tuple[DomainReadonlyApprovalRecord, ...]:
+    if not records:
+        raise ManagementReviewError(
+            "management-domain-production-authorization-pending",
+        )
+    if len(records) != 2:
+        raise ManagementReviewError(
+            "management-domain-production-authorization-incomplete",
+        )
+    evidence_ids = [record.evidence_id for record in records]
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise ManagementReviewError("management-domain-evidence-duplicate")
+    if set(evidence_ids) != set(DOMAIN_ONLY_EVIDENCE_IDS):
+        raise ManagementReviewError("management-domain-evidence-unknown")
+    record_ids = [record.record_id for record in records]
+    if any(not record_id for record_id in record_ids):
+        raise ManagementReviewError("management-domain-record-id-invalid")
+    if len(record_ids) != len(set(record_ids)):
+        raise ManagementReviewError("management-domain-record-id-duplicate")
+    if set(record_ids) != set(DOMAIN_ONLY_APPROVAL_RECORD_IDS):
+        raise ManagementReviewError("management-domain-record-unknown")
+    if not all(domain_approval_record_valid(record) for record in records):
+        raise ManagementReviewError("management-domain-approval-invalid")
+    return records
+
+
+def _build_domain_only_registry(
+    records: tuple[DomainReadonlyApprovalRecord, ...],
+    *,
+    registry_id: str,
+) -> ManagementEvidenceRegistry:
+    manifest = _validate_domain_manifest(records)
+    by_id = {
+        record.evidence_id: record for record in manifest
+    }
+    reviewed: dict[str, ManagementEvidenceRow] = {}
+    for evidence_id in DOMAIN_ONLY_EVIDENCE_IDS:
+        record = by_id[evidence_id]
+        reviewed[evidence_id] = _DOMAIN_ROW_BY_ID[evidence_id].with_review(
+            reviewer=record.reviewer,
+            reviewed_at=record.reviewed_at,
+            findings=record.findings,
+        )
+    rows = tuple(
+        reviewed.get(row.evidence_id, row) for row in R63_STAGED_ROWS
+    )
+    return ManagementEvidenceRegistry(
+        rows,
+        registry_id=registry_id,
+        production=False,
+    )
+
 
 def production_review_record_valid(record: ManagementReviewRecord) -> bool:
-    """Declared production fields only; manifest membership is authority."""
+    """Legacy R63/R65 four-Evidence structural validator only.
+
+    R68 production authorization never uses this broad
+    ``PRODUCTION_ACTIVATION`` contract.  It remains solely to keep the old
+    four-Evidence isolated regression fixtures testable.
+    """
     row = _CORRECTED_BY_ID.get(record.evidence_id)
     return bool(
         record.structural_complete
@@ -410,20 +696,23 @@ def _validate_production_manifest(
 
 
 def review_status(evidence_id: str) -> str:
-    """Production REVIEWED requires the entire server-fixed Manifest to pass."""
-    if PRODUCTION_APPROVED_RECORDS:
+    """REVIEWED requires a complete fixed manifest, never one self-declaration."""
+    if DOMAIN_APPROVED_RECORDS:
         try:
-            manifest = _validate_production_manifest(
-                PRODUCTION_APPROVED_RECORDS,
+            domain_manifest = _validate_domain_manifest(
+                DOMAIN_APPROVED_RECORDS,
             )
         except ManagementReviewError:
-            manifest = ()
-        for record in manifest:
-            if record.evidence_id == evidence_id:
+            domain_manifest = ()
+        for domain_record in domain_manifest:
+            if domain_record.evidence_id == evidence_id:
                 return "REVIEWED"
-    for record in DOCUMENT_REVIEW_RECORDS:
-        if (record.evidence_id == evidence_id
-                and document_review_record_valid(record)):
+    # Legacy R63/R65 PRODUCTION_APPROVED_RECORDS is intentionally never
+    # consulted by the production review status path.  It remains only for
+    # explicitly isolated R65 fixture builders.
+    for document_record in DOCUMENT_REVIEW_RECORDS:
+        if (document_record.evidence_id == evidence_id
+                and document_review_record_valid(document_record)):
             return "DOCUMENT-SYNTAX-REVIEWED"
     return "PENDING"
 
@@ -480,8 +769,18 @@ def build_reviewed_registry(
     )
 
 
-def build_production_reviewed_registry() -> ManagementEvidenceRegistry:
-    """Build only from the server-fixed, exact four-record production manifest."""
+def build_production_reviewed_registry(
+    *, test_only: bool = False,
+) -> ManagementEvidenceRegistry:
+    """Legacy R63/R65 four-Evidence fixture builder; not R68 authorization.
+
+    The legacy builder is explicitly quarantined behind ``test_only=True`` and
+    is not a production selector or production review authority.
+    """
+    if not test_only:
+        raise ManagementReviewError(
+            "management-legacy-production-authorization-removed",
+        )
     manifest = _validate_production_manifest(PRODUCTION_APPROVED_RECORDS)
     by_id = {row.evidence_id: row for row in R63_CORRECTED_ROWS}
     reviewed: list[ManagementEvidenceRow] = []
@@ -501,10 +800,24 @@ def build_production_reviewed_registry() -> ManagementEvidenceRegistry:
 
 
 def production_management_registry() -> ManagementEvidenceRegistry:
-    """Return the production registry; no manifest means no reviewed activation."""
-    if not PRODUCTION_APPROVED_RECORDS:
-        return MANAGEMENT_EVIDENCE_DRAFT_REGISTRY
-    return build_production_reviewed_registry()
+    """Return Draft unless a complete fixed authorization manifest is present.
+
+    The Domain-only R68 contract takes precedence over the legacy R63/R65
+    four-Evidence manifest.  An invalid Domain-only manifest fails closed to
+    Draft; it never falls through to the legacy contract and never inherits
+    SSH Version review authorization.
+    """
+    if DOMAIN_APPROVED_RECORDS:
+        try:
+            return _build_domain_only_registry(
+                DOMAIN_APPROVED_RECORDS,
+                registry_id=DOMAIN_ONLY_PRODUCTION_REGISTRY_ID,
+            )
+        except ManagementReviewError:
+            return MANAGEMENT_EVIDENCE_DRAFT_REGISTRY
+    # No Domain-only authorization means Draft.  The legacy four-Evidence
+    # manifest is never a production fallback, even when structurally valid.
+    return MANAGEMENT_EVIDENCE_DRAFT_REGISTRY
 
 
 def test_only_reviewed_registry() -> ManagementEvidenceRegistry:
@@ -528,6 +841,24 @@ def test_only_reviewed_registry() -> ManagementEvidenceRegistry:
 
 __all__ = [
     "DOCUMENT_REVIEW_RECORDS",
+    "DOMAIN_APPROVED_RECORDS",
+    "DOMAIN_ONLY_APPROVAL_PROVENANCE",
+    "DOMAIN_ONLY_APPROVAL_RECORD_IDS",
+    "DOMAIN_ONLY_APPROVAL_SCOPE",
+    "DOMAIN_ONLY_EVIDENCE_IDS",
+    "DOMAIN_ONLY_EXPECTED_PIDS",
+    "DOMAIN_ONLY_ISOLATED_FINGERPRINT",
+    "DOMAIN_ONLY_ISOLATED_REGISTRY",
+    "DOMAIN_ONLY_ISOLATED_REGISTRY_ID",
+    "DOMAIN_ONLY_LICENSE_SCOPE",
+    "DOMAIN_ONLY_PRODUCTION_REGISTRY_ID",
+    "DOMAIN_ONLY_REQUIRED_LICENSE_LEVEL",
+    "DOMAIN_ONLY_REVIEW_SCOPE",
+    "DOMAIN_ONLY_TEST_DATE",
+    "DOMAIN_ONLY_TEST_FINDINGS",
+    "DOMAIN_ONLY_TEST_REVIEWER",
+    "DomainApprovalProvenance",
+    "DomainReadonlyApprovalRecord",
     "MANAGEMENT_APPROVED_REVIEWS",
     "ManagementReviewAttestation",
     "ManagementReviewError",
@@ -550,9 +881,11 @@ __all__ = [
     "build_reviewed_registry",
     "document_review_record_id",
     "document_review_record_valid",
+    "domain_approval_record_valid",
     "production_management_registry",
     "production_review_record_valid",
     "review_status",
+    "test_only_domain_only_registry",
     "test_only_reviewed_registry",
     "validate_document_review_record_set",
     "URL_9200_CONFIG_SSH",

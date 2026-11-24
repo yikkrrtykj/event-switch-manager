@@ -1,4 +1,4 @@
-"""R63 staged reviewed management Evidence tests.
+﻿"""R63 staged reviewed management Evidence tests.
 
 These tests prove the isolated reviewed path (1 PASS / 8 BLOCKED) and the fixed
 review binding without activating any production review.  The production
@@ -381,7 +381,7 @@ def test_ai_document_review_records_are_document_syntax_only() -> None:
         assert record.findings
     assert PRODUCTION_APPROVED_RECORDS == ()
     with pytest.raises(ManagementReviewError) as error:
-        build_production_reviewed_registry()
+        build_production_reviewed_registry(test_only=True)
     assert error.value.reason_code == (
         "management-review-production-authorization-pending"
     )
@@ -600,7 +600,7 @@ def test_fixed_document_record_set_rejects_duplicate_missing_unknown() -> None:
 def test_empty_production_manifest_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(reviews_module, "PRODUCTION_APPROVED_RECORDS", ())
     with pytest.raises(ManagementReviewError) as error:
-        build_production_reviewed_registry()
+        build_production_reviewed_registry(test_only=True)
     assert error.value.reason_code == (
         "management-review-production-authorization-pending"
     )
@@ -614,7 +614,7 @@ def test_three_record_production_manifest_is_rejected(
         reviews_module, "PRODUCTION_APPROVED_RECORDS", _production_records()[:3],
     )
     with pytest.raises(ManagementReviewError) as error:
-        build_production_reviewed_registry()
+        build_production_reviewed_registry(test_only=True)
     assert error.value.reason_code == "management-review-incomplete-manifest"
 
 
@@ -629,7 +629,7 @@ def test_duplicate_production_evidence_is_rejected(
         (duplicate, records[0], records[1], records[2]),
     )
     with pytest.raises(ManagementReviewError) as error:
-        build_production_reviewed_registry()
+        build_production_reviewed_registry(test_only=True)
     assert error.value.reason_code == "management-review-evidence-duplicate"
 
 
@@ -639,7 +639,7 @@ def test_duplicate_production_record_id_is_rejected(
     records = tuple(replace(record, record_id="same-record") for record in _production_records())
     monkeypatch.setattr(reviews_module, "PRODUCTION_APPROVED_RECORDS", records)
     with pytest.raises(ManagementReviewError) as error:
-        build_production_reviewed_registry()
+        build_production_reviewed_registry(test_only=True)
     assert error.value.reason_code == "management-review-record-id-duplicate"
 
 
@@ -652,7 +652,7 @@ def test_blank_production_record_id_is_rejected(
         reviews_module, "PRODUCTION_APPROVED_RECORDS", tuple(records),
     )
     with pytest.raises(ManagementReviewError) as error:
-        build_production_reviewed_registry()
+        build_production_reviewed_registry(test_only=True)
     assert error.value.reason_code == "management-review-record-id-invalid"
 
 
@@ -669,7 +669,7 @@ def test_unknown_production_evidence_is_rejected(
         reviews_module, "PRODUCTION_APPROVED_RECORDS", tuple(records),
     )
     with pytest.raises(ManagementReviewError) as error:
-        build_production_reviewed_registry()
+        build_production_reviewed_registry(test_only=True)
     assert error.value.reason_code == "management-review-evidence-unknown"
 
 
@@ -680,31 +680,40 @@ def test_exact_unique_production_manifest_passes_structure_only(
     monkeypatch.setattr(
         reviews_module, "PRODUCTION_APPROVED_RECORDS", records,
     )
-    registry = build_production_reviewed_registry()
+    registry = build_production_reviewed_registry(test_only=True)
     # This is a temporary test double only; the returned object is not
     # production-enabled, and monkeypatch restores the empty real manifest.
     assert registry.production is False
     assert registry.renderable_count == 4
     assert reviews_module.PRODUCTION_APPROVED_RECORDS == records
-def test_review_status_requires_complete_production_manifest(
+def test_legacy_four_evidence_manifest_never_grants_production_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     records = _production_records()
     evidence_id = records[0].evidence_id
-    for invalid_manifest in (
+    for manifest in (
         records[:1],
         records[:3],
         (records[0], replace(records[0], record_id="other"), *records[1:3]),
+        records,
     ):
         monkeypatch.setattr(
-            reviews_module, "PRODUCTION_APPROVED_RECORDS", invalid_manifest,
+            reviews_module, "PRODUCTION_APPROVED_RECORDS", manifest,
         )
         assert review_status(evidence_id) != "REVIEWED"
         assert review_status(evidence_id) == "DOCUMENT-SYNTAX-REVIEWED"
+        assert all(
+            review_status(record.evidence_id) != "REVIEWED"
+            for record in records
+        )
+        assert production_management_registry() is (
+            MANAGEMENT_EVIDENCE_DRAFT_REGISTRY
+        )
+    # The old four-Evidence fixture remains independently usable for isolated
+    # software regression, but it is not a production selector fallback.
     monkeypatch.setattr(
         reviews_module, "PRODUCTION_APPROVED_RECORDS", records,
     )
-    assert all(review_status(record.evidence_id) == "REVIEWED" for record in records)
-    # The test double is temporary; the real production manifest remains empty.
-    monkeypatch.setattr(reviews_module, "PRODUCTION_APPROVED_RECORDS", ())
-    assert review_status(evidence_id) == "DOCUMENT-SYNTAX-REVIEWED"
+    isolated = build_production_reviewed_registry(test_only=True)
+    assert isolated.renderable_count == 4
+    assert production_management_registry() is MANAGEMENT_EVIDENCE_DRAFT_REGISTRY

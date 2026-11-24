@@ -1,4 +1,4 @@
-"""R65A real backend serialized Management Reviewed fixtures."""
+﻿"""R65A real backend serialized Management Reviewed fixtures."""
 
 from __future__ import annotations
 
@@ -138,7 +138,7 @@ def test_readiness_fixture_has_real_reviewed_contract(
         "PRODUCTION_APPROVED_RECORDS",
         _production_manifest(),
     )
-    registry = build_production_reviewed_registry()
+    registry = build_production_reviewed_registry(test_only=True)
     assert contract["id"] == registry.registry_id
     assert contract["fingerprint"] == registry.fingerprint
     assert "password" not in json.dumps(payload).casefold()
