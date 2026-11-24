@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  canDownloadReviewBundle,
   fetchReviewBundle,
   filenameFromDisposition,
+  isReviewBundleAssignment,
   reviewBundleFilename,
   reviewBundleUrl,
   safeFilenamePart,
@@ -9,6 +11,40 @@ import {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe('Cisco review bundle eligibility', () => {
+  const ready = {
+    hasRevision: true,
+    ready: true,
+    loading: false,
+    previewBroken: false,
+  }
+
+  it('allows only Core Catalyst 9300/9200 assignments', () => {
+    expect(isReviewBundleAssignment({ isCore: true, family: 'catalyst-9300' })).toBe(true)
+    expect(isReviewBundleAssignment({ isCore: true, family: 'catalyst-9200' })).toBe(true)
+    expect(isReviewBundleAssignment({ isCore: true, family: 'catalyst-3850' })).toBe(false)
+    expect(isReviewBundleAssignment({ isCore: true, family: 'catalyst-2960x' })).toBe(false)
+    expect(isReviewBundleAssignment({ isCore: true, family: 'catalyst-c1000' })).toBe(false)
+    expect(isReviewBundleAssignment({ isCore: false, family: 'catalyst-9300' })).toBe(false)
+    expect(isReviewBundleAssignment(undefined)).toBe(false)
+  })
+
+  it('requires a saved revision, ready previews and no integrity failure', () => {
+    const assignment = { isCore: true, family: 'catalyst-9300' }
+    expect(canDownloadReviewBundle(assignment, ready)).toBe(true)
+    expect(canDownloadReviewBundle(assignment, { ...ready, hasRevision: false })).toBe(false)
+    expect(canDownloadReviewBundle(assignment, { ...ready, ready: false })).toBe(false)
+    expect(canDownloadReviewBundle(assignment, { ...ready, loading: true })).toBe(false)
+    expect(canDownloadReviewBundle(assignment, { ...ready, previewBroken: true })).toBe(false)
+    expect(canDownloadReviewBundle(
+      { isCore: true, family: 'catalyst-3850' }, ready,
+    )).toBe(false)
+    expect(canDownloadReviewBundle(
+      { isCore: false, family: 'catalyst-9300' }, ready,
+    )).toBe(false)
+  })
 })
 
 describe('Cisco review bundle download', () => {

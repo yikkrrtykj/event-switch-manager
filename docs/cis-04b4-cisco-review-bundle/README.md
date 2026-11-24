@@ -1,4 +1,4 @@
-# CIS-04B-4 — Cisco Read-only Review Bundle Export
+﻿# CIS-04B-4 — Cisco Read-only Review Bundle Export
 
 Status: **read-only review artifact only; not a complete configuration or deployment artifact**
 
@@ -114,6 +114,36 @@ The existing `#cisco-preview` page has one `Download review report` button.
 - English and Simplified Chinese messages are provided.
 - No Secret, Credential Value or Private Key is sent to the browser.
 
+## R71A content revalidation and GUI eligibility closure
+
+The bundle builder now recomputes current object fingerprints immediately before
+any command text is emitted:
+
+- L2: `recompute_candidate_fingerprint()` and
+  `recompute_render_fingerprint()` for every current Candidate and Document;
+  every report Candidate fingerprint and report render binding is checked.
+- L3: `independent_candidate_fingerprint()`,
+  `independent_render_fingerprint()` and
+  `independent_report_fingerprint()` for the current objects.
+- Management: the existing canonical candidate/document/report fingerprint
+  helpers are recomputed for the current objects.
+
+It does not rely only on pre-existing `integrity=True` fields.  A PASS command
+text changed while its stored fingerprint is left stale is rejected; so are
+stale document/report fingerprints, duplicate/missing Candidate IDs and
+Report/Document/Assembly binding mismatches.
+
+The GUI download button now requires:
+
+- selected Saved Revision and valid Assignment;
+- `role = core`;
+- `family in {catalyst-9300, catalyst-9200}`;
+- all relevant previews loaded, none in integrity/error state;
+- Abort handling and state clearing on Revision/Assignment switch.
+
+A trustworthy partial report with business BLOCKED candidates remains
+exportable.  C3850/C2960X/C1000 Core, C9300 Access, loading and integrity-error
+states are disabled.  Backend Family/Role rejection remains authoritative.
 ## Verification
 
 - Backend: C9300/C9200 bundle, partial/blocked candidates, unsupported family,

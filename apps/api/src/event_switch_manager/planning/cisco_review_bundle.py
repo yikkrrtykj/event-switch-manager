@@ -28,6 +28,12 @@ from .layer2_cli_validation import (
 from .layer2_cli_validation import (
     ValidationReport as L2ValidationReport,
 )
+from .layer2_cli_validation import (
+    recompute_candidate_fingerprint as recompute_l2_candidate_fingerprint,
+)
+from .layer2_cli_validation import (
+    recompute_render_fingerprint as recompute_l2_render_fingerprint,
+)
 from .layer3_cli_candidates import (
     Candidate as L3Candidate,
 )
@@ -41,6 +47,12 @@ from .layer3_cli_validation import (
     L3ValidationReport,
 )
 from .layer3_cli_validation import (
+    independent_candidate_fingerprint as independent_l3_candidate_fingerprint,
+)
+from .layer3_cli_validation import (
+    independent_render_fingerprint as independent_l3_render_fingerprint,
+)
+from .layer3_cli_validation import (
     independent_report_fingerprint as independent_l3_report_fingerprint,
 )
 from .management_cli_candidates import (
@@ -48,6 +60,15 @@ from .management_cli_candidates import (
     ManagementCandidateDocument,
     ManagementCandidateValidation,
     ManagementValidationReport,
+)
+from .management_cli_candidates import (
+    _candidate_fingerprint as _management_candidate_fingerprint,
+)
+from .management_cli_candidates import (
+    _document_fingerprint as _management_document_fingerprint,
+)
+from .management_cli_candidates import (
+    _report_fingerprint as _management_report_fingerprint,
 )
 from .plan import PlanRevision
 from .types import Record
@@ -260,6 +281,99 @@ def _reasons(
     return tuple(dict.fromkeys(value for value in values if value))
 
 
+def _verify_l2_current_content(
+    document: L2CliCandidateDocument,
+    report: L2ValidationReport,
+) -> None:
+    """Recompute current L2 document/candidate hashes, not just trust booleans."""
+    actual_document = recompute_l2_render_fingerprint(document)
+    if document.render_fingerprint != actual_document:
+        raise ReviewBundleError("review-bundle-l2-document-fingerprint-mismatch")
+    if report.source.render_fingerprint != actual_document:
+        raise ReviewBundleError("review-bundle-l2-report-document-binding-mismatch")
+    docs = [item.candidate_id for item in document.candidates]
+    reports = [item.candidate_id for item in report.candidates]
+    if len(docs) != len(set(docs)) or len(reports) != len(set(reports)):
+        raise ReviewBundleError("review-bundle-l2-candidate-id-duplicate")
+    if set(docs) != set(reports):
+        raise ReviewBundleError("review-bundle-l2-candidate-set-mismatch")
+    for candidate in document.candidates:
+        actual = recompute_l2_candidate_fingerprint(candidate)
+        if candidate.candidate_fingerprint != actual:
+            raise ReviewBundleError(
+                "review-bundle-l2-candidate-fingerprint-mismatch",
+            )
+        validation = next(
+            item for item in report.candidates
+            if item.candidate_id == candidate.candidate_id
+        )
+        if (
+            validation.candidate_fingerprint != actual
+            or validation.candidate_fingerprint_recomputed != actual
+            or not validation.candidate_fingerprint_match
+        ):
+            raise ReviewBundleError(
+                "review-bundle-l2-report-candidate-binding-mismatch",
+            )
+
+
+def _verify_l3_current_content(
+    document: L3CandidateDocument,
+    report: L3ValidationReport,
+) -> None:
+    """Recompute current L3 document/candidate/report hashes."""
+    actual_document = independent_l3_render_fingerprint(document)
+    if document.l3_render_fingerprint != actual_document:
+        raise ReviewBundleError("review-bundle-l3-document-fingerprint-mismatch")
+    if report.source.l3_render_fingerprint != actual_document:
+        raise ReviewBundleError("review-bundle-l3-report-document-binding-mismatch")
+    actual_report = independent_l3_report_fingerprint(report)
+    if report.report_fingerprint != actual_report:
+        raise ReviewBundleError("review-bundle-l3-report-fingerprint-mismatch")
+    docs = [item.candidate_id for item in document.candidates]
+    reports = [item.candidate_id for item in report.candidates]
+    if len(docs) != len(set(docs)) or len(reports) != len(set(reports)):
+        raise ReviewBundleError("review-bundle-l3-candidate-id-duplicate")
+    if set(docs) != set(reports):
+        raise ReviewBundleError("review-bundle-l3-candidate-set-mismatch")
+    for candidate in document.candidates:
+        if candidate.candidate_fingerprint != (
+            independent_l3_candidate_fingerprint(candidate)
+        ):
+            raise ReviewBundleError(
+                "review-bundle-l3-candidate-fingerprint-mismatch",
+            )
+
+
+def _verify_management_current_content(
+    document: ManagementCandidateDocument,
+    report: ManagementValidationReport,
+) -> None:
+    """Recompute current Management document/candidate/report hashes."""
+    actual_document = _management_document_fingerprint(document)
+    if document.render_fingerprint != actual_document:
+        raise ReviewBundleError(
+            "review-bundle-management-document-fingerprint-mismatch",
+        )
+    if report.report_fingerprint != _management_report_fingerprint(report):
+        raise ReviewBundleError(
+            "review-bundle-management-report-fingerprint-mismatch",
+        )
+    docs = [item.candidate_id for item in document.candidates]
+    reports = [item.candidate_id for item in report.candidates]
+    if len(docs) != len(set(docs)) or len(reports) != len(set(reports)):
+        raise ReviewBundleError("review-bundle-management-candidate-id-duplicate")
+    if set(docs) != set(reports):
+        raise ReviewBundleError("review-bundle-management-candidate-set-mismatch")
+    for candidate in document.candidates:
+        if candidate.candidate_fingerprint != (
+            _management_candidate_fingerprint(candidate)
+        ):
+            raise ReviewBundleError(
+                "review-bundle-management-candidate-fingerprint-mismatch",
+            )
+
+
 def _l2_candidate_reasons(
     candidate: L2Candidate, report: L2CandidateValidation,
 ) -> tuple[str, ...]:
@@ -454,15 +568,6 @@ def _management_candidates(
     return tuple(result)
 
 
-def _management_report_fingerprint(report: ManagementValidationReport) -> str:
-    payload = report.model_dump(mode="json")
-    payload.pop("report_fingerprint", None)
-    canonical = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
 def _subsystem(
     *,
     layer: Literal["l2", "l3", "management"],
@@ -600,6 +705,13 @@ def build_cisco_review_bundle(
         != l3_document.source.command_evidence_registry_id
     ):
         raise ReviewBundleError("review-bundle-assembly-binding-mismatch")
+
+    # Recompute current object content before emitting any command text.  A
+    # stale candidate/document/report fingerprint must never survive a text
+    # change merely because an old integrity flag said True.
+    _verify_l2_current_content(l2_document, l2_report)
+    _verify_l3_current_content(l3_document, l3_report)
+    _verify_management_current_content(management_document, management_report)
 
     l2_candidates = _l2_candidates(l2_document, l2_report)
     l3_candidates = _l3_candidates(l3_document, l3_report)

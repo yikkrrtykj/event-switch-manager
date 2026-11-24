@@ -3,6 +3,38 @@ import { ApiError } from '../api'
 export const REVIEW_BUNDLE_CONTRACT = 'cis-04b-cisco-config-review-bundle-v1'
 export const REVIEW_BUNDLE_PATH = '/cisco-review-bundle'
 
+export interface ReviewBundleAssignment {
+  isCore: boolean
+  family: string
+}
+
+export interface ReviewBundleUiState {
+  hasRevision: boolean
+  ready: boolean
+  loading: boolean
+  previewBroken: boolean
+}
+
+export function isReviewBundleAssignment(
+  assignment: ReviewBundleAssignment | undefined,
+): boolean {
+  return Boolean(
+    assignment?.isCore &&
+    (assignment.family === 'catalyst-9300' ||
+      assignment.family === 'catalyst-9200'),
+  )
+}
+
+export function canDownloadReviewBundle(
+  assignment: ReviewBundleAssignment | undefined,
+  state: ReviewBundleUiState,
+): boolean {
+  return Boolean(
+    state.hasRevision && state.ready && !state.loading &&
+    !state.previewBroken && isReviewBundleAssignment(assignment),
+  )
+}
+
 export interface ReviewBundleDownload {
   blob: Blob
   filename: string

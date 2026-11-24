@@ -1,4 +1,4 @@
-"""R71 Cisco read-only review bundle tests."""
+﻿"""R71 Cisco read-only review bundle tests."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from event_switch_manager.planning.layer2_cli_candidates import (
 from event_switch_manager.planning.layer2_cli_validation import (
     ValidationReport as L2ValidationReport,
 )
+from event_switch_manager.planning.layer2_intent import build_layer2_intent
 from event_switch_manager.planning.layer3_cli_candidates import (
     L3CandidateDocument,
 )
@@ -36,6 +37,14 @@ from event_switch_manager.planning.layer3_cli_validation import L3ValidationRepo
 from event_switch_manager.planning.management_cli_candidates import (
     ManagementCandidateDocument,
     ManagementValidationReport,
+    build_management_cli_candidates,
+    validate_management_candidates,
+)
+from event_switch_manager.planning.management_command_evidence_reviews import (
+    test_only_domain_only_registry as make_isolated_management_registry,
+)
+from event_switch_manager.planning.management_intent import (
+    build_management_intent,
 )
 from event_switch_manager.planning.plan import PlanRevision
 from event_switch_manager.settings import Settings
@@ -325,6 +334,143 @@ def _build_from_objects(objects: dict[str, Any], event_id: str, core: dict[str, 
     )
 
 
+def _isolated_management_objects(
+    objects: dict[str, Any], core: dict[str, Any],
+) -> tuple[ManagementCandidateDocument, ManagementValidationReport]:
+    revision = objects["revision"]
+    registry = make_isolated_management_registry()
+    l2_intent = build_layer2_intent(revision, None)
+    intent = build_management_intent(
+        revision, l2_intent, UUID(core["id"]), evidence_registry=registry,
+    )
+    document = build_management_cli_candidates(
+        revision, intent, registry, test_only_registry=True,
+    )
+    report = validate_management_candidates(
+        revision, intent, document, registry, test_only_registry=True,
+    )
+    return document, report
+
+
+def test_pass_candidate_text_tampering_is_rejected_for_all_layers(
+    client: TestClient,
+) -> None:
+    event_id = _event(client, "R71 pass text tamper")
+    plan, core = _plan(event_id)
+    revision = _save(client, event_id, plan)
+    objects = _server_objects(client, event_id, plan, core, revision)
+
+    l2_pass = next(
+        candidate for candidate in objects["l2_document"].candidates
+        if candidate.status.value == "candidate" and candidate.candidate_text
+    )
+    l2_objects = dict(objects)
+    l2_objects["l2_document"] = objects["l2_document"].model_copy(update={
+        "candidates": tuple(
+            candidate.model_copy(update={
+                "candidate_text": (candidate.candidate_text or "") + " injected",
+            })
+            if candidate.candidate_id == l2_pass.candidate_id else candidate
+            for candidate in objects["l2_document"].candidates
+        ),
+    })
+    with pytest.raises(ReviewBundleError) as error:
+        _build_from_objects(l2_objects, event_id, core)
+    assert error.value.reason_code in {
+        "review-bundle-l2-document-fingerprint-mismatch",
+        "review-bundle-l2-candidate-fingerprint-mismatch",
+    }
+
+    l3_pass = next(
+        candidate for candidate in objects["l3_document"].candidates
+        if candidate.status.value == "candidate" and candidate.candidate_text
+    )
+    l3_objects = dict(objects)
+    l3_objects["l3_document"] = objects["l3_document"].model_copy(update={
+        "candidates": tuple(
+            candidate.model_copy(update={
+                "candidate_text": (candidate.candidate_text or "") + " injected",
+            })
+            if candidate.candidate_id == l3_pass.candidate_id else candidate
+            for candidate in objects["l3_document"].candidates
+        ),
+    })
+    with pytest.raises(ReviewBundleError) as error:
+        _build_from_objects(l3_objects, event_id, core)
+    assert error.value.reason_code in {
+        "review-bundle-l3-document-fingerprint-mismatch",
+        "review-bundle-l3-candidate-fingerprint-mismatch",
+    }
+
+    isolated_document, isolated_report = _isolated_management_objects(objects, core)
+    domain_pass = next(
+        candidate for candidate in isolated_document.candidates
+        if candidate.status == "candidate" and candidate.candidate_text
+    )
+    domain_objects = dict(objects)
+    domain_objects["management_document"] = isolated_document
+    domain_objects["management_report"] = isolated_report
+    assert _build_from_objects(domain_objects, event_id, core).content_digest
+    tampered_management = isolated_document.model_copy(update={
+        "candidates": tuple(
+            candidate.model_copy(update={
+                "candidate_text": (candidate.candidate_text or "") + " injected",
+            })
+            if candidate.candidate_id == domain_pass.candidate_id else candidate
+            for candidate in isolated_document.candidates
+        ),
+    })
+    domain_objects["management_document"] = tampered_management
+    with pytest.raises(ReviewBundleError) as error:
+        _build_from_objects(domain_objects, event_id, core)
+    assert error.value.reason_code == (
+        "review-bundle-management-document-fingerprint-mismatch"
+    )
+
+
+def test_additional_candidate_and_document_tampering_is_rejected(
+    client: TestClient,
+) -> None:
+    event_id = _event(client, "R71 candidate tamper")
+    plan, core = _plan(event_id)
+    revision = _save(client, event_id, plan)
+    objects = _server_objects(client, event_id, plan, core, revision)
+
+    replaced_fingerprint = dict(objects)
+    replaced_fingerprint["l2_document"] = objects["l2_document"].model_copy(update={
+        "candidates": tuple(
+            candidate.model_copy(update={"candidate_fingerprint": "0" * 64})
+            if index == 0 else candidate
+            for index, candidate in enumerate(objects["l2_document"].candidates)
+        ),
+    })
+    with pytest.raises(ReviewBundleError):
+        _build_from_objects(replaced_fingerprint, event_id, core)
+
+    replaced_document = dict(objects)
+    replaced_document["l3_document"] = objects["l3_document"].model_copy(update={
+        "l3_render_fingerprint": "0" * 64,
+    })
+    with pytest.raises(ReviewBundleError):
+        _build_from_objects(replaced_document, event_id, core)
+
+    missing_candidate = dict(objects)
+    missing_candidate["l2_document"] = objects["l2_document"].model_copy(update={
+        "candidates": objects["l2_document"].candidates[1:],
+    })
+    with pytest.raises(ReviewBundleError):
+        _build_from_objects(missing_candidate, event_id, core)
+
+    duplicate_candidate = dict(objects)
+    duplicate_candidate["l2_document"] = objects["l2_document"].model_copy(update={
+        "candidates": (
+            objects["l2_document"].candidates[0],
+            objects["l2_document"].candidates[0],
+        ),
+    })
+    with pytest.raises(ReviewBundleError):
+        _build_from_objects(duplicate_candidate, event_id, core)
+
 def test_builder_rejects_source_registry_and_assembly_tampering(
     client: TestClient,
 ) -> None:
@@ -401,4 +547,7 @@ def test_builder_rejects_blocked_candidate_text_injection(
     objects["l3_document"] = tampered_document
     with pytest.raises(ReviewBundleError) as error:
         _build_from_objects(objects, event_id, core)
-    assert error.value.reason_code == "review-bundle-l3-blocked-text-present"
+    assert error.value.reason_code in {
+        "review-bundle-l3-document-fingerprint-mismatch",
+        "review-bundle-l3-blocked-text-present",
+    }

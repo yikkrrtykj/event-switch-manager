@@ -54,6 +54,7 @@ import {
 } from './managementAuth'
 import type { ManagementReview } from './managementAuth'
 import {
+  canDownloadReviewBundle,
   downloadReviewBundle,
   fetchReviewBundle,
   reviewBundleFilename,
@@ -399,10 +400,17 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
 
   const selectedAssignment = assignments.find((item) => item.assignmentId === assignmentId)
   const loading = stage.startsWith('loading') || l2.kind === 'loading' || l3.kind === 'loading'
-  const bundleAvailable = Boolean(
-    revision && selectedAssignment?.isCore && stage === 'ready' && !loading &&
-    assembly.kind !== 'loading' && management.kind !== 'loading' && !error,
+  const bundleLoading = loading || assembly.kind === 'loading' ||
+    management.kind === 'loading'
+  const bundlePreviewBroken = [l2, l3, assembly, management].some(
+    (view) => view.kind === 'invalid' || view.kind === 'error',
   )
+  const bundleAvailable = canDownloadReviewBundle(selectedAssignment, {
+    hasRevision: Boolean(revision),
+    ready: stage === 'ready',
+    loading: bundleLoading,
+    previewBroken: bundlePreviewBroken,
+  })
   const overall = revision && selectedAssignment ? previewStatus(l2, l3) : null
   const device: DeviceIdentity | null = l2.kind === 'ready'
     ? {
