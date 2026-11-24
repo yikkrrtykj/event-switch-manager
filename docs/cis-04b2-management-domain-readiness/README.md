@@ -1,4 +1,8 @@
-﻿# CIS-04B-2 — Management Domain CLI Production Readiness
+﻿> **R68 follow-up:** the Domain-only read-only authorization foundation and its
+> PID/Ordering-SKU/License evidence model are documented in
+> [CIS-04B-3 Domain-only Read-only Authorization](../cis-04b3-domain-only-readonly-authorization/README.md).
+> Production authorization remains PENDING and no active production Registry is selected.
+# CIS-04B-2 — Management Domain CLI Production Readiness
 
 Status: **software readiness only; production authorization PENDING; management CLI BLOCKED**
 

@@ -19,7 +19,11 @@ from enum import StrEnum
 from typing import Literal
 
 from ..domain import DeviceFamily
-from .layer3_c9200_command_evidence import C9200_PIDS
+from .layer3_c9200_command_evidence import (
+    C9200_HARDWARE_PIDS,
+    C9200_ORDERING_SKUS,
+    C9200_PIDS,
+)
 from .layer3_command_evidence import (
     EvidenceReviewState,
 )
@@ -32,11 +36,39 @@ MANAGEMENT_LICENSES: tuple[str, ...] = (
     "Network Essentials",
     "Network Advantage",
 )
+C9300_MANAGEMENT_HARDWARE_PIDS: tuple[str, ...] = (
+    "C9300-24T",
+    "C9300-24P",
+    "C9300L-24T-4G",
+    "C9300L-24P-4X",
+    "C9300X-24Y",
+)
+C9300_MANAGEMENT_ORDERING_SKUS: tuple[str, ...] = (
+    "C9300L-24T-4G-E",
+    "C9300L-24P-4X-E",
+    "C9300X-24Y-A",
+)
 C9300_MANAGEMENT_PIDS: tuple[str, ...] = (
     "C9300-24T", "C9300-24P", "C9300L-24T-4G", "C9300L-24T-4G-E",
     "C9300L-24P-4X", "C9300L-24P-4X-E", "C9300X-24Y", "C9300X-24Y-A",
 )
+C9200_MANAGEMENT_HARDWARE_PIDS: tuple[str, ...] = C9200_HARDWARE_PIDS
+C9200_MANAGEMENT_ORDERING_SKUS: tuple[str, ...] = C9200_ORDERING_SKUS
 C9200_MANAGEMENT_PIDS: tuple[str, ...] = C9200_PIDS
+
+# The evidence rows must keep their frozen content digest.  These assertions
+# only classify the existing identifiers; they never silently add or remove a
+# declared PID from an Evidence row.
+if set(C9300_MANAGEMENT_HARDWARE_PIDS) | set(C9300_MANAGEMENT_ORDERING_SKUS) != set(
+    C9300_MANAGEMENT_PIDS
+):
+    raise ValueError("C9300 management PID classification drift")
+if set(C9300_MANAGEMENT_HARDWARE_PIDS) & set(C9300_MANAGEMENT_ORDERING_SKUS):
+    raise ValueError("C9300 management PID classification overlap")
+if C9200_MANAGEMENT_HARDWARE_PIDS + C9200_MANAGEMENT_ORDERING_SKUS != (
+    C9200_MANAGEMENT_PIDS
+):
+    raise ValueError("C9200 management PID classification drift")
 
 URL_9300_SECURITY = (
     "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/"
@@ -340,7 +372,11 @@ MANAGEMENT_EVIDENCE_DRAFT_REGISTRY = ManagementEvidenceRegistry(
 
 
 __all__ = [
+    "C9200_MANAGEMENT_HARDWARE_PIDS",
+    "C9200_MANAGEMENT_ORDERING_SKUS",
     "C9200_MANAGEMENT_PIDS",
+    "C9300_MANAGEMENT_HARDWARE_PIDS",
+    "C9300_MANAGEMENT_ORDERING_SKUS",
     "C9300_MANAGEMENT_PIDS",
     "MANAGEMENT_EVIDENCE_DRAFT_REGISTRY",
     "MANAGEMENT_EVIDENCE_REGISTRY_ID",
