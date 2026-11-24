@@ -1,4 +1,5 @@
 ﻿import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 
 import { expect, test } from '@playwright/test'
 import type { APIRequestContext, Page, Route } from '@playwright/test'
@@ -173,10 +174,10 @@ async function preparedC9200CandidateEvent(
 
 
 async function preparedManagementEvent(
-  request: APIRequestContext, name: string,
+  request: APIRequestContext, name: string, withDhcp = false,
 ) {
   const eventId = await createEvent(request, name)
-  const plan = ciscoPlan(eventId, false)
+  const plan = ciscoPlan(eventId, withDhcp)
   const core = (plan.assignments as JsonRecord[])[0]!
   core.management_ip = '192.168.10.3'
   core.management_domain = 'example.com'
@@ -268,8 +269,8 @@ test('shows a unified read-only L2 and L3 review bound to one saved revision', a
   await expect(page.getByText('DHCP Helper blocked', { exact: true })).toBeVisible()
   await expect(page.locator('.cisco-source-panel')).toContainText('27d9c46f610b974de5570fb13e115260e2d109475a8d967704de9bb9ca6ef00b')
   await expect(page.locator('.cisco-source-panel')).toContainText('5abd0c57c0a825d77893e6287b76024517b5eb24d42bf061ab34c685b79c1ad8')
-  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i })).toHaveCount(0)
-  await expect(page.getByRole('link', { name: /download|deploy|execute/i })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download (?:config|configuration|cli|script|full)/i })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /download (?:config|configuration|cli|script|full)|deploy|execute/i })).toHaveCount(0)
   await expect(assignmentSelect.locator('option')).toHaveCount(2)
 })
 
@@ -300,7 +301,7 @@ test('shows reviewed C9200 L3 candidates in unified preview', async ({ page, req
   const routeRow = l3Table.locator('tbody tr').filter({ hasText: 'static-route' }).first()
   await routeRow.getByText('Details', { exact: true }).click()
   await expect(routeRow.locator('pre.cisco-command')).toContainText('ip route 10.200.0.0')
-  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i }))
+  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download (?:config|configuration|cli|script|full)/i }))
     .toHaveCount(0)
 
   for (const width of [390, 1366, 1920]) {
@@ -1232,4 +1233,46 @@ test('rejects injected management candidate text without displaying CLI', async 
   await expect(panel).toBeVisible()
   await expect(panel).toContainText('Data binding is inconsistent')
   await expect(panel.locator('pre.cisco-command')).toHaveCount(0)
+})
+test('downloads a read-only review bundle only for the selected saved revision', async ({ page, request }) => {
+  const { eventId, plan, revision } = await preparedManagementEvent(request, 'R71 review download', true)
+  await openPreview(page, eventId)
+  const downloadButton = page.getByRole('button', { name: 'Download review report' })
+  await expect(downloadButton).toBeEnabled()
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    downloadButton.click(),
+  ])
+  expect(download.suggestedFilename()).toMatch(/^cisco-config-review-.*-r1\.json$/)
+  const path = await download.path()
+  expect(path).not.toBeNull()
+  const bundle = JSON.parse(readFileSync(path!, 'utf8')) as JsonRecord
+  expect(bundle.bundle_schema_version).toBe(1)
+  expect(bundle.contract_id).toBe('cis-04b-cisco-config-review-bundle-v1')
+  const content = bundle.content as JsonRecord
+  expect(content.banner).toEqual([
+    'CISCO CONFIGURATION REVIEW REPORT', 'READ ONLY', 'NON-EXECUTABLE',
+    'PARTIAL CONFIGURATION CANDIDATES', 'NOT HARDWARE VERIFIED',
+    'NOT APPROVED FOR DEPLOYMENT',
+  ])
+  const identity = content.identity as JsonRecord
+  expect(identity.revision_id).toBe(revision.id)
+  expect(identity.revision_canonical_hash).toBe(revision.content_hash)
+  expect(identity.exact_pid).toBe('C9300L-24P-4X')
+  expect((content.management as JsonRecord).summary).toEqual({
+    total: 9, passed: 0, blocked: 9, failed: 0,
+  })
+  expect((content.l3 as JsonRecord).summary).toMatchObject({ passed: 9, blocked: 1 })
+  const safety = content.safety as JsonRecord
+  expect(safety).toMatchObject({
+    read_only: true, non_executable: true, full_config_generated: false,
+    executable: false, deployment_allowed: false, hardware_verified: false,
+    device_connection: 'none', production_authorization: 'PENDING',
+  })
+  expect(readFileSync(path!, 'utf8')).not.toContain('.cfg')
+
+  const accessId = String((plan.assignments as JsonRecord[])[1]!.id)
+  await page.locator('#cisco-assignment').selectOption(accessId)
+  await expect(downloadButton).toBeDisabled()
+  await expect(page.getByText('Review report downloaded', { exact: false })).toHaveCount(0)
 })
