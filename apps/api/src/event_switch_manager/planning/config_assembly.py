@@ -68,8 +68,9 @@ from .layer3_intent import (
     L3DeviceIntent,
     Layer3Intent,
 )
-from .management_command_evidence import (
-    MANAGEMENT_EVIDENCE_ROWS,
+from .management_command_evidence import ManagementEvidenceRegistry
+from .management_command_evidence_reviews import (
+    production_management_registry,
 )
 from .management_intent import (
     ManagementInputError,
@@ -719,6 +720,7 @@ def _build_sections(
     l3_document: L3CandidateDocument,
     l3_report: L3ValidationReport,
     management: ManagementIntent,
+    management_registry: ManagementEvidenceRegistry,
     assignment_id: UUID,
     l3_applicable: bool,
 ) -> tuple[AssemblySection, ...]:
@@ -827,7 +829,7 @@ def _build_sections(
             candidates=selected,
         ))
     management_evidence = tuple(
-        row for row in MANAGEMENT_EVIDENCE_ROWS
+        row for row in management_registry.rows
         if management.identity.family == row.family.value
         and management.identity.exact_pid is not None
         and management.identity.exact_pid.upper() in {
@@ -1477,8 +1479,12 @@ def build_config_assembly(
         assignment.role is DeviceRole.CORE
         and (assignment.family is not None)
     )
+    management_registry = production_management_registry()
     try:
-        management = build_management_intent(revision, l2_intent, assignment_id)
+        management = build_management_intent(
+            revision, l2_intent, assignment_id,
+            evidence_registry=management_registry,
+        )
     except ManagementInputError as exc:
         raise AssemblyInputError(exc.reason_code) from None
     sections = _build_sections(
@@ -1491,6 +1497,7 @@ def build_config_assembly(
         l3_document=l3_document,
         l3_report=l3_report,
         management=management,
+        management_registry=management_registry,
         assignment_id=assignment_id,
         l3_applicable=l3_applicable,
     )

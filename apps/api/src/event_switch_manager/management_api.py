@@ -1,4 +1,4 @@
-﻿"""CIS-04B read-only management intent and candidate validation API.
+"""CIS-04B read-only management intent and candidate validation API.
 
 The client supplies only the Event/Revision/Assignment UUID path identifiers.
 The management intent, PENDING evidence registry, candidates and validation
@@ -119,10 +119,12 @@ def _build(request_revision: PlanRevision, baseline: PlanRevision | None,
         "catalyst-9300", "catalyst-9200",
     }:
         raise _conflict("platform-not-supported-for-management", "assignment")
+    evidence_registry = production_management_registry()
     try:
         l2_intent = build_layer2_intent(revision, baseline)
         intent = build_management_intent(
             revision, l2_intent, assignment_id,
+            evidence_registry=evidence_registry,
         )
     except ManagementInputError as exc:
         raise _conflict(exc.reason_code, "intent") from None
@@ -130,14 +132,14 @@ def _build(request_revision: PlanRevision, baseline: PlanRevision | None,
         raise _conflict("management-intent-build-failed", "intent") from None
     try:
         document = build_management_cli_candidates(
-            revision, intent, production_management_registry(),
+            revision, intent, evidence_registry,
         )
     except (ManagementRenderError, ValueError) as exc:
         reason = getattr(exc, "reason_code", str(exc))
         raise _conflict(reason, "candidate") from None
     try:
         report = validate_management_candidates(
-            revision, intent, document, production_management_registry(),
+            revision, intent, document, evidence_registry,
         )
     except (ManagementRenderError, ValueError) as exc:
         reason = getattr(exc, "reason_code", str(exc))

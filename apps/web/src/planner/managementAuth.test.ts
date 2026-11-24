@@ -9,7 +9,9 @@ import {
   MANAGEMENT_VALIDATION_CONTRACT,
   validateManagementReview,
 } from './managementAuth'
-import type { ManagementReview } from './managementAuth'
+import type {
+  ManagementRegistryTrustContract, ManagementReview,
+} from './managementAuth'
 import type { Revision } from './model'
 
 const hash = (character: string) => character.repeat(64)
@@ -22,7 +24,10 @@ const binding = {
     id: revisionId,
     number: 1,
     content_hash: hash('a'),
-    plan: { management_vlan: 10 },
+    plan: {
+      management_vlan: 10,
+      assignments: [{ id: assignmentId, management_domain: 'example.com' }],
+    },
   } as unknown as Revision,
   assignment: {
     assignmentId,
@@ -80,6 +85,7 @@ function reportCandidateFor(topic: string, index: number) {
     secret_text_present: false,
     evidence_id: 'mgmt-9300-' + topic.slice('management-'.length) + '-v1',
     evidence_review_state: 'pending-independent-review',
+    evidence_content_digest: hash('e'),
     evidence_source_url: 'https://www.cisco.com/c/en/us/td/docs/security.html',
     secret_bearing: topic === 'management-local-username',
     evidence_digest_match: true,
@@ -269,6 +275,77 @@ function fixture(): ManagementReview {
   return value
 }
 
+const REVIEWED_DOMAIN_DIGEST =
+  'b476f57fa27800820d04ae75bd8aee091af2bb4bc7d491e4ba4a84479982473d'
+const REVIEWED_SSH_DIGEST =
+  '27b5c1975cf2bbc98337875827b9b931d535d9aba10055f0d467cdc00b5f88f5'
+const DOMAIN_SOURCE =
+  'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-12/configuration_guide/sec/b_1712_sec_9300_cg/configuring_secure_shell__ssh_.html'
+const SSH_SOURCE =
+  'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-12/configuration_guide/sec/b_1712_sec_9300_cg/secure_shell_version_2_support.html'
+
+const REVIEWED_CONTRACT: ManagementRegistryTrustContract = {
+  id: 'cis-04b1-management-command-evidence-reviewed-v1',
+  fingerprint: hash('f'),
+  evidenceStatus: 'PARTIAL',
+  passed: 1,
+  blocked: 8,
+  overall: 'partial',
+  domainTextAllowed: true,
+  reviewedTopics: ['management-domain-name', 'management-ssh-version'],
+}
+
+function reviewedFixture(): ManagementReview {
+  const value = fixture()
+  value.intent.evidence_registry_id = REVIEWED_CONTRACT.id
+  value.intent.evidence_registry_fingerprint = REVIEWED_CONTRACT.fingerprint
+  value.intent.evidence_status = 'PARTIAL'
+  value.report.candidates[0] = {
+    ...value.report.candidates[0]!,
+    status: 'candidate',
+    independent_verdict: 'pass',
+    candidate_text_present: true,
+    evidence_review_state: 'independently-reviewed',
+    evidence_content_digest: REVIEWED_DOMAIN_DIGEST,
+    evidence_source_url: DOMAIN_SOURCE,
+    evidence_digest_match: true,
+    blocking_reasons: [],
+  }
+  value.report.candidates[1] = {
+    ...value.report.candidates[1]!,
+    evidence_review_state: 'independently-reviewed',
+    evidence_content_digest: REVIEWED_SSH_DIGEST,
+    evidence_source_url: SSH_SOURCE,
+  }
+  value.report.summary = { total: 9, passed: 1, blocked: 8, failed: 0 }
+  value.report.overall_status = 'partial'
+  value.document.candidates[0] = {
+    ...value.document.candidates[0]!,
+    status: 'candidate',
+    candidate_text: 'ip domain name example.com',
+    evidence_review_state: 'independently-reviewed',
+    evidence_content_digest: REVIEWED_DOMAIN_DIGEST,
+    evidence_source_url: DOMAIN_SOURCE,
+    blocking_reasons: [],
+    candidate_fingerprint: '',
+  }
+  value.document.candidates[1] = {
+    ...value.document.candidates[1]!,
+    evidence_review_state: 'independently-reviewed',
+    evidence_content_digest: REVIEWED_SSH_DIGEST,
+    evidence_source_url: SSH_SOURCE,
+    candidate_fingerprint: '',
+  }
+  value.document.summary = { total: 9, candidates: 1, blocked: 8, skipped: 0 }
+  value.report.source.evidence_registry_id = REVIEWED_CONTRACT.id
+  value.report.expected_source.evidence_registry_id = REVIEWED_CONTRACT.id
+  value.report.source.evidence_registry_fingerprint = REVIEWED_CONTRACT.fingerprint
+  value.report.expected_source.evidence_registry_fingerprint =
+    REVIEWED_CONTRACT.fingerprint
+  resealDocument(value)
+  return resealReview(value)
+}
+
 describe('management/SSHv2 contract', () => {
   it('accepts a blocked PENDING review with no secret or CLI material', () => {
     const value = fixture()
@@ -431,5 +508,30 @@ describe('management/SSHv2 contract', () => {
     console.intent.console_recovery.console_operation = 'executed'
     expect(validateManagementReview(console, binding))
       .toContain('management-console-recovery')
+  })
+
+  it('requires an explicitly trusted contract to display the domain CLI', () => {
+    const value = reviewedFixture()
+    expect(validateManagementReview(value, binding, [REVIEWED_CONTRACT])).toEqual([])
+    const domain = value.document.candidates.find(
+      (candidate) => candidate.topic === 'management-domain-name',
+    )
+    expect(domain?.candidate_text).toBe('ip domain name example.com')
+    expect(value.report.candidates.filter(
+      (candidate) => candidate.status === 'candidate',
+    )).toHaveLength(1)
+    expect(value.document.candidates.filter(
+      (candidate) => candidate.candidate_text !== null,
+    )).toHaveLength(1)
+    // Production uses the active draft allowlist only; server fields alone
+    // cannot turn the reviewed fixture into trusted production output.
+    expect(validateManagementReview(value, binding))
+      .toContain('management-pending-registry')
+    const impostor = {
+      ...REVIEWED_CONTRACT,
+      fingerprint: hash('0'),
+    }
+    expect(validateManagementReview(value, binding, [impostor]))
+      .toContain('management-pending-registry')
   })
 })

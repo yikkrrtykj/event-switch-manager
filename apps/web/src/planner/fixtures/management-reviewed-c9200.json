@@ -1,0 +1,944 @@
+{
+  "name": "R65A C9200 reviewed",
+  "generatedBy": "apps/api management API with isolated temporary production test-double manifest",
+  "contract": {
+    "id": "cis-04b1-management-command-evidence-reviewed-v1",
+    "fingerprint": "6bdec1eb171b64dea405af8ad90994f770f6da29c31b2d6e307ec28fcbd88428",
+    "evidenceStatus": "PARTIAL",
+    "passed": 1,
+    "blocked": 8,
+    "overall": "partial",
+    "domainTextAllowed": true,
+    "reviewedTopics": [
+      "management-domain-name",
+      "management-ssh-version"
+    ]
+  },
+  "binding": {
+    "eventId": "45994200-9549-4abe-9ed5-3c154368ef64",
+    "revision": {
+      "id": "06af2c1d-c235-4454-a6af-43b8cd6f63b8",
+      "number": 1,
+      "content_hash": "3369d58ade1fbdb4332405d04482331d46bc411d9c6451daeba05d30d93b1073",
+      "plan": {
+        "schema_version": 1,
+        "event_id": "45994200-9549-4abe-9ed5-3c154368ef64",
+        "management_vlan": 10,
+        "physical_devices": [
+          {
+            "id": "866ac517-4bae-45b1-95cc-7a19eea79efb",
+            "vendor": "cisco",
+            "model": "C9200L-24P-4X",
+            "verified_serial": "SYN-CORE-001"
+          },
+          {
+            "id": "4dee4b5a-4de3-48e3-aa32-302904c23b12",
+            "vendor": "cisco",
+            "model": "C9300L-24T-4G",
+            "verified_serial": "SYN-ACCESS-001"
+          },
+          {
+            "id": "4ad725fd-d01b-4ce4-b5e2-93a10042b0fb",
+            "vendor": "hillstone",
+            "model": "SG6000",
+            "verified_serial": "SYN-FW-001"
+          }
+        ],
+        "assignments": [
+          {
+            "id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+            "hostname": "L3-Core",
+            "role": "core",
+            "family": "catalyst-9200",
+            "physical_device_id": "866ac517-4bae-45b1-95cc-7a19eea79efb",
+            "software": {
+              "image": "17.12.4",
+              "license": "Network Advantage"
+            },
+            "routing_enabled": null,
+            "management_ip": "192.168.10.3",
+            "management_domain": "example.com",
+            "credential_reference": "credref:45994200-9549-4abe-9ed5-3c154368ef64:netops"
+          },
+          {
+            "id": "6446a5d8-54ef-4510-b2cd-0d4af700adaa",
+            "hostname": "L3-Access",
+            "role": "access",
+            "family": "catalyst-9300",
+            "physical_device_id": "4dee4b5a-4de3-48e3-aa32-302904c23b12",
+            "software": {
+              "image": "17.12.4",
+              "license": "Network Advantage"
+            },
+            "management_ip": "192.168.10.2"
+          },
+          {
+            "id": "847d8485-2d86-4f7a-9c09-f5de75f39a9f",
+            "hostname": "L3-FW",
+            "role": "external-distribution",
+            "physical_device_id": "4ad725fd-d01b-4ce4-b5e2-93a10042b0fb"
+          }
+        ],
+        "physical_interfaces": [
+          {
+            "id": "d4f10b26-8637-4e02-812d-7d79f68efa90",
+            "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+            "physical_device_id": "866ac517-4bae-45b1-95cc-7a19eea79efb",
+            "name": "Gi1/0/1",
+            "settings": {
+              "mode": "access",
+              "access_vlan": 9,
+              "admin_state": "up"
+            }
+          },
+          {
+            "id": "ece93e8f-023f-4364-b5aa-06a768b5fe66",
+            "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+            "physical_device_id": "866ac517-4bae-45b1-95cc-7a19eea79efb",
+            "name": "Gi1/0/2",
+            "settings": {
+              "mode": "trunk",
+              "allowed_vlans": [
+                9,
+                10,
+                20
+              ],
+              "admin_state": "up"
+            }
+          },
+          {
+            "id": "ad135d45-02bd-4c60-bdf6-e7f0307f55dd",
+            "assignment_id": "6446a5d8-54ef-4510-b2cd-0d4af700adaa",
+            "physical_device_id": "4dee4b5a-4de3-48e3-aa32-302904c23b12",
+            "name": "Gi1/0/1",
+            "settings": {
+              "mode": "access",
+              "access_vlan": 20,
+              "admin_state": "up"
+            }
+          },
+          {
+            "id": "0ea616fd-bcbc-4058-8a1a-bda3037815c3",
+            "assignment_id": "847d8485-2d86-4f7a-9c09-f5de75f39a9f",
+            "physical_device_id": "4ad725fd-d01b-4ce4-b5e2-93a10042b0fb",
+            "name": "ethernet0/0",
+            "settings": {
+              "mode": "access",
+              "access_vlan": 9,
+              "admin_state": "up"
+            }
+          },
+          {
+            "id": "8fa763a7-61c8-4c96-a247-3d77f166805f",
+            "assignment_id": "847d8485-2d86-4f7a-9c09-f5de75f39a9f",
+            "physical_device_id": "4ad725fd-d01b-4ce4-b5e2-93a10042b0fb",
+            "name": "ethernet0/1",
+            "settings": {
+              "mode": "routed",
+              "address": "198.51.100.2/30"
+            }
+          }
+        ],
+        "logical_interfaces": [
+          {
+            "id": "610a7f96-fd87-4528-9f1a-e3969be67494",
+            "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+            "name": "Vlan9",
+            "kind": "svi",
+            "vlan": 9,
+            "address": "10.0.0.1/30"
+          },
+          {
+            "id": "5b7db542-80e6-4fc3-be35-a4392c268ca6",
+            "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+            "name": "Vlan10",
+            "kind": "svi",
+            "vlan": 10,
+            "address": "192.168.10.1/24"
+          },
+          {
+            "id": "dc2e380a-186d-4828-bbbc-a107436745b2",
+            "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+            "name": "Vlan20",
+            "kind": "svi",
+            "vlan": 20,
+            "address": "192.168.20.1/24"
+          }
+        ],
+        "vlans": [
+          {
+            "id": 9,
+            "name": "Transit",
+            "purpose": "transit"
+          },
+          {
+            "id": 10,
+            "name": "Management",
+            "purpose": "management"
+          },
+          {
+            "id": 20,
+            "name": "Players"
+          }
+        ],
+        "subnets": [
+          {
+            "id": "dbdb468e-6ffb-48e2-817d-8d6307a108a9",
+            "vlan": 10,
+            "network": "192.168.10.0/24"
+          },
+          {
+            "id": "d8894cfe-b25e-438b-a203-53e0c2752f2c",
+            "vlan": 20,
+            "network": "192.168.20.0/24"
+          }
+        ],
+        "gateways": [
+          {
+            "subnet_id": "dbdb468e-6ffb-48e2-817d-8d6307a108a9",
+            "address": "192.168.10.1",
+            "svi_id": "5b7db542-80e6-4fc3-be35-a4392c268ca6"
+          },
+          {
+            "subnet_id": "d8894cfe-b25e-438b-a203-53e0c2752f2c",
+            "address": "192.168.20.1",
+            "svi_id": "dc2e380a-186d-4828-bbbc-a107436745b2"
+          }
+        ],
+        "dhcp_pools": [
+          {
+            "id": "05f57e20-a966-49ff-8c12-a2c4e652517c",
+            "subnet_id": "d8894cfe-b25e-438b-a203-53e0c2752f2c",
+            "start": "192.168.20.100",
+            "end": "192.168.20.150"
+          }
+        ],
+        "dhcp_relays": [],
+        "vlan_access_policies": [],
+        "links": [
+          {
+            "id": "48a91a44-5f33-484b-b332-96819336a24d",
+            "endpoints": [
+              "d4f10b26-8637-4e02-812d-7d79f68efa90",
+              "0ea616fd-bcbc-4058-8a1a-bda3037815c3"
+            ]
+          }
+        ],
+        "static_routes": [
+          {
+            "id": "8b85bd55-923a-417f-acc3-e380e082cdb5",
+            "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+            "destination": "10.200.0.0/24",
+            "next_hop": {
+              "kind": "ip",
+              "address": "192.168.10.2"
+            },
+            "preference": 1
+          }
+        ],
+        "default_routes": [],
+        "transit": null
+      }
+    },
+    "assignment": {
+      "assignmentId": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+      "hostname": "L3-Core",
+      "role": "core",
+      "family": "catalyst-9200",
+      "physicalDeviceId": "866ac517-4bae-45b1-95cc-7a19eea79efb",
+      "pid": "C9200L-24P-4X",
+      "image": "17.12.4",
+      "license": "Network Advantage",
+      "stackIdentity": "standalone",
+      "isCore": true
+    }
+  },
+  "intent": {
+    "management_intent_schema_version": 1,
+    "contract_id": "cis-04b-management-intent-v1",
+    "event_id": "45994200-9549-4abe-9ed5-3c154368ef64",
+    "revision_id": "06af2c1d-c235-4454-a6af-43b8cd6f63b8",
+    "revision_number": 1,
+    "revision_hash": "3369d58ade1fbdb4332405d04482331d46bc411d9c6451daeba05d30d93b1073",
+    "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+    "identity": {
+      "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+      "hostname": "L3-Core",
+      "role": "core",
+      "family": "catalyst-9200",
+      "exact_pid": "C9200L-24P-4X",
+      "pid_evidence": "exact-verified-pid",
+      "serial_verified": true,
+      "software_image": "17.12.4",
+      "software_license": "Network Advantage",
+      "stack_identity": "standalone"
+    },
+    "management_vlan": 10,
+    "management_domain": "example.com",
+    "intended_status": "PLANNED",
+    "status": "BLOCKED",
+    "validation_scope": "software-planning-only",
+    "software_validation_status": "BLOCKED",
+    "hardware_status": "HARDWARE_NOT_VERIFIED",
+    "not_implemented_capabilities": [
+      "protected-credential-provider",
+      "external-aaa",
+      "console-operation",
+      "management-command-evidence-review"
+    ],
+    "reachability": {
+      "status": "PLANNED",
+      "management_vlan": 10,
+      "vlan_declared": true,
+      "management_ip": "192.168.10.3",
+      "management_subnet": "192.168.10.0/24",
+      "duplicate_ip": false,
+      "reason_codes": [
+        "management-reachability-not-verified"
+      ]
+    },
+    "ssh_policy": {
+      "status": "BLOCKED",
+      "target_protocol": "sshv2",
+      "telnet_enabled": false,
+      "plaintext_management_auth": false,
+      "sshv1_fallback_allowed": false,
+      "rsa_key_state": "unknown-not-read",
+      "rsa_key_assumed": false,
+      "reason_codes": [
+        "management-evidence-pending",
+        "ssh-rsa-key-state-unknown",
+        "console-recovery-not-verified",
+        "authentication-lockout-risk"
+      ]
+    },
+    "authentication": {
+      "status": "BLOCKED",
+      "method": "local-only",
+      "local_authentication_required": true,
+      "local_fallback_required": true,
+      "external_aaa_requested": false,
+      "external_aaa_status": "NOT_IMPLEMENTED",
+      "credential_reference": {
+        "reference": "credref:45994200-9549-4abe-9ed5-3c154368ef64:netops",
+        "present": true,
+        "valid": true,
+        "event_scoped": true,
+        "secret_material_present": false,
+        "secret_availability": "not-verified",
+        "provider": "protected-credential-provider-not-implemented",
+        "reason_codes": [
+          "credential-secret-not-verified"
+        ],
+        "value_not_returned": true
+      },
+      "reason_codes": [
+        "credential-secret-not-verified",
+        "local-account-not-verified",
+        "authentication-lockout-risk"
+      ]
+    },
+    "console_recovery": {
+      "status": "BLOCKED",
+      "required": true,
+      "local_recovery_account_required": true,
+      "console_operation": "not-executed",
+      "console_access_verified": false,
+      "lockout_risk": "present-not-mitigated",
+      "reason_codes": [
+        "console-recovery-not-verified",
+        "local-recovery-account-not-verified",
+        "console-operation-not-executed"
+      ]
+    },
+    "aaa": {
+      "status": "NOT_IMPLEMENTED",
+      "mode": "local-only",
+      "external_servers": [],
+      "deletion_or_auth_switch_generation": false,
+      "reason_codes": [
+        "external-aaa-not-implemented",
+        "aaa-auth-switch-blocked"
+      ]
+    },
+    "evidence_registry_id": "cis-04b1-management-command-evidence-reviewed-v1",
+    "evidence_registry_fingerprint": "6bdec1eb171b64dea405af8ad90994f770f6da29c31b2d6e307ec28fcbd88428",
+    "evidence_status": "PARTIAL",
+    "risk_codes": [
+      "management-lockout-risk",
+      "hardware-not-verified",
+      "secret-not-available"
+    ],
+    "reason_codes": [
+      "management-reachability-not-verified",
+      "credential-secret-not-verified",
+      "management-evidence-pending",
+      "ssh-rsa-key-state-unknown",
+      "console-recovery-not-verified",
+      "authentication-lockout-risk",
+      "local-account-not-verified",
+      "local-recovery-account-not-verified",
+      "console-operation-not-executed",
+      "external-aaa-not-implemented",
+      "aaa-auth-switch-blocked",
+      "hardware-not-verified"
+    ],
+    "hardware_verified": false,
+    "deployment_allowed": false,
+    "device_connection": "none",
+    "intent_fingerprint": "53f2408a1d580cccd4894db2471851ac3b41aa910770f2ca827e52ab48dbb287"
+  },
+  "document": {
+    "management_render_schema_version": 1,
+    "contract_id": "cis-04b-cisco-management-cli-candidate-v1",
+    "source": {
+      "revision_uuid": "06af2c1d-c235-4454-a6af-43b8cd6f63b8",
+      "revision_number": 1,
+      "revision_hash": "3369d58ade1fbdb4332405d04482331d46bc411d9c6451daeba05d30d93b1073",
+      "management_intent_fingerprint": "53f2408a1d580cccd4894db2471851ac3b41aa910770f2ca827e52ab48dbb287",
+      "evidence_registry_id": "cis-04b1-management-command-evidence-reviewed-v1",
+      "evidence_registry_fingerprint": "6bdec1eb171b64dea405af8ad90994f770f6da29c31b2d6e307ec28fcbd88428"
+    },
+    "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+    "device": {
+      "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+      "hostname": "L3-Core",
+      "family": "catalyst-9200",
+      "exact_pid": "C9200L-24P-4X",
+      "software_image": "17.12.4",
+      "software_license": "Network Advantage",
+      "stack_identity": "standalone"
+    },
+    "candidates": [
+      {
+        "candidate_id": "mgmtcand-d973ad997d0d714d",
+        "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+        "topic": "management-domain-name",
+        "command_context_mode": "global",
+        "command_context_header": "global",
+        "target_name": "L3-Core",
+        "status": "candidate",
+        "candidate_text": "ip domain name example.com",
+        "parameters": {
+          "secret_bearing": false,
+          "credential_reference_present": true,
+          "credential_secret_available": false
+        },
+        "evidence_id": "mgmt-9200-domain-name-v1",
+        "evidence_review_state": "independently-reviewed",
+        "evidence_content_digest": "e221b98733c8a9df0d45d2d68878c62efcf3051e89ecdd7bcffeca30fc642b44",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/configuring_secure_shell__ssh_.html",
+        "secret_bearing": false,
+        "requires_field_verification": true,
+        "blocking_reasons": [],
+        "candidate_fingerprint": "021a2bfc35ba75d5dea0176c5dde57d1d79187fa3685f7397bb8060e5ead44bf"
+      },
+      {
+        "candidate_id": "mgmtcand-b077f50a64a22016",
+        "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+        "topic": "management-ssh-version",
+        "command_context_mode": "global",
+        "command_context_header": "global",
+        "target_name": "L3-Core",
+        "status": "blocked",
+        "candidate_text": null,
+        "parameters": {
+          "secret_bearing": false,
+          "credential_reference_present": true,
+          "credential_secret_available": false
+        },
+        "evidence_id": "mgmt-9200-ssh-version-v1",
+        "evidence_review_state": "independently-reviewed",
+        "evidence_content_digest": "62786d76920888edd472a14118393db3cf608f8b2499fffc8c8a8a45b1fd6882",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/secure_shell_version_2_support.html",
+        "secret_bearing": false,
+        "requires_field_verification": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "ssh-rsa-key-state-unknown"
+        ],
+        "candidate_fingerprint": "62bf5a20dfecc4881437ff30a4e022eedc0a075c487f8ac9d35388fa09e2b18c"
+      },
+      {
+        "candidate_id": "mgmtcand-374257f9b122c117",
+        "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+        "topic": "management-rsa-key",
+        "command_context_mode": "global",
+        "command_context_header": "global",
+        "target_name": "L3-Core",
+        "status": "blocked",
+        "candidate_text": null,
+        "parameters": {
+          "secret_bearing": false,
+          "credential_reference_present": true,
+          "credential_secret_available": false
+        },
+        "evidence_id": "mgmt-9200-rsa-key-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "5f9f71a9321b5b8b9ba1e0c6c110a8fd568822e7e4104e35cc113bfac6da23fa",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "requires_field_verification": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "management-evidence-not-renderable"
+        ],
+        "candidate_fingerprint": "e7df77b455cb41abbfeec9f875862d2663bc101f9aa07266dc4eb50f65a726c4"
+      },
+      {
+        "candidate_id": "mgmtcand-5e0ad64b789b92a5",
+        "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+        "topic": "management-local-username",
+        "command_context_mode": "global",
+        "command_context_header": "global",
+        "target_name": "L3-Core",
+        "status": "blocked",
+        "candidate_text": null,
+        "parameters": {
+          "secret_bearing": true,
+          "credential_reference_present": true,
+          "credential_secret_available": false
+        },
+        "evidence_id": "mgmt-9200-local-username-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "6be66af71d018a7edf90de52b69e8f53fcf85014a7d85dd53e146b887eba2503",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/command_reference/b_1712_9200_cr/security_commands.html",
+        "secret_bearing": true,
+        "requires_field_verification": true,
+        "blocking_reasons": [
+          "credential-secret-not-available",
+          "secret-command-not-renderable",
+          "management-evidence-not-renderable"
+        ],
+        "candidate_fingerprint": "7bf3ec7b72938dfe67afc32668cf49b1ae22c141e3f70f5361d58499093401da"
+      },
+      {
+        "candidate_id": "mgmtcand-cae41d0ce06e5035",
+        "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+        "topic": "management-vty-transport",
+        "command_context_mode": "line",
+        "command_context_header": "line vty 0 4",
+        "target_name": "L3-Core",
+        "status": "blocked",
+        "candidate_text": null,
+        "parameters": {
+          "secret_bearing": false,
+          "credential_reference_present": true,
+          "credential_secret_available": false
+        },
+        "evidence_id": "mgmt-9200-vty-transport-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "044cf9b4b20013fbc8a069b25d43180f4b71895b09336e5555c29b6c6b02ab28",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "requires_field_verification": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "management-evidence-not-renderable"
+        ],
+        "candidate_fingerprint": "91cd0ac116043860bc5bf4697d2eea86393eebb9633962ec1951c80615cd0767"
+      },
+      {
+        "candidate_id": "mgmtcand-3dca0b5bee8552be",
+        "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+        "topic": "management-login-local",
+        "command_context_mode": "line",
+        "command_context_header": "line vty 0 4",
+        "target_name": "L3-Core",
+        "status": "blocked",
+        "candidate_text": null,
+        "parameters": {
+          "secret_bearing": false,
+          "credential_reference_present": true,
+          "credential_secret_available": false
+        },
+        "evidence_id": "mgmt-9200-login-local-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "25b93896cf82d1a32f2429eeef6050f39604d6260d7a2ba1afb827176dbc7431",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "requires_field_verification": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "management-evidence-not-renderable"
+        ],
+        "candidate_fingerprint": "fb113f5df4c6a6d960f89fa184e87e647340ec2648933f3e714dc12a5550b8e4"
+      },
+      {
+        "candidate_id": "mgmtcand-9e67cb1976bc277b",
+        "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+        "topic": "management-aaa-new-model",
+        "command_context_mode": "global",
+        "command_context_header": "global",
+        "target_name": "L3-Core",
+        "status": "blocked",
+        "candidate_text": null,
+        "parameters": {
+          "secret_bearing": false,
+          "credential_reference_present": true,
+          "credential_secret_available": false
+        },
+        "evidence_id": "mgmt-9200-aaa-new-model-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "df1571f22aa0ff329881def36eef3cbfc273c41645d0077ae3bb8daff5386cb6",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "requires_field_verification": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "aaa-or-console-lockout-risk",
+          "management-evidence-not-renderable"
+        ],
+        "candidate_fingerprint": "082cc87065dd8d2fa7721351d545e974e7984264ec16926e44ca5dcdb9622c09"
+      },
+      {
+        "candidate_id": "mgmtcand-06e23625acaab7a7",
+        "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+        "topic": "management-aaa-login-default",
+        "command_context_mode": "global",
+        "command_context_header": "global",
+        "target_name": "L3-Core",
+        "status": "blocked",
+        "candidate_text": null,
+        "parameters": {
+          "secret_bearing": false,
+          "credential_reference_present": true,
+          "credential_secret_available": false
+        },
+        "evidence_id": "mgmt-9200-aaa-login-default-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "c86ab9a854c5371f9a788b7fa2a89d76eee60cfd1f01d11971658c3389b487f8",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "requires_field_verification": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "aaa-or-console-lockout-risk",
+          "management-evidence-not-renderable"
+        ],
+        "candidate_fingerprint": "4571079a11c1f3901e9c8192de8ef032c11edbaa85e840719bf91ff7e12d6ab2"
+      },
+      {
+        "candidate_id": "mgmtcand-b54a301ce28ad42a",
+        "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+        "topic": "management-console-auth",
+        "command_context_mode": "line",
+        "command_context_header": "line console 0",
+        "target_name": "L3-Core",
+        "status": "blocked",
+        "candidate_text": null,
+        "parameters": {
+          "secret_bearing": false,
+          "credential_reference_present": true,
+          "credential_secret_available": false
+        },
+        "evidence_id": "mgmt-9200-console-auth-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "c6edbfc65aaa9ae30008fe56004cde98714ecf128a0aa82ad06796dd4cd9860c",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "requires_field_verification": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "aaa-or-console-lockout-risk",
+          "management-evidence-not-renderable"
+        ],
+        "candidate_fingerprint": "406a86bf21170f02b55c77eb641a09c7344604a6cf6877ec0daefcbddcb6c13c"
+      }
+    ],
+    "unresolved_prerequisites": [
+      "management-authentication-not-validated",
+      "console-recovery-not-verified",
+      "management-lockout-risk",
+      "ssh-rsa-key-state-unknown",
+      "management-evidence-not-renderable",
+      "credential-secret-not-available",
+      "secret-command-not-renderable",
+      "aaa-or-console-lockout-risk"
+    ],
+    "deployment_blockers": [
+      "management-evidence-pending",
+      "management-authentication-not-validated",
+      "console-recovery-not-verified",
+      "hardware-not-verified"
+    ],
+    "safety": {
+      "candidate_only": true,
+      "read_only": true,
+      "executable": false,
+      "deployable": false,
+      "deployment_allowed": false,
+      "device_connection": "none",
+      "running_config_read": false,
+      "device_writes_enabled": false,
+      "full_config_generated": false,
+      "cli": null,
+      "deployment_artifact": null,
+      "hardware_verified": false,
+      "secrets_included": false,
+      "secret_placeholder_included": false
+    },
+    "summary": {
+      "total": 9,
+      "candidates": 1,
+      "blocked": 8,
+      "skipped": 0
+    },
+    "verification": "not-verified",
+    "deployment_status": "blocked",
+    "render_fingerprint": "75c0994fa497904b934f830babbd0238cc4973d3ab307029274acf7db8e261b4"
+  },
+  "report": {
+    "validation_schema_version": 1,
+    "validation_contract_id": "cis-04b-management-cli-validation-v1",
+    "source": {
+      "revision_uuid": "06af2c1d-c235-4454-a6af-43b8cd6f63b8",
+      "revision_number": 1,
+      "revision_hash": "3369d58ade1fbdb4332405d04482331d46bc411d9c6451daeba05d30d93b1073",
+      "management_intent_fingerprint": "53f2408a1d580cccd4894db2471851ac3b41aa910770f2ca827e52ab48dbb287",
+      "evidence_registry_id": "cis-04b1-management-command-evidence-reviewed-v1",
+      "evidence_registry_fingerprint": "6bdec1eb171b64dea405af8ad90994f770f6da29c31b2d6e307ec28fcbd88428"
+    },
+    "expected_source": {
+      "revision_uuid": "06af2c1d-c235-4454-a6af-43b8cd6f63b8",
+      "revision_number": 1,
+      "revision_hash": "3369d58ade1fbdb4332405d04482331d46bc411d9c6451daeba05d30d93b1073",
+      "management_intent_fingerprint": "53f2408a1d580cccd4894db2471851ac3b41aa910770f2ca827e52ab48dbb287",
+      "evidence_registry_id": "cis-04b1-management-command-evidence-reviewed-v1",
+      "evidence_registry_fingerprint": "6bdec1eb171b64dea405af8ad90994f770f6da29c31b2d6e307ec28fcbd88428",
+      "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397"
+    },
+    "assignment_id": "95a047c2-51a0-4e5a-8ff0-98fec7674397",
+    "candidates": [
+      {
+        "candidate_id": "mgmtcand-d973ad997d0d714d",
+        "topic": "management-domain-name",
+        "status": "candidate",
+        "independent_verdict": "pass",
+        "candidate_text_present": true,
+        "secret_text_present": false,
+        "evidence_id": "mgmt-9200-domain-name-v1",
+        "evidence_review_state": "independently-reviewed",
+        "evidence_content_digest": "e221b98733c8a9df0d45d2d68878c62efcf3051e89ecdd7bcffeca30fc642b44",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/configuring_secure_shell__ssh_.html",
+        "secret_bearing": false,
+        "evidence_digest_match": true,
+        "blocking_reasons": []
+      },
+      {
+        "candidate_id": "mgmtcand-b077f50a64a22016",
+        "topic": "management-ssh-version",
+        "status": "blocked",
+        "independent_verdict": "blocked",
+        "candidate_text_present": false,
+        "secret_text_present": false,
+        "evidence_id": "mgmt-9200-ssh-version-v1",
+        "evidence_review_state": "independently-reviewed",
+        "evidence_content_digest": "62786d76920888edd472a14118393db3cf608f8b2499fffc8c8a8a45b1fd6882",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/secure_shell_version_2_support.html",
+        "secret_bearing": false,
+        "evidence_digest_match": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "ssh-rsa-key-state-unknown"
+        ]
+      },
+      {
+        "candidate_id": "mgmtcand-374257f9b122c117",
+        "topic": "management-rsa-key",
+        "status": "blocked",
+        "independent_verdict": "blocked",
+        "candidate_text_present": false,
+        "secret_text_present": false,
+        "evidence_id": "mgmt-9200-rsa-key-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "5f9f71a9321b5b8b9ba1e0c6c110a8fd568822e7e4104e35cc113bfac6da23fa",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "evidence_digest_match": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "management-evidence-not-renderable"
+        ]
+      },
+      {
+        "candidate_id": "mgmtcand-5e0ad64b789b92a5",
+        "topic": "management-local-username",
+        "status": "blocked",
+        "independent_verdict": "blocked",
+        "candidate_text_present": false,
+        "secret_text_present": false,
+        "evidence_id": "mgmt-9200-local-username-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "6be66af71d018a7edf90de52b69e8f53fcf85014a7d85dd53e146b887eba2503",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/command_reference/b_1712_9200_cr/security_commands.html",
+        "secret_bearing": true,
+        "evidence_digest_match": true,
+        "blocking_reasons": [
+          "credential-secret-not-available",
+          "secret-command-not-renderable",
+          "management-evidence-not-renderable"
+        ]
+      },
+      {
+        "candidate_id": "mgmtcand-cae41d0ce06e5035",
+        "topic": "management-vty-transport",
+        "status": "blocked",
+        "independent_verdict": "blocked",
+        "candidate_text_present": false,
+        "secret_text_present": false,
+        "evidence_id": "mgmt-9200-vty-transport-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "044cf9b4b20013fbc8a069b25d43180f4b71895b09336e5555c29b6c6b02ab28",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "evidence_digest_match": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "management-evidence-not-renderable"
+        ]
+      },
+      {
+        "candidate_id": "mgmtcand-3dca0b5bee8552be",
+        "topic": "management-login-local",
+        "status": "blocked",
+        "independent_verdict": "blocked",
+        "candidate_text_present": false,
+        "secret_text_present": false,
+        "evidence_id": "mgmt-9200-login-local-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "25b93896cf82d1a32f2429eeef6050f39604d6260d7a2ba1afb827176dbc7431",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "evidence_digest_match": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "management-evidence-not-renderable"
+        ]
+      },
+      {
+        "candidate_id": "mgmtcand-9e67cb1976bc277b",
+        "topic": "management-aaa-new-model",
+        "status": "blocked",
+        "independent_verdict": "blocked",
+        "candidate_text_present": false,
+        "secret_text_present": false,
+        "evidence_id": "mgmt-9200-aaa-new-model-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "df1571f22aa0ff329881def36eef3cbfc273c41645d0077ae3bb8daff5386cb6",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "evidence_digest_match": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "aaa-or-console-lockout-risk",
+          "management-evidence-not-renderable"
+        ]
+      },
+      {
+        "candidate_id": "mgmtcand-06e23625acaab7a7",
+        "topic": "management-aaa-login-default",
+        "status": "blocked",
+        "independent_verdict": "blocked",
+        "candidate_text_present": false,
+        "secret_text_present": false,
+        "evidence_id": "mgmt-9200-aaa-login-default-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "c86ab9a854c5371f9a788b7fa2a89d76eee60cfd1f01d11971658c3389b487f8",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "evidence_digest_match": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "aaa-or-console-lockout-risk",
+          "management-evidence-not-renderable"
+        ]
+      },
+      {
+        "candidate_id": "mgmtcand-b54a301ce28ad42a",
+        "topic": "management-console-auth",
+        "status": "blocked",
+        "independent_verdict": "blocked",
+        "candidate_text_present": false,
+        "secret_text_present": false,
+        "evidence_id": "mgmt-9200-console-auth-v1",
+        "evidence_review_state": "pending-independent-review",
+        "evidence_content_digest": "c6edbfc65aaa9ae30008fe56004cde98714ecf128a0aa82ad06796dd4cd9860c",
+        "evidence_source_url": "https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/",
+        "secret_bearing": false,
+        "evidence_digest_match": true,
+        "blocking_reasons": [
+          "management-authentication-not-validated",
+          "console-recovery-not-verified",
+          "management-lockout-risk",
+          "aaa-or-console-lockout-risk",
+          "management-evidence-not-renderable"
+        ]
+      }
+    ],
+    "summary": {
+      "total": 9,
+      "passed": 1,
+      "blocked": 8,
+      "failed": 0
+    },
+    "overall_status": "partial",
+    "integrity": {
+      "revision_hash": true,
+      "intent_binding": true,
+      "source_binding": true,
+      "evidence_registry": true,
+      "expected_topic_set": true,
+      "candidate_ids_unique": true,
+      "candidate_evidence_binding": true,
+      "candidate_status": true,
+      "candidate_fingerprints": true,
+      "summary_derived": true,
+      "no_secret_text": true,
+      "safety": true
+    },
+    "safety": {
+      "candidate_only": true,
+      "read_only": true,
+      "executable": false,
+      "deployable": false,
+      "deployment_allowed": false,
+      "device_connection": "none",
+      "running_config_read": false,
+      "device_writes_enabled": false,
+      "full_config_generated": false,
+      "cli": null,
+      "deployment_artifact": null,
+      "hardware_verified": false,
+      "secrets_included": false,
+      "secret_placeholder_included": false
+    },
+    "report_fingerprint": "4fd32db1a5af293a243498f87e2b3a295e7a5fc24b3c2341fa644fe2630ea52c"
+  }
+}

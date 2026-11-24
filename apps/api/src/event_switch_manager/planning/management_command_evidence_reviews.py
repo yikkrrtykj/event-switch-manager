@@ -410,10 +410,17 @@ def _validate_production_manifest(
 
 
 def review_status(evidence_id: str) -> str:
-    """Production review status is fail-closed to server-authorized records."""
-    for record in PRODUCTION_APPROVED_RECORDS:
-        if production_review_record_valid(record) and record.evidence_id == evidence_id:
-            return "REVIEWED"
+    """Production REVIEWED requires the entire server-fixed Manifest to pass."""
+    if PRODUCTION_APPROVED_RECORDS:
+        try:
+            manifest = _validate_production_manifest(
+                PRODUCTION_APPROVED_RECORDS,
+            )
+        except ManagementReviewError:
+            manifest = ()
+        for record in manifest:
+            if record.evidence_id == evidence_id:
+                return "REVIEWED"
     for record in DOCUMENT_REVIEW_RECORDS:
         if (record.evidence_id == evidence_id
                 and document_review_record_valid(record)):

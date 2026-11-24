@@ -159,6 +159,7 @@ export interface ManagementValidationReport {
     secret_text_present: boolean
     evidence_id: string
     evidence_review_state: string
+    evidence_content_digest: string
     evidence_source_url: string
     secret_bearing: boolean
     evidence_digest_match: boolean
@@ -255,6 +256,60 @@ export interface ManagementReview {
   report: ManagementValidationReport
 }
 
+export interface ManagementRegistryTrustContract {
+  id: string
+  fingerprint: string
+  evidenceStatus: 'PENDING' | 'PARTIAL' | 'REVIEWED'
+  passed: number
+  blocked: number
+  overall: 'blocked' | 'partial'
+  domainTextAllowed: boolean
+  reviewedTopics: readonly string[]
+}
+
+const MANAGEMENT_REVIEWABLE_TOPICS = new Set([
+  'management-domain-name', 'management-ssh-version',
+])
+
+const R63_REVIEWED_EVIDENCE: Record<string, {
+  digest: string
+  sourceUrl: string
+}> = {
+  'mgmt-9300-domain-name-v1': {
+    digest: 'b476f57fa27800820d04ae75bd8aee091af2bb4bc7d491e4ba4a84479982473d',
+    sourceUrl: 'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-12/configuration_guide/sec/b_1712_sec_9300_cg/configuring_secure_shell__ssh_.html',
+  },
+  'mgmt-9300-ssh-version-v1': {
+    digest: '27b5c1975cf2bbc98337875827b9b931d535d9aba10055f0d467cdc00b5f88f5',
+    sourceUrl: 'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-12/configuration_guide/sec/b_1712_sec_9300_cg/secure_shell_version_2_support.html',
+  },
+  'mgmt-9200-domain-name-v1': {
+    digest: 'e221b98733c8a9df0d45d2d68878c62efcf3051e89ecdd7bcffeca30fc642b44',
+    sourceUrl: 'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/configuring_secure_shell__ssh_.html',
+  },
+  'mgmt-9200-ssh-version-v1': {
+    digest: '62786d76920888edd472a14118393db3cf608f8b2499fffc8c8a8a45b1fd6882',
+    sourceUrl: 'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/secure_shell_version_2_support.html',
+  },
+}
+
+/**
+ * Only server-authorized frozen Registry contracts are listed here. The
+ * reviewed contract must not be added until production approval is granted.
+ */
+export const MANAGEMENT_DRAFT_REGISTRY_CONTRACT: ManagementRegistryTrustContract = {
+  id: MANAGEMENT_EVIDENCE_REGISTRY_ID,
+  fingerprint: MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT,
+  evidenceStatus: 'PENDING',
+  passed: 0,
+  blocked: MANAGEMENT_EXPECTED_TOPICS.length,
+  overall: 'blocked',
+  domainTextAllowed: false,
+  reviewedTopics: [],
+}
+const MANAGEMENT_ACTIVE_REGISTRY_CONTRACTS:
+  readonly ManagementRegistryTrustContract[] = [MANAGEMENT_DRAFT_REGISTRY_CONTRACT]
+
 const sha256 = /^[0-9a-f]{64}$/
 const statuses = new Set<ManagementStatus>([
   'PLANNED', 'VALIDATED', 'BLOCKED', 'NOT_IMPLEMENTED', 'HARDWARE_NOT_VERIFIED',
@@ -299,6 +354,38 @@ function expectedDocumentCommand(topic: string, intent: ManagementIntent): strin
   // SSH version evidence can be reviewed, but authentication/key/recovery
   // gates keep its command text withheld.
   return null
+}
+
+interface TrustedSavedDomain {
+  assignmentFound: boolean
+  domain: string | null
+  valid: boolean
+}
+
+function trustedSavedDomain(binding: PreviewBinding): TrustedSavedDomain {
+  const plan = ordinaryRecord(binding.revision.plan)
+  const assignments = plan && Array.isArray(plan.assignments)
+    ? plan.assignments : null
+  const assignment = assignments?.find(
+    (item): item is Record<string, unknown> => {
+      const record = ordinaryRecord(item)
+      return record !== null &&
+        record.id === binding.assignment.assignmentId
+    },
+  )
+  if (!assignment) return { assignmentFound: false, domain: null, valid: false }
+  const raw = assignment.management_domain
+  if (raw === undefined || raw === null) {
+    return { assignmentFound: true, domain: null, valid: true }
+  }
+  if (typeof raw !== 'string') {
+    return { assignmentFound: true, domain: null, valid: false }
+  }
+  return {
+    assignmentFound: true,
+    domain: raw,
+    valid: safeManagementDomain(raw),
+  }
 }
 
 function candidatePayloadFingerprint(candidate: ManagementDocumentCandidate): string {
@@ -383,11 +470,29 @@ export async function fetchManagementReview(
 
 function validateManagementReviewRaw(
   value: ManagementReview, binding: PreviewBinding,
+  contracts: readonly ManagementRegistryTrustContract[],
 ): string[] {
   const problems: string[] = []
   const intent = value.intent
   const report = value.report
   if (hasSecretMaterial(value)) problems.push('management-secret-material')
+  const trustedRegistry = contracts.find(
+    (contract) => contract.id === intent.evidence_registry_id &&
+      contract.fingerprint === intent.evidence_registry_fingerprint,
+  )
+  const trust: ManagementRegistryTrustContract = trustedRegistry ?? {
+    id: '',
+    fingerprint: '',
+    evidenceStatus: 'PENDING',
+    passed: 0,
+    blocked: MANAGEMENT_EXPECTED_TOPICS.length,
+    overall: 'blocked',
+    domainTextAllowed: false,
+    reviewedTopics: [],
+  }
+  if (!trustedRegistry || intent.evidence_status !== trust.evidenceStatus) {
+    problems.push('management-pending-registry')
+  }
   if (intent.management_intent_schema_version !== 1 ||
     intent.contract_id !== MANAGEMENT_INTENT_CONTRACT ||
     !statuses.has(intent.status) ||
@@ -425,6 +530,16 @@ function validateManagementReviewRaw(
     intent.identity.stack_identity !== binding.assignment.stackIdentity
   ) {
     problems.push('management-identity-binding')
+  }
+  const savedDomain = trustedSavedDomain(binding)
+  if (!savedDomain.assignmentFound ||
+    intent.management_domain !== savedDomain.domain ||
+    !savedDomain.valid) {
+    problems.push('management-domain-binding')
+  }
+  if (trust.domainTextAllowed &&
+    (savedDomain.domain === null || !safeManagementDomain(savedDomain.domain))) {
+    problems.push('management-domain-unavailable')
   }
   if (!intent.ssh_policy || intent.ssh_policy.target_protocol !== 'sshv2' ||
     intent.ssh_policy.telnet_enabled !== false ||
@@ -465,12 +580,11 @@ function validateManagementReviewRaw(
     intent.device_connection !== 'none') {
     problems.push('management-safety')
   }
-  if (
-    intent.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
-    intent.evidence_registry_fingerprint !==
-      MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
-    intent.evidence_status !== 'PENDING'
-  ) {
+  if (trustedRegistry && (
+    intent.evidence_registry_id !== trust.id ||
+    intent.evidence_registry_fingerprint !== trust.fingerprint ||
+    intent.evidence_status !== trust.evidenceStatus
+  )) {
     problems.push('management-pending-registry')
   }
 
@@ -487,12 +601,10 @@ function validateManagementReviewRaw(
     report.expected_source.assignment_id !== binding.assignment.assignmentId ||
     report.source.management_intent_fingerprint !== intent.intent_fingerprint ||
     report.expected_source.management_intent_fingerprint !== intent.intent_fingerprint ||
-    report.source.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
-    report.expected_source.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
-    report.source.evidence_registry_fingerprint !==
-      MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
-    report.expected_source.evidence_registry_fingerprint !==
-      MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
+    report.source.evidence_registry_id !== trust.id ||
+    report.expected_source.evidence_registry_id !== trust.id ||
+    report.source.evidence_registry_fingerprint !== trust.fingerprint ||
+    report.expected_source.evidence_registry_fingerprint !== trust.fingerprint ||
     report.source.revision_uuid !== report.expected_source.revision_uuid ||
     report.source.revision_number !== report.expected_source.revision_number ||
     report.source.revision_hash !== report.expected_source.revision_hash) {
@@ -511,14 +623,19 @@ function validateManagementReviewRaw(
   }
   if (report.summary.total !== report.candidates.length ||
     report.summary.total !== MANAGEMENT_EXPECTED_TOPICS.length ||
-    report.summary.passed !== 0 ||
-    report.summary.blocked !== MANAGEMENT_EXPECTED_TOPICS.length ||
+    report.summary.passed !== trust.passed ||
+    report.summary.blocked !== trust.blocked ||
     report.summary.failed !== 0 ||
-    report.overall_status !== 'blocked') {
+    report.overall_status !== trust.overall) {
     problems.push('management-report-summary')
   }
   if (report.candidates.length !== MANAGEMENT_EXPECTED_TOPICS.length) {
     problems.push('management-topic-set')
+  }
+  if (trust.reviewedTopics.some(
+    (topic) => !MANAGEMENT_REVIEWABLE_TOPICS.has(topic),
+  )) {
+    problems.push('management-reviewed-claim')
   }
   const expectedTopics = new Set<string>(MANAGEMENT_EXPECTED_TOPICS)
   const seenTopics = new Set<string>()
@@ -534,22 +651,42 @@ function validateManagementReviewRaw(
     ids.add(candidate.candidate_id)
     const expectedId = expectedEvidenceId(candidate.topic, binding.assignment.family)
     const expectedSecret = candidate.topic === 'management-local-username'
+    const expectedReviewed = trust.reviewedTopics.includes(candidate.topic)
+    const frozenEvidence = expectedId
+      ? R63_REVIEWED_EVIDENCE[expectedId] : undefined
+    const expectedReviewState = expectedReviewed
+      ? 'independently-reviewed' : MANAGEMENT_PENDING_REVIEW_STATE
     if (
       expectedId === null ||
       candidate.evidence_id !== expectedId ||
+      !sha256.test(candidate.evidence_content_digest) ||
       !candidate.evidence_source_url.startsWith('https://www.cisco.com/') ||
       candidate.evidence_digest_match !== true ||
-      candidate.secret_bearing !== expectedSecret
+      candidate.secret_bearing !== expectedSecret ||
+      (expectedReviewed && (
+        frozenEvidence === undefined ||
+        candidate.evidence_content_digest !== frozenEvidence.digest ||
+        candidate.evidence_source_url !== frozenEvidence.sourceUrl
+      ))
     ) {
       problems.push('management-evidence-binding')
     }
+    const expectedDomainPass = trust.domainTextAllowed &&
+      candidate.topic === 'management-domain-name'
     if (
-      candidate.status !== 'blocked' ||
-      candidate.independent_verdict !== 'blocked' ||
-      candidate.evidence_review_state !== MANAGEMENT_PENDING_REVIEW_STATE ||
-      candidate.candidate_text_present !== false ||
       candidate.secret_text_present !== false ||
-      candidate.blocking_reasons.length === 0
+      candidate.evidence_review_state !== expectedReviewState ||
+      (expectedDomainPass && (
+        candidate.status !== 'candidate' ||
+        candidate.independent_verdict !== 'pass' ||
+        candidate.candidate_text_present !== true
+      )) ||
+      (!expectedDomainPass && (
+        candidate.status !== 'blocked' ||
+        candidate.independent_verdict !== 'blocked' ||
+        candidate.candidate_text_present !== false ||
+        candidate.blocking_reasons.length === 0
+      ))
     ) {
       problems.push('management-reviewed-claim')
     }
@@ -569,9 +706,8 @@ function validateManagementReviewRaw(
       document.source.revision_number !== binding.revision.number ||
       document.source.revision_hash !== binding.revision.content_hash ||
       document.source.management_intent_fingerprint !== intent.intent_fingerprint ||
-      document.source.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
-      document.source.evidence_registry_fingerprint !==
-        MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
+      document.source.evidence_registry_id !== trust.id ||
+      document.source.evidence_registry_fingerprint !== trust.fingerprint ||
       document.device.assignment_id !== binding.assignment.assignmentId ||
       document.device.hostname !== intent.identity.hostname ||
       document.device.family !== intent.identity.family ||
@@ -587,6 +723,8 @@ function validateManagementReviewRaw(
       document.summary.total !== document.candidates.length ||
       document.summary.total !== MANAGEMENT_EXPECTED_TOPICS.length ||
       document.summary.skipped !== 0 ||
+      document.summary.candidates !== trust.passed ||
+      document.summary.blocked !== trust.blocked ||
       document.summary.candidates !== document.candidates.filter(
         (candidate) => candidate.status === 'candidate',
       ).length ||
@@ -633,6 +771,7 @@ function validateManagementReviewRaw(
         reportCandidate.status !== candidate.status ||
         reportCandidate.evidence_id !== candidate.evidence_id ||
         reportCandidate.evidence_review_state !== candidate.evidence_review_state ||
+        reportCandidate.evidence_content_digest !== candidate.evidence_content_digest ||
         reportCandidate.evidence_source_url !== candidate.evidence_source_url ||
         reportCandidate.secret_bearing !== candidate.secret_bearing ||
         reportCandidate.candidate_text_present !== (candidate.candidate_text !== null)) {
@@ -676,9 +815,11 @@ function validateManagementReviewRaw(
 
 export function validateManagementReview(
   value: ManagementReview, binding: PreviewBinding,
+  contracts: readonly ManagementRegistryTrustContract[] =
+    MANAGEMENT_ACTIVE_REGISTRY_CONTRACTS,
 ): string[] {
   try {
-    return validateManagementReviewRaw(value, binding)
+    return validateManagementReviewRaw(value, binding, contracts)
   } catch {
     return ['management-contract']
   }

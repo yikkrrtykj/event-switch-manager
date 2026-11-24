@@ -16,6 +16,9 @@ from test_event_plans import API, ORIGIN
 from event_switch_manager.app import create_app
 from event_switch_manager.domain import DeviceFamily
 from event_switch_manager.management_api import MANAGEMENT_SCOPE_HEADER
+from event_switch_manager.planning import (
+    management_command_evidence_reviews as reviews_module,
+)
 from event_switch_manager.planning.inventory import EventDeviceAssignment
 from event_switch_manager.planning.layer2_intent import build_layer2_intent
 from event_switch_manager.planning.management_cli_candidates import (
@@ -31,6 +34,11 @@ from event_switch_manager.planning.management_command_evidence import (
     MANAGEMENT_EVIDENCE_ROWS,
     ManagementCommandTopic,
     ManagementEvidenceRegistry,
+)
+from event_switch_manager.planning.management_command_evidence_reviews import (
+    DOCUMENT_REVIEW_RECORDS,
+    R63_REVIEWED_REGISTRY_ID,
+    ManagementReviewRecord,
 )
 from event_switch_manager.planning.management_intent import build_management_intent
 from event_switch_manager.planning.plan import EventPlan, canonical_plan, plan_hash
@@ -74,11 +82,16 @@ def _save(client: TestClient, event_id: str, plan: dict[str, Any]) -> dict[str, 
 
 def _intent(
     plan: dict[str, Any], assignment_id: str,
+    evidence_registry: ManagementEvidenceRegistry | None = None,
 ) -> tuple[Any, Any, Any]:
     revision = revision_for(plan)
     l2_intent = build_layer2_intent(revision, None)
+    kwargs = (
+        {} if evidence_registry is None
+        else {"evidence_registry": evidence_registry}
+    )
     return revision, l2_intent, build_management_intent(
-        revision, l2_intent, UUID(assignment_id),
+        revision, l2_intent, UUID(assignment_id), **kwargs,
     )
 
 
@@ -235,8 +248,8 @@ def test_test_only_reviewed_evidence_exercises_candidate_and_validator() -> None
     plan, core = _plan_with_management(
         "00000000-0000-0000-0000-000000000099",
     )
-    revision, _l2, intent = _intent(plan, core["id"])
     registry = _reviewed_registry()
+    revision, _l2, intent = _intent(plan, core["id"], registry)
     document = build_management_cli_candidates(
         revision, intent, registry, test_only_registry=True,
     )
@@ -269,7 +282,6 @@ def test_evidence_digest_mismatch_blocks_candidate() -> None:
     plan, core = _plan_with_management(
         "00000000-0000-0000-0000-000000000099",
     )
-    revision, _l2, intent = _intent(plan, core["id"])
     rows = tuple(
         row.with_review(
             reviewer="TEST-ONLY-MANAGEMENT-REVIEW",
@@ -283,6 +295,7 @@ def test_evidence_digest_mismatch_blocks_candidate() -> None:
         for index, row in enumerate(rows)
     )
     registry = ManagementEvidenceRegistry(rows, production=False)
+    revision, _l2, intent = _intent(plan, core["id"], registry)
     document = build_management_cli_candidates(
         revision, intent, registry, test_only_registry=True,
     )
@@ -619,8 +632,8 @@ def test_reviewed_registry_requires_explicit_test_only_isolation() -> None:
     plan, core = _plan_with_management(
         "00000000-0000-0000-0000-000000000099",
     )
-    revision, _l2, intent = _intent(plan, core["id"])
     registry = _reviewed_registry()
+    revision, _l2, intent = _intent(plan, core["id"], registry)
     with pytest.raises(ManagementRenderError) as error:
         build_management_cli_candidates(revision, intent, registry)
     assert error.value.reason_code == "unapproved-management-evidence-registry"
@@ -637,3 +650,71 @@ def test_reviewed_registry_requires_explicit_test_only_isolation() -> None:
         "total": 9, "passed": 1, "blocked": 8, "failed": 0,
     }
     assert report.overall_status == "partial"
+def _temporary_production_manifest() -> tuple[ManagementReviewRecord, ...]:
+    return tuple(
+        replace(
+            record,
+            record_id=f"r65-{record.evidence_id}",
+            production_authorized=True,
+            approval_scope="PRODUCTION_ACTIVATION",
+        )
+        for record in DOCUMENT_REVIEW_RECORDS
+    )
+
+
+def test_api_readiness_under_temporary_production_manifest(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reviews_module,
+        "PRODUCTION_APPROVED_RECORDS",
+        _temporary_production_manifest(),
+    )
+    event_id = _event(client, "R65 production readiness")
+    plan, core = _plan_with_management(event_id)
+    revision = _save(client, event_id, plan)
+    base = (
+        API + f"/events/{event_id}/plan-revisions/{revision['id']}"
+        f"/assignments/{core['id']}"
+    )
+    intent = client.get(base + "/management-intent")
+    assert intent.status_code == 200, intent.text
+    body = intent.json()
+    assert body["evidence_registry_id"] == R63_REVIEWED_REGISTRY_ID
+    assert body["evidence_status"] == "PARTIAL"
+    document = client.get(base + "/management-cli-candidates")
+    assert document.status_code == 200, document.text
+    doc = document.json()
+    report = client.get(base + "/management-cli-validation")
+    assert report.status_code == 200, report.text
+    validation = report.json()
+    assert doc["summary"] == {
+        "total": 9, "candidates": 1, "blocked": 8, "skipped": 0,
+    }
+    assert validation["summary"] == {
+        "total": 9, "passed": 1, "blocked": 8, "failed": 0,
+    }
+    assert validation["overall_status"] == "partial"
+    domain = next(
+        item for item in doc["candidates"]
+        if item["topic"] == "management-domain-name"
+    )
+    assert domain["status"] == "candidate"
+    assert domain["candidate_text"] == "ip domain name example.com"
+    assert all(
+        item["candidate_text"] is None for item in doc["candidates"]
+        if item["topic"] != "management-domain-name"
+    )
+    assembly = client.get(base + "/config-assembly-preview")
+    assert assembly.status_code == 200, assembly.text
+    chapter = next(
+        item for item in assembly.json()["sections"]
+        if item["section_id"] == "management-auth-ssh"
+    )
+    assert chapter["required"] is True
+    assert chapter["status"] == "BLOCKED"
+    # Monkeypatch is restored after this test; the real selector remains draft.
+    monkeypatch.setattr(reviews_module, "PRODUCTION_APPROVED_RECORDS", ())
+    assert reviews_module.production_management_registry().registry_id == (
+        "cis-04b-management-command-evidence-draft-v1"
+    )
