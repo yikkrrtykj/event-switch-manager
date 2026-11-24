@@ -1,4 +1,4 @@
-﻿import { ApiError } from '../api'
+import { ApiError } from '../api'
 import { canonicalSha256 } from './canonical'
 import type { PreviewBinding } from './ciscoPreview'
 
@@ -159,6 +159,7 @@ export interface ManagementValidationReport {
     secret_text_present: boolean
     evidence_id: string
     evidence_review_state: string
+    evidence_content_digest: string
     evidence_source_url: string
     secret_bearing: boolean
     evidence_digest_match: boolean
@@ -263,6 +264,33 @@ export interface ManagementRegistryTrustContract {
   blocked: number
   overall: 'blocked' | 'partial'
   domainTextAllowed: boolean
+  reviewedTopics: readonly string[]
+}
+
+const MANAGEMENT_REVIEWABLE_TOPICS = new Set([
+  'management-domain-name', 'management-ssh-version',
+])
+
+const R63_REVIEWED_EVIDENCE: Record<string, {
+  digest: string
+  sourceUrl: string
+}> = {
+  'mgmt-9300-domain-name-v1': {
+    digest: 'b476f57fa27800820d04ae75bd8aee091af2bb4bc7d491e4ba4a84479982473d',
+    sourceUrl: 'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-12/configuration_guide/sec/b_1712_sec_9300_cg/configuring_secure_shell__ssh_.html',
+  },
+  'mgmt-9300-ssh-version-v1': {
+    digest: '27b5c1975cf2bbc98337875827b9b931d535d9aba10055f0d467cdc00b5f88f5',
+    sourceUrl: 'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-12/configuration_guide/sec/b_1712_sec_9300_cg/secure_shell_version_2_support.html',
+  },
+  'mgmt-9200-domain-name-v1': {
+    digest: 'e221b98733c8a9df0d45d2d68878c62efcf3051e89ecdd7bcffeca30fc642b44',
+    sourceUrl: 'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/configuring_secure_shell__ssh_.html',
+  },
+  'mgmt-9200-ssh-version-v1': {
+    digest: '62786d76920888edd472a14118393db3cf608f8b2499fffc8c8a8a45b1fd6882',
+    sourceUrl: 'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9200/software/release/17-12/configuration_guide/sec/b_1712_sec_9200_cg/secure_shell_version_2_support.html',
+  },
 }
 
 /**
@@ -277,6 +305,7 @@ export const MANAGEMENT_DRAFT_REGISTRY_CONTRACT: ManagementRegistryTrustContract
   blocked: MANAGEMENT_EXPECTED_TOPICS.length,
   overall: 'blocked',
   domainTextAllowed: false,
+  reviewedTopics: [],
 }
 const MANAGEMENT_ACTIVE_REGISTRY_CONTRACTS:
   readonly ManagementRegistryTrustContract[] = [MANAGEMENT_DRAFT_REGISTRY_CONTRACT]
@@ -325,6 +354,38 @@ function expectedDocumentCommand(topic: string, intent: ManagementIntent): strin
   // SSH version evidence can be reviewed, but authentication/key/recovery
   // gates keep its command text withheld.
   return null
+}
+
+interface TrustedSavedDomain {
+  assignmentFound: boolean
+  domain: string | null
+  valid: boolean
+}
+
+function trustedSavedDomain(binding: PreviewBinding): TrustedSavedDomain {
+  const plan = ordinaryRecord(binding.revision.plan)
+  const assignments = plan && Array.isArray(plan.assignments)
+    ? plan.assignments : null
+  const assignment = assignments?.find(
+    (item): item is Record<string, unknown> => {
+      const record = ordinaryRecord(item)
+      return record !== null &&
+        record.id === binding.assignment.assignmentId
+    },
+  )
+  if (!assignment) return { assignmentFound: false, domain: null, valid: false }
+  const raw = assignment.management_domain
+  if (raw === undefined || raw === null) {
+    return { assignmentFound: true, domain: null, valid: true }
+  }
+  if (typeof raw !== 'string') {
+    return { assignmentFound: true, domain: null, valid: false }
+  }
+  return {
+    assignmentFound: true,
+    domain: raw,
+    valid: safeManagementDomain(raw),
+  }
 }
 
 function candidatePayloadFingerprint(candidate: ManagementDocumentCandidate): string {
@@ -427,6 +488,7 @@ function validateManagementReviewRaw(
     blocked: MANAGEMENT_EXPECTED_TOPICS.length,
     overall: 'blocked',
     domainTextAllowed: false,
+    reviewedTopics: [],
   }
   if (!trustedRegistry || intent.evidence_status !== trust.evidenceStatus) {
     problems.push('management-pending-registry')
@@ -468,6 +530,16 @@ function validateManagementReviewRaw(
     intent.identity.stack_identity !== binding.assignment.stackIdentity
   ) {
     problems.push('management-identity-binding')
+  }
+  const savedDomain = trustedSavedDomain(binding)
+  if (!savedDomain.assignmentFound ||
+    intent.management_domain !== savedDomain.domain ||
+    !savedDomain.valid) {
+    problems.push('management-domain-binding')
+  }
+  if (trust.domainTextAllowed &&
+    (savedDomain.domain === null || !safeManagementDomain(savedDomain.domain))) {
+    problems.push('management-domain-unavailable')
   }
   if (!intent.ssh_policy || intent.ssh_policy.target_protocol !== 'sshv2' ||
     intent.ssh_policy.telnet_enabled !== false ||
@@ -560,6 +632,11 @@ function validateManagementReviewRaw(
   if (report.candidates.length !== MANAGEMENT_EXPECTED_TOPICS.length) {
     problems.push('management-topic-set')
   }
+  if (trust.reviewedTopics.some(
+    (topic) => !MANAGEMENT_REVIEWABLE_TOPICS.has(topic),
+  )) {
+    problems.push('management-reviewed-claim')
+  }
   const expectedTopics = new Set<string>(MANAGEMENT_EXPECTED_TOPICS)
   const seenTopics = new Set<string>()
   const ids = new Set<string>()
@@ -574,12 +651,23 @@ function validateManagementReviewRaw(
     ids.add(candidate.candidate_id)
     const expectedId = expectedEvidenceId(candidate.topic, binding.assignment.family)
     const expectedSecret = candidate.topic === 'management-local-username'
+    const expectedReviewed = trust.reviewedTopics.includes(candidate.topic)
+    const frozenEvidence = expectedId
+      ? R63_REVIEWED_EVIDENCE[expectedId] : undefined
+    const expectedReviewState = expectedReviewed
+      ? 'independently-reviewed' : MANAGEMENT_PENDING_REVIEW_STATE
     if (
       expectedId === null ||
       candidate.evidence_id !== expectedId ||
+      !sha256.test(candidate.evidence_content_digest) ||
       !candidate.evidence_source_url.startsWith('https://www.cisco.com/') ||
       candidate.evidence_digest_match !== true ||
-      candidate.secret_bearing !== expectedSecret
+      candidate.secret_bearing !== expectedSecret ||
+      (expectedReviewed && (
+        frozenEvidence === undefined ||
+        candidate.evidence_content_digest !== frozenEvidence.digest ||
+        candidate.evidence_source_url !== frozenEvidence.sourceUrl
+      ))
     ) {
       problems.push('management-evidence-binding')
     }
@@ -587,16 +675,15 @@ function validateManagementReviewRaw(
       candidate.topic === 'management-domain-name'
     if (
       candidate.secret_text_present !== false ||
+      candidate.evidence_review_state !== expectedReviewState ||
       (expectedDomainPass && (
         candidate.status !== 'candidate' ||
         candidate.independent_verdict !== 'pass' ||
-        candidate.evidence_review_state !== 'independently-reviewed' ||
         candidate.candidate_text_present !== true
       )) ||
       (!expectedDomainPass && (
         candidate.status !== 'blocked' ||
         candidate.independent_verdict !== 'blocked' ||
-        candidate.evidence_review_state !== MANAGEMENT_PENDING_REVIEW_STATE ||
         candidate.candidate_text_present !== false ||
         candidate.blocking_reasons.length === 0
       ))
@@ -684,6 +771,7 @@ function validateManagementReviewRaw(
         reportCandidate.status !== candidate.status ||
         reportCandidate.evidence_id !== candidate.evidence_id ||
         reportCandidate.evidence_review_state !== candidate.evidence_review_state ||
+        reportCandidate.evidence_content_digest !== candidate.evidence_content_digest ||
         reportCandidate.evidence_source_url !== candidate.evidence_source_url ||
         reportCandidate.secret_bearing !== candidate.secret_bearing ||
         reportCandidate.candidate_text_present !== (candidate.candidate_text !== null)) {

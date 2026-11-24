@@ -24,7 +24,10 @@ const binding = {
     id: revisionId,
     number: 1,
     content_hash: hash('a'),
-    plan: { management_vlan: 10 },
+    plan: {
+      management_vlan: 10,
+      assignments: [{ id: assignmentId, management_domain: 'example.com' }],
+    },
   } as unknown as Revision,
   assignment: {
     assignmentId,
@@ -82,6 +85,7 @@ function reportCandidateFor(topic: string, index: number) {
     secret_text_present: false,
     evidence_id: 'mgmt-9300-' + topic.slice('management-'.length) + '-v1',
     evidence_review_state: 'pending-independent-review',
+    evidence_content_digest: hash('e'),
     evidence_source_url: 'https://www.cisco.com/c/en/us/td/docs/security.html',
     secret_bearing: topic === 'management-local-username',
     evidence_digest_match: true,
@@ -271,6 +275,15 @@ function fixture(): ManagementReview {
   return value
 }
 
+const REVIEWED_DOMAIN_DIGEST =
+  'b476f57fa27800820d04ae75bd8aee091af2bb4bc7d491e4ba4a84479982473d'
+const REVIEWED_SSH_DIGEST =
+  '27b5c1975cf2bbc98337875827b9b931d535d9aba10055f0d467cdc00b5f88f5'
+const DOMAIN_SOURCE =
+  'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-12/configuration_guide/sec/b_1712_sec_9300_cg/configuring_secure_shell__ssh_.html'
+const SSH_SOURCE =
+  'https://www.cisco.com/c/en/us/td/docs/switches/lan/catalyst9300/software/release/17-12/configuration_guide/sec/b_1712_sec_9300_cg/secure_shell_version_2_support.html'
+
 const REVIEWED_CONTRACT: ManagementRegistryTrustContract = {
   id: 'cis-04b1-management-command-evidence-reviewed-v1',
   fingerprint: hash('f'),
@@ -279,6 +292,7 @@ const REVIEWED_CONTRACT: ManagementRegistryTrustContract = {
   blocked: 8,
   overall: 'partial',
   domainTextAllowed: true,
+  reviewedTopics: ['management-domain-name', 'management-ssh-version'],
 }
 
 function reviewedFixture(): ManagementReview {
@@ -292,8 +306,16 @@ function reviewedFixture(): ManagementReview {
     independent_verdict: 'pass',
     candidate_text_present: true,
     evidence_review_state: 'independently-reviewed',
+    evidence_content_digest: REVIEWED_DOMAIN_DIGEST,
+    evidence_source_url: DOMAIN_SOURCE,
     evidence_digest_match: true,
     blocking_reasons: [],
+  }
+  value.report.candidates[1] = {
+    ...value.report.candidates[1]!,
+    evidence_review_state: 'independently-reviewed',
+    evidence_content_digest: REVIEWED_SSH_DIGEST,
+    evidence_source_url: SSH_SOURCE,
   }
   value.report.summary = { total: 9, passed: 1, blocked: 8, failed: 0 }
   value.report.overall_status = 'partial'
@@ -302,7 +324,16 @@ function reviewedFixture(): ManagementReview {
     status: 'candidate',
     candidate_text: 'ip domain name example.com',
     evidence_review_state: 'independently-reviewed',
+    evidence_content_digest: REVIEWED_DOMAIN_DIGEST,
+    evidence_source_url: DOMAIN_SOURCE,
     blocking_reasons: [],
+    candidate_fingerprint: '',
+  }
+  value.document.candidates[1] = {
+    ...value.document.candidates[1]!,
+    evidence_review_state: 'independently-reviewed',
+    evidence_content_digest: REVIEWED_SSH_DIGEST,
+    evidence_source_url: SSH_SOURCE,
     candidate_fingerprint: '',
   }
   value.document.summary = { total: 9, candidates: 1, blocked: 8, skipped: 0 }

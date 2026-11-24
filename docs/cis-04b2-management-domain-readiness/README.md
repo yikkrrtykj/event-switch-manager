@@ -1,4 +1,4 @@
-# CIS-04B-2 — Management Domain CLI Production Readiness
+﻿# CIS-04B-2 — Management Domain CLI Production Readiness
 
 Status: **software readiness only; production authorization PENDING; management CLI BLOCKED**
 
@@ -78,6 +78,46 @@ The future real reviewed contract may be added only after independent production
 authorization and version/fingerprint freeze. `management-auth-ssh` Assembly
 remains required and BLOCKED.
 
+## R65A reviewed-contract closure
+
+The reviewed readiness path now distinguishes Evidence Review State from
+Candidate Verdict:
+
+| Topic | Evidence Review | Candidate | CLI |
+| --- | --- | --- | --- |
+| management-domain-name | independently-reviewed | PASS | `ip domain name <validated>` |
+| management-ssh-version | independently-reviewed | BLOCKED | none |
+| other seven topics | pending-independent-review | BLOCKED | none |
+
+The frontend derives the expected review state from the trusted Registry
+contract and topic, not from arbitrary server fields. SSH Version cannot become
+PASS merely because its Evidence is reviewed.
+
+Domain Name is also bound to the trusted Saved Revision Assignment:
+
+```text
+intent.management_domain == revision.plan.assignments[current].management_domain
+```
+
+A missing Assignment, missing domain, non-string/invalid domain, or a response
+domain that differs from the Saved Revision is rejected even after recomputing
+Intent/Document/Report fingerprints.
+
+The reviewed Evidence ID/Digest/Source are frozen for the four R63 entries.
+Report and Document must carry the same actual Evidence Content Digest and
+Source URL; 64-hex format and a Cisco hostname prefix alone are insufficient.
+
+Real backend fixtures were generated from the Python Management API using an
+isolated temporary production test-double Manifest and committed under
+`apps/web/src/planner/fixtures/` for C9300 and C9200. Vitest validates the
+actual Intent, Candidate Document and Validation Report, including both
+REVIEWED-but-BLOCKED SSH evidence and the single Domain PASS, under an explicit
+test-only Reviewed trust contract. Production active allowlist still contains
+only the Draft Registry; the reviewed test contract is rejected by default.
+
+A backend test verifies the serialized fixtures' reviewed Registry ID,
+fingerprint, both reviewed topics, digest/source, 1/8 summary and trusted
+Saved Revision domain. Production constants remain empty.
 ## Activation prerequisites
 
 1. Independent production approval covering exact Evidence digests, Reviewer,

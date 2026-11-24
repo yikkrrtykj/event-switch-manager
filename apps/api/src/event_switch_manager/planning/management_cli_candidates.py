@@ -164,6 +164,7 @@ class ManagementCandidateValidation(Record):
     secret_text_present: bool
     evidence_id: str
     evidence_review_state: str
+    evidence_content_digest: str
     evidence_source_url: str
     secret_bearing: bool
     evidence_digest_match: bool
@@ -705,6 +706,7 @@ def _validate_candidate_expected(
         secret_text_present=secret_text,
         evidence_id=candidate.evidence_id,
         evidence_review_state=candidate.evidence_review_state,
+        evidence_content_digest=expected.evidence_content_digest,
         evidence_source_url=candidate.evidence_source_url,
         secret_bearing=candidate.secret_bearing,
         evidence_digest_match=bool(
