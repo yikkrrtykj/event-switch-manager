@@ -144,6 +144,33 @@ The GUI download button now requires:
 A trustworthy partial report with business BLOCKED candidates remains
 exportable.  C3850/C2960X/C1000 Core, C9300 Access, loading and integrity-error
 states are disabled.  Backend Family/Role rejection remains authoritative.
+## R71B L2 Validation Report fingerprint closure
+
+R71A recomputed current L2 Candidate and Document fingerprints, but the current
+L2 Validation Report fingerprint was not yet recomputed.  R71B adds:
+
+```text
+recomputed current L2 report fingerprint
+    == stored L2 report report_fingerprint
+```
+
+using the existing `layer2_cli_validation._report_fingerprint()` canonical
+hash implementation.  It is checked alongside the existing:
+
+```text
+stored L2 report fingerprint
+    == Assembly source L2 validation fingerprint
+```
+
+A fail-first test mutates a current L2 Report Candidate's risk findings while
+leaving the Candidate Document, Candidate fingerprints, Report fingerprint,
+Report integrity flags, Assembly fingerprint and Revision unchanged.  Before
+the fix the bundle was produced; after the fix the backend raises
+`ReviewBundleError("review-bundle-l2-report-fingerprint-mismatch")` and the API
+returns a structured conflict without a download.
+
+Normal BLOCKED candidates, unchanged PASS command text, untampered C9300/C9200
+bundles and deterministic content digest behavior remain unchanged.
 ## Verification
 
 - Backend: C9300/C9200 bundle, partial/blocked candidates, unsupported family,

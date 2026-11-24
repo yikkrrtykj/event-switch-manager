@@ -29,6 +29,9 @@ from .layer2_cli_validation import (
     ValidationReport as L2ValidationReport,
 )
 from .layer2_cli_validation import (
+    _report_fingerprint as l2_report_fingerprint,
+)
+from .layer2_cli_validation import (
     recompute_candidate_fingerprint as recompute_l2_candidate_fingerprint,
 )
 from .layer2_cli_validation import (
@@ -291,6 +294,9 @@ def _verify_l2_current_content(
         raise ReviewBundleError("review-bundle-l2-document-fingerprint-mismatch")
     if report.source.render_fingerprint != actual_document:
         raise ReviewBundleError("review-bundle-l2-report-document-binding-mismatch")
+    actual_report = l2_report_fingerprint(report)
+    if report.report_fingerprint != actual_report:
+        raise ReviewBundleError("review-bundle-l2-report-fingerprint-mismatch")
     docs = [item.candidate_id for item in document.candidates]
     reports = [item.candidate_id for item in report.candidates]
     if len(docs) != len(set(docs)) or len(reports) != len(set(reports)):

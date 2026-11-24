@@ -526,6 +526,32 @@ def test_builder_rejects_revision_document_and_assignment_mismatch(
         _build_from_objects(bad_document, event_id, core)
 
 
+def test_l2_report_content_tamper_without_fingerprint_is_rejected(
+    client: TestClient,
+) -> None:
+    event_id = _event(client, "R71B L2 report tamper")
+    plan, core = _plan(event_id)
+    revision = _save(client, event_id, plan)
+    objects = _server_objects(client, event_id, plan, core, revision)
+    report = objects["l2_report"]
+    first = report.candidates[0]
+    forged_risk = first.risk.model_copy(update={
+        "findings": (*first.risk.findings, "forged-risk-finding"),
+    })
+    forged_candidate = first.model_copy(update={"risk": forged_risk})
+    tampered = report.model_copy(update={
+        "candidates": (forged_candidate, *report.candidates[1:]),
+    })
+    objects["l2_report"] = tampered
+    # Document, candidate fingerprints, Report fingerprint, Assembly and
+    # Revision remain unchanged.  The current L2 Report content must be
+    # independently fingerprinted before command text is emitted.
+    with pytest.raises(ReviewBundleError) as error:
+        _build_from_objects(objects, event_id, core)
+    assert error.value.reason_code == (
+        "review-bundle-l2-report-fingerprint-mismatch"
+    )
+
 def test_builder_rejects_blocked_candidate_text_injection(
     client: TestClient,
 ) -> None:
