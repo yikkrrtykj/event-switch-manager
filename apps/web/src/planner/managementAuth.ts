@@ -1,4 +1,4 @@
-import { ApiError } from '../api'
+﻿import { ApiError } from '../api'
 import { canonicalSha256 } from './canonical'
 import type { PreviewBinding } from './ciscoPreview'
 
@@ -255,6 +255,32 @@ export interface ManagementReview {
   report: ManagementValidationReport
 }
 
+export interface ManagementRegistryTrustContract {
+  id: string
+  fingerprint: string
+  evidenceStatus: 'PENDING' | 'PARTIAL' | 'REVIEWED'
+  passed: number
+  blocked: number
+  overall: 'blocked' | 'partial'
+  domainTextAllowed: boolean
+}
+
+/**
+ * Only server-authorized frozen Registry contracts are listed here. The
+ * reviewed contract must not be added until production approval is granted.
+ */
+export const MANAGEMENT_DRAFT_REGISTRY_CONTRACT: ManagementRegistryTrustContract = {
+  id: MANAGEMENT_EVIDENCE_REGISTRY_ID,
+  fingerprint: MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT,
+  evidenceStatus: 'PENDING',
+  passed: 0,
+  blocked: MANAGEMENT_EXPECTED_TOPICS.length,
+  overall: 'blocked',
+  domainTextAllowed: false,
+}
+const MANAGEMENT_ACTIVE_REGISTRY_CONTRACTS:
+  readonly ManagementRegistryTrustContract[] = [MANAGEMENT_DRAFT_REGISTRY_CONTRACT]
+
 const sha256 = /^[0-9a-f]{64}$/
 const statuses = new Set<ManagementStatus>([
   'PLANNED', 'VALIDATED', 'BLOCKED', 'NOT_IMPLEMENTED', 'HARDWARE_NOT_VERIFIED',
@@ -383,11 +409,28 @@ export async function fetchManagementReview(
 
 function validateManagementReviewRaw(
   value: ManagementReview, binding: PreviewBinding,
+  contracts: readonly ManagementRegistryTrustContract[],
 ): string[] {
   const problems: string[] = []
   const intent = value.intent
   const report = value.report
   if (hasSecretMaterial(value)) problems.push('management-secret-material')
+  const trustedRegistry = contracts.find(
+    (contract) => contract.id === intent.evidence_registry_id &&
+      contract.fingerprint === intent.evidence_registry_fingerprint,
+  )
+  const trust: ManagementRegistryTrustContract = trustedRegistry ?? {
+    id: '',
+    fingerprint: '',
+    evidenceStatus: 'PENDING',
+    passed: 0,
+    blocked: MANAGEMENT_EXPECTED_TOPICS.length,
+    overall: 'blocked',
+    domainTextAllowed: false,
+  }
+  if (!trustedRegistry || intent.evidence_status !== trust.evidenceStatus) {
+    problems.push('management-pending-registry')
+  }
   if (intent.management_intent_schema_version !== 1 ||
     intent.contract_id !== MANAGEMENT_INTENT_CONTRACT ||
     !statuses.has(intent.status) ||
@@ -465,12 +508,11 @@ function validateManagementReviewRaw(
     intent.device_connection !== 'none') {
     problems.push('management-safety')
   }
-  if (
-    intent.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
-    intent.evidence_registry_fingerprint !==
-      MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
-    intent.evidence_status !== 'PENDING'
-  ) {
+  if (trustedRegistry && (
+    intent.evidence_registry_id !== trust.id ||
+    intent.evidence_registry_fingerprint !== trust.fingerprint ||
+    intent.evidence_status !== trust.evidenceStatus
+  )) {
     problems.push('management-pending-registry')
   }
 
@@ -487,12 +529,10 @@ function validateManagementReviewRaw(
     report.expected_source.assignment_id !== binding.assignment.assignmentId ||
     report.source.management_intent_fingerprint !== intent.intent_fingerprint ||
     report.expected_source.management_intent_fingerprint !== intent.intent_fingerprint ||
-    report.source.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
-    report.expected_source.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
-    report.source.evidence_registry_fingerprint !==
-      MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
-    report.expected_source.evidence_registry_fingerprint !==
-      MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
+    report.source.evidence_registry_id !== trust.id ||
+    report.expected_source.evidence_registry_id !== trust.id ||
+    report.source.evidence_registry_fingerprint !== trust.fingerprint ||
+    report.expected_source.evidence_registry_fingerprint !== trust.fingerprint ||
     report.source.revision_uuid !== report.expected_source.revision_uuid ||
     report.source.revision_number !== report.expected_source.revision_number ||
     report.source.revision_hash !== report.expected_source.revision_hash) {
@@ -511,10 +551,10 @@ function validateManagementReviewRaw(
   }
   if (report.summary.total !== report.candidates.length ||
     report.summary.total !== MANAGEMENT_EXPECTED_TOPICS.length ||
-    report.summary.passed !== 0 ||
-    report.summary.blocked !== MANAGEMENT_EXPECTED_TOPICS.length ||
+    report.summary.passed !== trust.passed ||
+    report.summary.blocked !== trust.blocked ||
     report.summary.failed !== 0 ||
-    report.overall_status !== 'blocked') {
+    report.overall_status !== trust.overall) {
     problems.push('management-report-summary')
   }
   if (report.candidates.length !== MANAGEMENT_EXPECTED_TOPICS.length) {
@@ -543,13 +583,23 @@ function validateManagementReviewRaw(
     ) {
       problems.push('management-evidence-binding')
     }
+    const expectedDomainPass = trust.domainTextAllowed &&
+      candidate.topic === 'management-domain-name'
     if (
-      candidate.status !== 'blocked' ||
-      candidate.independent_verdict !== 'blocked' ||
-      candidate.evidence_review_state !== MANAGEMENT_PENDING_REVIEW_STATE ||
-      candidate.candidate_text_present !== false ||
       candidate.secret_text_present !== false ||
-      candidate.blocking_reasons.length === 0
+      (expectedDomainPass && (
+        candidate.status !== 'candidate' ||
+        candidate.independent_verdict !== 'pass' ||
+        candidate.evidence_review_state !== 'independently-reviewed' ||
+        candidate.candidate_text_present !== true
+      )) ||
+      (!expectedDomainPass && (
+        candidate.status !== 'blocked' ||
+        candidate.independent_verdict !== 'blocked' ||
+        candidate.evidence_review_state !== MANAGEMENT_PENDING_REVIEW_STATE ||
+        candidate.candidate_text_present !== false ||
+        candidate.blocking_reasons.length === 0
+      ))
     ) {
       problems.push('management-reviewed-claim')
     }
@@ -569,9 +619,8 @@ function validateManagementReviewRaw(
       document.source.revision_number !== binding.revision.number ||
       document.source.revision_hash !== binding.revision.content_hash ||
       document.source.management_intent_fingerprint !== intent.intent_fingerprint ||
-      document.source.evidence_registry_id !== MANAGEMENT_EVIDENCE_REGISTRY_ID ||
-      document.source.evidence_registry_fingerprint !==
-        MANAGEMENT_EVIDENCE_REGISTRY_FINGERPRINT ||
+      document.source.evidence_registry_id !== trust.id ||
+      document.source.evidence_registry_fingerprint !== trust.fingerprint ||
       document.device.assignment_id !== binding.assignment.assignmentId ||
       document.device.hostname !== intent.identity.hostname ||
       document.device.family !== intent.identity.family ||
@@ -587,6 +636,8 @@ function validateManagementReviewRaw(
       document.summary.total !== document.candidates.length ||
       document.summary.total !== MANAGEMENT_EXPECTED_TOPICS.length ||
       document.summary.skipped !== 0 ||
+      document.summary.candidates !== trust.passed ||
+      document.summary.blocked !== trust.blocked ||
       document.summary.candidates !== document.candidates.filter(
         (candidate) => candidate.status === 'candidate',
       ).length ||
@@ -676,9 +727,11 @@ function validateManagementReviewRaw(
 
 export function validateManagementReview(
   value: ManagementReview, binding: PreviewBinding,
+  contracts: readonly ManagementRegistryTrustContract[] =
+    MANAGEMENT_ACTIVE_REGISTRY_CONTRACTS,
 ): string[] {
   try {
-    return validateManagementReviewRaw(value, binding)
+    return validateManagementReviewRaw(value, binding, contracts)
   } catch {
     return ['management-contract']
   }

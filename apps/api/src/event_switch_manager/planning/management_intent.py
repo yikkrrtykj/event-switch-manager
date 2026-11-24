@@ -20,6 +20,7 @@ from .layer2_intent import Layer2Intent
 from .management_command_evidence import (
     MANAGEMENT_EVIDENCE_DRAFT_REGISTRY,
     MANAGEMENT_EVIDENCE_REGISTRY_ID,
+    ManagementEvidenceRegistry,
 )
 from .plan import PlanRevision
 from .types import Record
@@ -227,8 +228,17 @@ def build_management_intent(
     revision: PlanRevision,
     l2_intent: Layer2Intent,
     assignment_id: UUID,
+    evidence_registry: ManagementEvidenceRegistry = (
+        MANAGEMENT_EVIDENCE_DRAFT_REGISTRY
+    ),
 ) -> ManagementIntent:
     plan = revision.plan
+    reviewed_rows = sum(1 for row in evidence_registry.rows if row.renderable)
+    evidence_status: Literal["PENDING", "PARTIAL", "REVIEWED"] = (
+        "PENDING" if reviewed_rows == 0
+        else "REVIEWED" if reviewed_rows == len(evidence_registry.rows)
+        else "PARTIAL"
+    )
     assignment = next(
         (item for item in plan.assignments if item.id == assignment_id),
         None,
@@ -364,11 +374,9 @@ def build_management_intent(
             mode="local-only",
             reason_codes=aaa_reasons,
         ),
-        evidence_registry_id=MANAGEMENT_EVIDENCE_REGISTRY_ID,
-        evidence_registry_fingerprint=(
-            MANAGEMENT_EVIDENCE_DRAFT_REGISTRY.fingerprint
-        ),
-        evidence_status="PENDING",
+        evidence_registry_id=evidence_registry.registry_id,
+        evidence_registry_fingerprint=evidence_registry.fingerprint,
+        evidence_status=evidence_status,
         risk_codes=(
             "management-lockout-risk",
             "hardware-not-verified",

@@ -70,10 +70,17 @@ def _plan_with_management(event_id: str) -> tuple[dict[str, Any], dict[str, Any]
     return plan, core
 
 
-def _intent(plan: dict[str, Any], assignment_id: str) -> tuple[Any, Any, Any]:
+def _intent(
+    plan: dict[str, Any], assignment_id: str, evidence_registry: Any = None,
+) -> tuple[Any, Any, Any]:
     revision = revision_for(plan)
     l2_intent = build_layer2_intent(revision, None)
-    intent = build_management_intent(revision, l2_intent, UUID(assignment_id))
+    intent = build_management_intent(
+        revision, l2_intent, UUID(assignment_id),
+        **({} if evidence_registry is None else {
+            "evidence_registry": evidence_registry,
+        }),
+    )
     return revision, l2_intent, intent
 
 
@@ -188,16 +195,51 @@ def test_fixed_manifest_builds_a_reviewed_registry_and_invalidates_tampering() -
     assert error.value.reason_code == "management-review-attestation-incomplete"
 
 
+def test_intent_uses_the_same_reviewed_registry_boundary() -> None:
+    plan, core = _plan_with_management("00000000-0000-0000-0000-000000000099")
+    registry = make_test_only_registry()
+    revision = revision_for(plan)
+    l2_intent = build_layer2_intent(revision, None)
+    draft_intent = build_management_intent(
+        revision, l2_intent, UUID(core["id"]),
+    )
+    reviewed_intent = build_management_intent(
+        revision, l2_intent, UUID(core["id"]), evidence_registry=registry,
+    )
+    assert reviewed_intent.evidence_registry_id == registry.registry_id
+    assert reviewed_intent.evidence_registry_fingerprint == registry.fingerprint
+    assert reviewed_intent.evidence_status == "PARTIAL"
+    assert reviewed_intent.intent_fingerprint != draft_intent.intent_fingerprint
+    document = build_management_cli_candidates(
+        revision, reviewed_intent, registry, test_only_registry=True,
+    )
+    report = validate_management_candidates(
+        revision, reviewed_intent, document, registry, test_only_registry=True,
+    )
+    assert document.source.evidence_registry_id == registry.registry_id
+    assert document.source.evidence_registry_fingerprint == registry.fingerprint
+    assert report.source.evidence_registry_id == registry.registry_id
+    assert report.source.evidence_registry_fingerprint == registry.fingerprint
+    with pytest.raises(ManagementRenderError) as error:
+        build_management_cli_candidates(
+            revision, draft_intent, registry, test_only_registry=True,
+        )
+    assert error.value.reason_code == "management-intent-registry-mismatch"
+
+
 def test_isolated_reviewed_path_has_one_domain_pass_and_ssh_blocked() -> None:
     plan, core = _plan_with_management("00000000-0000-0000-0000-000000000099")
-    revision, _l2, intent = _intent(plan, core["id"])
     registry = make_test_only_registry()
+    revision, _l2, intent = _intent(plan, core["id"], registry)
     document = build_management_cli_candidates(
         revision, intent, registry, test_only_registry=True,
     )
     report = validate_management_candidates(
         revision, intent, document, registry, test_only_registry=True,
     )
+    assert intent.evidence_status == "PARTIAL"
+    assert intent.evidence_registry_id == registry.registry_id
+    assert intent.evidence_registry_fingerprint == registry.fingerprint
     assert document.summary.model_dump() == {
         "total": 9, "candidates": 1, "blocked": 8, "skipped": 0,
     }
@@ -247,12 +289,12 @@ def test_isolated_reviewed_path_has_one_domain_pass_and_ssh_blocked() -> None:
 ])
 def test_domain_injection_and_invalid_domains_are_blocked(domain: str) -> None:
     plan, core = _plan_with_management("00000000-0000-0000-0000-000000000099")
-    revision, _l2, intent = _intent(plan, core["id"])
+    registry = make_test_only_registry()
+    revision, _l2, intent = _intent(plan, core["id"], registry)
     changed = intent.model_copy(update={"management_domain": domain})
     changed = changed.model_copy(update={
         "intent_fingerprint": management_intent_fingerprint(changed),
     })
-    registry = make_test_only_registry()
     document = build_management_cli_candidates(
         revision, changed, registry, test_only_registry=True,
     )
@@ -277,14 +319,14 @@ def test_unknown_pid_release_or_license_stays_fail_closed_for_reviewed_path() ->
         ("exact_pid", "C9300-UNKNOWN"),
     ):
         plan, core = _plan_with_management("00000000-0000-0000-0000-000000000099")
-        revision, _l2, intent = _intent(plan, core["id"])
+        registry = make_test_only_registry()
+        revision, _l2, intent = _intent(plan, core["id"], registry)
         changed = intent.model_copy(update={
             "identity": intent.identity.model_copy(update={field: value}),
         })
         changed = changed.model_copy(update={
             "intent_fingerprint": management_intent_fingerprint(changed),
         })
-        registry = make_test_only_registry()
         document = build_management_cli_candidates(
             revision, changed, registry, test_only_registry=True,
         )
@@ -298,14 +340,21 @@ def test_unknown_pid_release_or_license_stays_fail_closed_for_reviewed_path() ->
 
 def test_test_only_reviewed_registry_cannot_be_selected_by_production() -> None:
     plan, core = _plan_with_management("00000000-0000-0000-0000-000000000099")
-    revision, _l2, intent = _intent(plan, core["id"])
     registry = make_test_only_registry()
+    revision, _l2, test_intent = _intent(plan, core["id"], registry)
     with pytest.raises(ManagementRenderError) as error:
-        build_management_cli_candidates(revision, intent, registry)
+        build_management_cli_candidates(revision, test_intent, registry)
     assert error.value.reason_code == "unapproved-management-evidence-registry"
     production = production_management_registry()
-    document = build_management_cli_candidates(revision, intent, production)
-    report = validate_management_candidates(revision, intent, document, production)
+    production_revision, _l2_prod, production_intent = _intent(
+        plan, core["id"],
+    )
+    document = build_management_cli_candidates(
+        production_revision, production_intent, production,
+    )
+    report = validate_management_candidates(
+        production_revision, production_intent, document, production,
+    )
     assert report.summary.model_dump() == {
         "total": 9, "passed": 0, "blocked": 9, "failed": 0,
     }
@@ -637,3 +686,25 @@ def test_exact_unique_production_manifest_passes_structure_only(
     assert registry.production is False
     assert registry.renderable_count == 4
     assert reviews_module.PRODUCTION_APPROVED_RECORDS == records
+def test_review_status_requires_complete_production_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = _production_records()
+    evidence_id = records[0].evidence_id
+    for invalid_manifest in (
+        records[:1],
+        records[:3],
+        (records[0], replace(records[0], record_id="other"), *records[1:3]),
+    ):
+        monkeypatch.setattr(
+            reviews_module, "PRODUCTION_APPROVED_RECORDS", invalid_manifest,
+        )
+        assert review_status(evidence_id) != "REVIEWED"
+        assert review_status(evidence_id) == "DOCUMENT-SYNTAX-REVIEWED"
+    monkeypatch.setattr(
+        reviews_module, "PRODUCTION_APPROVED_RECORDS", records,
+    )
+    assert all(review_status(record.evidence_id) == "REVIEWED" for record in records)
+    # The test double is temporary; the real production manifest remains empty.
+    monkeypatch.setattr(reviews_module, "PRODUCTION_APPROVED_RECORDS", ())
+    assert review_status(evidence_id) == "DOCUMENT-SYNTAX-REVIEWED"

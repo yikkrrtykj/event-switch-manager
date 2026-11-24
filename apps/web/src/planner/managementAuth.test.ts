@@ -9,7 +9,9 @@ import {
   MANAGEMENT_VALIDATION_CONTRACT,
   validateManagementReview,
 } from './managementAuth'
-import type { ManagementReview } from './managementAuth'
+import type {
+  ManagementRegistryTrustContract, ManagementReview,
+} from './managementAuth'
 import type { Revision } from './model'
 
 const hash = (character: string) => character.repeat(64)
@@ -269,6 +271,50 @@ function fixture(): ManagementReview {
   return value
 }
 
+const REVIEWED_CONTRACT: ManagementRegistryTrustContract = {
+  id: 'cis-04b1-management-command-evidence-reviewed-v1',
+  fingerprint: hash('f'),
+  evidenceStatus: 'PARTIAL',
+  passed: 1,
+  blocked: 8,
+  overall: 'partial',
+  domainTextAllowed: true,
+}
+
+function reviewedFixture(): ManagementReview {
+  const value = fixture()
+  value.intent.evidence_registry_id = REVIEWED_CONTRACT.id
+  value.intent.evidence_registry_fingerprint = REVIEWED_CONTRACT.fingerprint
+  value.intent.evidence_status = 'PARTIAL'
+  value.report.candidates[0] = {
+    ...value.report.candidates[0]!,
+    status: 'candidate',
+    independent_verdict: 'pass',
+    candidate_text_present: true,
+    evidence_review_state: 'independently-reviewed',
+    evidence_digest_match: true,
+    blocking_reasons: [],
+  }
+  value.report.summary = { total: 9, passed: 1, blocked: 8, failed: 0 }
+  value.report.overall_status = 'partial'
+  value.document.candidates[0] = {
+    ...value.document.candidates[0]!,
+    status: 'candidate',
+    candidate_text: 'ip domain name example.com',
+    evidence_review_state: 'independently-reviewed',
+    blocking_reasons: [],
+    candidate_fingerprint: '',
+  }
+  value.document.summary = { total: 9, candidates: 1, blocked: 8, skipped: 0 }
+  value.report.source.evidence_registry_id = REVIEWED_CONTRACT.id
+  value.report.expected_source.evidence_registry_id = REVIEWED_CONTRACT.id
+  value.report.source.evidence_registry_fingerprint = REVIEWED_CONTRACT.fingerprint
+  value.report.expected_source.evidence_registry_fingerprint =
+    REVIEWED_CONTRACT.fingerprint
+  resealDocument(value)
+  return resealReview(value)
+}
+
 describe('management/SSHv2 contract', () => {
   it('accepts a blocked PENDING review with no secret or CLI material', () => {
     const value = fixture()
@@ -431,5 +477,30 @@ describe('management/SSHv2 contract', () => {
     console.intent.console_recovery.console_operation = 'executed'
     expect(validateManagementReview(console, binding))
       .toContain('management-console-recovery')
+  })
+
+  it('requires an explicitly trusted contract to display the domain CLI', () => {
+    const value = reviewedFixture()
+    expect(validateManagementReview(value, binding, [REVIEWED_CONTRACT])).toEqual([])
+    const domain = value.document.candidates.find(
+      (candidate) => candidate.topic === 'management-domain-name',
+    )
+    expect(domain?.candidate_text).toBe('ip domain name example.com')
+    expect(value.report.candidates.filter(
+      (candidate) => candidate.status === 'candidate',
+    )).toHaveLength(1)
+    expect(value.document.candidates.filter(
+      (candidate) => candidate.candidate_text !== null,
+    )).toHaveLength(1)
+    // Production uses the active draft allowlist only; server fields alone
+    // cannot turn the reviewed fixture into trusted production output.
+    expect(validateManagementReview(value, binding))
+      .toContain('management-pending-registry')
+    const impostor = {
+      ...REVIEWED_CONTRACT,
+      fingerprint: hash('0'),
+    }
+    expect(validateManagementReview(value, binding, [impostor]))
+      .toContain('management-pending-registry')
   })
 })

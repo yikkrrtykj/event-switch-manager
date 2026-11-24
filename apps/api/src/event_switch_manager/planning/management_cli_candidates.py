@@ -24,6 +24,9 @@ from .management_command_evidence import (
     ManagementEvidenceRegistry,
     ManagementEvidenceRow,
 )
+from .management_command_evidence_reviews import (
+    production_management_registry,
+)
 from .management_intent import (
     ManagementIntent,
     management_intent_fingerprint,
@@ -234,6 +237,17 @@ def _family(intent: ManagementIntent) -> DeviceFamily | None:
     }.get(intent.identity.family or "")
 
 
+def _authorized_reviewed_registry(
+    registry: ManagementEvidenceRegistry,
+) -> bool:
+    production = production_management_registry()
+    return (
+        registry.renderable_count > 0
+        and registry.registry_id == production.registry_id
+        and registry.fingerprint == production.fingerprint
+    )
+
+
 def _find_evidence(
     intent: ManagementIntent,
     topic: ManagementCommandTopic,
@@ -414,7 +428,16 @@ def build_management_cli_candidates(
         raise ManagementRenderError("management-intent-revision-mismatch")
     if intent.assignment_id not in {item.id for item in revision.plan.assignments}:
         raise ManagementRenderError("assignment-not-in-saved-revision")
-    if not test_only_registry and registry.renderable_count:
+    if (
+        intent.evidence_registry_id != registry.registry_id
+        or intent.evidence_registry_fingerprint != registry.fingerprint
+    ):
+        raise ManagementRenderError("management-intent-registry-mismatch")
+    if (
+        not test_only_registry
+        and registry.renderable_count
+        and not _authorized_reviewed_registry(registry)
+    ):
         raise ManagementRenderError("unapproved-management-evidence-registry")
     candidates = tuple(
         _candidate(intent, topic, _find_evidence(intent, topic, registry), registry)
@@ -704,7 +727,16 @@ def validate_management_candidates(
         raise ManagementRenderError("revision-canonical-hash-mismatch")
     if intent.intent_fingerprint != management_intent_fingerprint(intent):
         raise ManagementRenderError("management-intent-fingerprint-mismatch")
-    if not test_only_registry and registry.renderable_count:
+    if (
+        intent.evidence_registry_id != registry.registry_id
+        or intent.evidence_registry_fingerprint != registry.fingerprint
+    ):
+        raise ManagementRenderError("management-intent-registry-mismatch")
+    if (
+        not test_only_registry
+        and registry.renderable_count
+        and not _authorized_reviewed_registry(registry)
+    ):
         raise ManagementRenderError("unapproved-management-evidence-registry")
     expected = ManagementExpectedSource(
         revision_uuid=revision.id,
