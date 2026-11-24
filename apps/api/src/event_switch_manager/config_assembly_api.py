@@ -20,7 +20,13 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from .api import DatabaseSession, find_event
+from .management_api import _build as _build_management
 from .plan_api import revision_and_baseline
+from .planning.cisco_review_bundle import (
+    CiscoReviewBundle,
+    ReviewBundleError,
+    build_cisco_review_bundle,
+)
 from .planning.config_assembly import (
     ASSEMBLY_CONTRACT_ID,
     AssemblyInputError,
@@ -79,7 +85,10 @@ from .planning.plan import PlanRevision, canonical_plan, plan_hash
 router = APIRouter(prefix="/api/v1/events/{event_id}")
 
 ASSEMBLY_SCOPE_HEADER = "X-Config-Assembly-Scope"
+REVIEW_BUNDLE_SCOPE_HEADER = "X-Cisco-Review-Bundle-Scope"
+REVIEW_BUNDLE_DIGEST_HEADER = "X-Cisco-Review-Bundle-Content-Digest"
 _FULL_SCOPE = "full"
+_REVIEW_BUNDLE_SCOPE = "read-only"
 _EVENT_NOT_FOUND_DETAIL = "Event not found"
 _REVISION_NOT_FOUND_DETAIL = "Plan revision not found"
 _REFUSED_HEADERS = ("if-match", "if-none-match")
@@ -318,6 +327,30 @@ def _require_cisco_assignment(
         )
 
 
+def _require_review_bundle_assignment(
+    revision: PlanRevision, assignment_id: UUID,
+) -> None:
+    """First bundle batch requires a core 9300/9200 assignment."""
+    assignment = next(
+        (item for item in revision.plan.assignments
+         if item.id == assignment_id),
+        None,
+    )
+    if assignment is None:
+        raise _not_found("assignment-not-found", "assignment")
+    if assignment.role.value != "core":
+        raise _conflict(
+            "review-bundle-assignment-not-core", "assignment",
+        )
+    if (
+        assignment.family is None
+        or assignment.family.value not in {"catalyst-9300", "catalyst-9200"}
+    ):
+        raise _conflict(
+            "review-bundle-platform-not-supported", "assignment",
+        )
+
+
 @router.get(
     "/plan-revisions/{revision_id}/assignments/{assignment_id}"
     "/config-assembly-preview",
@@ -358,8 +391,79 @@ async def read_config_assembly_preview(
     return assembly
 
 
+@router.get(
+    "/plan-revisions/{revision_id}/assignments/{assignment_id}"
+    "/cisco-review-bundle",
+    response_model=CiscoReviewBundle,
+)
+async def read_cisco_review_bundle(
+    event_id: UUID,
+    revision_id: UUID,
+    assignment_id: UUID,
+    request: Request,
+    response: Response,
+    session: DatabaseSession,
+) -> CiscoReviewBundle:
+    """Return one read-only Cisco review report bound to one saved revision."""
+    _reject_undeclared(request, await request.body())
+    _require_event(session, event_id)
+    event = find_event(session, event_id)
+    revision, baseline = _load_revisions(session, event_id, revision_id)
+    _verify_revision(revision, event_id, "revision")
+    if baseline is not None:
+        _verify_revision(baseline, event_id, "baseline")
+    _require_cisco_assignment(revision, assignment_id)
+    _require_review_bundle_assignment(revision, assignment_id)
+    l2_intent, l2_preview, l2_document, l2_report = _build_l2(
+        revision, baseline, assignment_id,
+    )
+    l3_intent, l3_document, l3_report = _build_l3(
+        revision, baseline, assignment_id,
+    )
+    management_intent, management_document, management_report = (
+        _build_management(revision, baseline, assignment_id)
+    )
+    try:
+        assembly = build_config_assembly(
+            revision, l2_intent, l2_preview, l2_document, l2_report,
+            l3_intent, l3_document, l3_report, assignment_id,
+        )
+    except AssemblyInputError as exc:
+        raise _conflict(exc.reason_code, "assembly") from None
+    try:
+        bundle = build_cisco_review_bundle(
+            event_id=event_id,
+            event_name=event.name,
+            revision=revision,
+            assignment_id=assignment_id,
+            l2_document=l2_document,
+            l2_report=l2_report,
+            l3_document=l3_document,
+            l3_report=l3_report,
+            management_document=management_document,
+            management_report=management_report,
+            assembly=assembly,
+        )
+    except ReviewBundleError as exc:
+        raise _conflict(
+            exc.reason_code, "review-bundle",
+            failures=list(exc.details),
+        ) from None
+    response.headers[REVIEW_BUNDLE_SCOPE_HEADER] = _REVIEW_BUNDLE_SCOPE
+    response.headers[REVIEW_BUNDLE_DIGEST_HEADER] = bundle.content_digest
+    response.headers["Content-Disposition"] = (
+        f'attachment; filename="{bundle.suggested_filename}"'
+    )
+    response.headers["ETag"] = f'"{bundle.content_digest}"'
+    response.headers["Cache-Control"] = "no-store"
+    return bundle
+
+
 __all__ = [
     "ASSEMBLY_SCOPE_HEADER",
+    "REVIEW_BUNDLE_DIGEST_HEADER",
+    "REVIEW_BUNDLE_SCOPE_HEADER",
+    "read_cisco_review_bundle",
     "read_config_assembly_preview",
     "router",
 ]

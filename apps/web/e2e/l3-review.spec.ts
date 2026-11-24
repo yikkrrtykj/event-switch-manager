@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+﻿import { randomUUID } from 'node:crypto'
 
 import { expect, test } from '@playwright/test'
 import type { APIRequestContext, Page } from '@playwright/test'
@@ -223,7 +223,7 @@ async function openInjectedReview(page: Page, eventId: string) {
   await page.getByLabel('Event', { exact: true }).selectOption(eventId)
   await expect(page.getByRole('heading', { name: 'L3 data binding is inconsistent' })).toBeVisible()
   await expect(page.locator('pre.l3-command')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download (?:config|configuration|cli|script|full)/i })).toHaveCount(0)
 }
 
 test('shows a saved revision read-only 9 PASS / 1 BLOCKED review', async ({ page, request }) => {
@@ -264,8 +264,8 @@ test('shows a saved revision read-only 9 PASS / 1 BLOCKED review', async ({ page
   await expect(page.getByText('DHCP Helper blocked', { exact: true })).toBeVisible()
   await expect(page.getByText('BLOCKED · Evidence PENDING · License UNRESOLVED', { exact: false })).toBeVisible()
 
-  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i })).toHaveCount(0)
-  await expect(page.getByRole('link', { name: /download|deploy|execute/i })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download (?:config|configuration|cli|script|full)/i })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: /download (?:config|configuration|cli|script|full)|deploy|execute/i })).toHaveCount(0)
 })
 
 test('shows a real C9200 saved revision with reviewed L3 candidates', async ({ page, request }) => {
@@ -303,7 +303,7 @@ test('shows a real C9200 saved revision with reviewed L3 candidates', async ({ p
   await expect(table.locator('tbody tr')).toHaveCount(8)
   await expect(table.getByText('PASS', { exact: true })).toHaveCount(6)
   await expect(table.getByText('CANDIDATE', { exact: true })).toHaveCount(6)
-  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download/i }))
+  await expect(page.getByRole('button', { name: /execute|deploy|copy all|generate script|download (?:config|configuration|cli|script|full)/i }))
     .toHaveCount(0)
 
   const ipRow = table.locator('tbody tr').filter({ hasText: 'ip-routing' }).first()

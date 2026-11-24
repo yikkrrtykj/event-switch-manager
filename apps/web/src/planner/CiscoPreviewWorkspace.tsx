@@ -54,6 +54,11 @@ import {
 } from './managementAuth'
 import type { ManagementReview } from './managementAuth'
 import {
+  downloadReviewBundle,
+  fetchReviewBundle,
+  reviewBundleFilename,
+} from './reviewBundle'
+import {
   canLoadCandidates as canLoadL3Candidates,
   fetchCandidates as fetchL3Candidates,
   fetchValidation as fetchL3Validation,
@@ -102,6 +107,8 @@ type ManagementView =
   | { kind: 'invalid'; problems: string[]; review?: ManagementReview }
   | { kind: 'error'; error: PreviewError }
   | { kind: 'ready'; review: ManagementReview }
+
+type ReviewBundleState = 'idle' | 'downloading' | 'ready' | 'error'
 
 const statusKey: Record<SubsystemStatus, MessageKey> = {
   pass: 'overallPass',
@@ -234,11 +241,15 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
   const [assembly, setAssembly] = useState<AssemblyView>({ kind: 'loading' })
   const [management, setManagement] = useState<ManagementView>({ kind: 'loading' })
   const [error, setError] = useState<PreviewError | null>(null)
+  const [bundleState, setBundleState] = useState<ReviewBundleState>('idle')
+  const [bundleError, setBundleError] = useState<PreviewError | null>(null)
   const [stage, setStage] = useState<'loading-revisions' | 'loading-revision' | 'ready'>('loading-revisions')
   const [bootAttempt, setBootAttempt] = useState(0)
   const [revisionAttempt, setRevisionAttempt] = useState(0)
   const [previewAttempt, setPreviewAttempt] = useState(0)
   const requestSequence = useRef(0)
+  const bundleSequence = useRef(0)
+  const bundleController = useRef<AbortController | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -254,6 +265,11 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
     setAssembly({ kind: 'loading' })
     setManagement({ kind: 'loading' })
     setError(null)
+    setBundleState('idle')
+    setBundleError(null)
+    bundleSequence.current += 1
+    bundleController.current?.abort()
+    bundleController.current = null
     void (async () => {
       try {
         const entries = await listRevisions(event.id, controller.signal)
@@ -283,6 +299,11 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
     setAssembly({ kind: 'loading' })
     setManagement({ kind: 'loading' })
     setError(null)
+    setBundleState('idle')
+    setBundleError(null)
+    bundleSequence.current += 1
+    bundleController.current?.abort()
+    bundleController.current = null
     void (async () => {
       try {
         const detail = await readRevision(event.id, revisionId, controller.signal)
@@ -378,6 +399,10 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
 
   const selectedAssignment = assignments.find((item) => item.assignmentId === assignmentId)
   const loading = stage.startsWith('loading') || l2.kind === 'loading' || l3.kind === 'loading'
+  const bundleAvailable = Boolean(
+    revision && selectedAssignment?.isCore && stage === 'ready' && !loading &&
+    assembly.kind !== 'loading' && management.kind !== 'loading' && !error,
+  )
   const overall = revision && selectedAssignment ? previewStatus(l2, l3) : null
   const device: DeviceIdentity | null = l2.kind === 'ready'
     ? {
@@ -397,11 +422,42 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
 
   function invalidatePreview() {
     requestSequence.current += 1
+    bundleSequence.current += 1
+    bundleController.current?.abort()
+    bundleController.current = null
     setL2({ kind: 'loading' })
     setL3({ kind: 'loading' })
     setAssembly({ kind: 'loading' })
     setManagement({ kind: 'loading' })
     setError(null)
+    setBundleState('idle')
+    setBundleError(null)
+  }
+
+  async function downloadBundle() {
+    if (!revision || !selectedAssignment || !bundleAvailable) return
+    const controller = new AbortController()
+    const sequence = ++bundleSequence.current
+    bundleController.current?.abort()
+    bundleController.current = controller
+    setBundleState('downloading')
+    setBundleError(null)
+    try {
+      const value = await fetchReviewBundle(
+        event.id, revision.id, selectedAssignment.assignmentId,
+        controller.signal,
+        reviewBundleFilename(
+          event.name, selectedAssignment.hostname, revision.number, event.id,
+        ),
+      )
+      if (controller.signal.aborted || sequence !== bundleSequence.current) return
+      downloadReviewBundle(value)
+      setBundleState('ready')
+    } catch (failure) {
+      if (controller.signal.aborted || isAbort(failure) || sequence !== bundleSequence.current) return
+      setBundleError(parsePreviewError(failure))
+      setBundleState('error')
+    }
   }
 
   function chooseRevision(next: string) {
@@ -440,11 +496,21 @@ export function CiscoPreviewWorkspace({ event, navigate }: { event: EventRecord;
         </div>
       </div>
       <div className="actions">
+        <Button primary onClick={() => void downloadBundle()} disabled={!bundleAvailable || bundleState === 'downloading'}>
+          {bundleState === 'downloading' ? t('ciscoReviewBundleDownloading') : t('ciscoReviewBundleDownload')}
+        </Button>
         <Button onClick={() => navigate('planner/addressing')}>{t('ciscoBackToPlanner')}</Button>
         <Button onClick={retry} disabled={loading}>{t('ciscoRetry')}</Button>
       </div>
     </div>
     <p className="cisco-scope-note" role="note">{t('ciscoScopeNote')}</p>
+    <p className="cisco-source-note" role="note">{t('ciscoReviewBundleNote')}</p>
+    {bundleState === 'ready' && <p className="cisco-source-note" role="status">
+      {t('ciscoReviewBundleDownloaded')}
+    </p>}
+    {bundleState === 'error' && <p className="cisco-source-note" role="alert">
+      {t('ciscoReviewBundleError')} {bundleError ? t(previewErrorKey(bundleError)) : ''}
+    </p>}
 
     {stage === 'loading-revisions' && <Loading>{t('ciscoLoadingRevisions')}</Loading>}
     {stage === 'loading-revision' && revisions !== null && revisions.length > 0 &&
