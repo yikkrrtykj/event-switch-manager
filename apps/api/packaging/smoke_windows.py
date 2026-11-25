@@ -180,9 +180,14 @@ def _start(
 
 
 def _powershell(command: str) -> subprocess.CompletedProcess[str]:
+    wrapped = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        + command
+    )
     return subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-        capture_output=True, text=True, timeout=15, check=False,
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", wrapped],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=15, check=False,
     )
 
 
@@ -244,7 +249,11 @@ def _inspect_runtime_modules(
             "runtime module enumeration failed with exit "
             f"{completed.returncode}: {completed.stderr.strip()}"
         )
-    paths = [line for line in completed.stdout.splitlines() if line.strip()]
+    paths = [
+        line.lstrip("\ufeff").strip()
+        for line in completed.stdout.splitlines()
+        if line.lstrip("\ufeff").strip()
+    ]
     if not paths:
         raise RuntimeError("runtime module enumeration returned no modules")
     evidence = _classify_runtime_modules(paths, package)
@@ -269,7 +278,7 @@ def _process_snapshot(pid: int) -> dict[str, Any]:
         raise RuntimeError(
             f"process enumeration failed for {pid}: {completed.stderr.strip()}"
         )
-    text = completed.stdout.strip()
+    text = completed.stdout.lstrip("\ufeff").strip()
     if not text:
         raise RuntimeError(f"process enumeration returned no data for {pid}")
     data = json.loads(text)
