@@ -68,3 +68,11 @@ def test_loopback_port_conflict_fails_without_stopping_owner() -> None:
         with pytest.raises(RuntimeError, match="No other process was stopped"):
             _ensure_loopback_port_available(port)
         assert owner.getsockname()[1] == port
+
+
+def test_loopback_port_can_be_reused_after_listener_closes() -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.close()
+    _ensure_loopback_port_available(port)

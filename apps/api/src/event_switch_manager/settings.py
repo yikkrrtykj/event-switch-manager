@@ -25,7 +25,19 @@ def default_web_dist() -> Path:
     root = frozen_bundle_root()
     if root is not None:
         return root / "web"
-    return Path(__file__).resolve().parents[3] / "web" / "dist"
+    # Search upward so an installed package still finds the checkout's web
+    # build, regardless of the launch working directory.
+    package_file = Path(__file__).resolve()
+    fallback: Path | None = None
+    for parent in package_file.parents:
+        candidate = parent / "apps" / "web" / "dist"
+        if (candidate / "index.html").is_file():
+            return candidate
+        if fallback is None and (parent / "apps" / "web").is_dir():
+            fallback = candidate
+    if fallback is not None:
+        return fallback
+    return Path.cwd() / "apps" / "web" / "dist"
 
 
 def default_migrations_location() -> str:

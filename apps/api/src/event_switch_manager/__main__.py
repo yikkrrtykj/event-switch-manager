@@ -20,18 +20,28 @@ from .settings import (
 
 def _ensure_loopback_port_available(port: int) -> None:
     """Fail safely without touching another process that owns the port."""
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        probe.bind((LOOPBACK, port))
-    except OSError as exc:
-        raise RuntimeError(
-            f"Port {port} is unavailable on {LOOPBACK}; close the other process "
-            "or choose a different --port. No other process was stopped."
-        ) from exc
-    finally:
-        probe.close()
+    deadline = time.monotonic() + 2
+    last_error: OSError | None = None
+    while True:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind((LOOPBACK, port))
+            return
+        except OSError as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Port {port} is unavailable on {LOOPBACK}; close the other "
+                    "process or choose a different --port. No other process was "
+                    "stopped."
+                ) from last_error
+            time.sleep(0.05)
+        finally:
+            probe.close()
 
 
 def _prepare_database(settings: Settings) -> None:
