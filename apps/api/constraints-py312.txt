@@ -28,6 +28,7 @@ platformdirs==4.10.0
 pluggy==1.6.0
 pydantic==2.13.4
 pydantic-core==2.46.4
+pyserial==3.5
 pygments==2.20.0
 pytest==9.0.3
 referencing==0.37.0

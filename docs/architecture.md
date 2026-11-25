@@ -48,3 +48,30 @@ See the [PR #2 data model design](pr2-data-model.md) for migration inputs, domai
 A durable run transitions through DISCOVER → BACKUP → PRECHECK → APPROVAL → RESET → REBOOT → BOOTSTRAP → DEPLOY → VERIFY → SAVE → COMPLETE. FAIL, SKIP, STOP_FOR_MANUAL and RECOVERY_REQUIRED preserve evidence and explain how to continue. Checkpoints bind the approved plan hash, exact device and Stack identity, platform strategy, backup evidence and approved maintenance context. Stop on missing or failed backup, unknown software, unhealthy Stack, uncertain reboot outcome or Console disconnect. Recovery begins with read-only rediscovery. A lost connection cannot trigger automatic replay of reset or reload.
 
 An approved strategy handles startup configuration and independent VLAN data without modifying boot variables, deleting images, formatting Flash, clearing licenses or invoking `factory-reset all`. Core approval additionally requires serial and role confirmation, a maintenance window and confirmation that the device is out of production, L3 and Stack checks, and a separate disruptive-operation confirmation. Verify authentication recovery via Console, running intent, save outcome and persistence. Only certified model/version combinations can become eligible.
+
+## CON-01 console read-only discovery
+
+`event_switch_manager.console` is a backend-only, observation-only foundation for Issue #9. It does not expose an HTTP endpoint, is not launched by the packaged runtime and never opens a real serial port automatically.
+
+- `discovery.py` enumerates Windows COM ports through pySerial `list_ports` and keeps adapter identity separate from a dynamic COM name. Missing serial numbers and duplicate adapters are marked ambiguous; enumeration never opens or writes a port. Non-Windows platforms return an explicit unsupported status.
+- `transport.py` defines explicit serial parameters and the disabled live adapter. `SerialTransport` refuses `open()` in CON-01; only simulator and recorded-fixture transports are used by tests. No BREAK, DTR/RTS toggle or reset escape sequence is sent.
+- `lease.py` supplies an in-process single-owner lease. It does not claim Windows driver or cross-process exclusivity; OS exclusivity remains `NOT_VERIFIED`.
+- `session.py` separates login/enable handling from typed read-only queries. Configuration mode, ROMMON, initial configuration dialog, unknown prompts, timeouts and disconnects fail closed. There is no generic command method.
+- `parser.py` incrementally recognizes IOS/IOS XE prompts, auth prompts, pagination, ANSI/backspace noise and bounded output. Device output is never executed and never used to construct an arbitrary next command.
+- `allowlist.py` maps only seven typed `ConsoleQuery` values to reviewed `show` commands. Query support differs by family and IOS/IOS XE; C1000 has no native Stack query and 2960X/C1000 intentionally do not get the IOS XE license/boot/storage set.
+
+  | Query | Command | Families |
+  | --- | --- | --- |
+  | VERSION | `show version` | 2960X, 3850, 9200, 9300, C1000 |
+  | INVENTORY | `show inventory` | 2960X, 3850, 9200, 9300, C1000 |
+  | INTERFACES | `show interfaces status` | 2960X, 3850, 9200, 9300, C1000 |
+  | STACK | `show switch` | 2960X, 3850, 9200, 9300 |
+  | LICENSE | `show license` | 3850, 9200, 9300 |
+  | BOOT | `show boot` | 3850, 9200, 9300 |
+  | STORAGE | `show file systems` | 3850, 9200, 9300 |
+
+  Query source URLs are bound in `console/allowlist.py`; a missing or unknown family permits bootstrap VERSION and INVENTORY only. No string command entry point exists.
+- `simulator.py` drives the full session/transport/parser/allowlist/observation path for 2960X, 3850, 9200, 9300 and C1000. Fixtures are synthetic or explicitly recorded; they are not real hardware certification.
+- `observation.py` produces a versioned evidence envelope, including source, capture time, session identity, query results, completeness, unknown fields and content fingerprint. `LIVE_DEVICE` is modeled but rejected in R82. Simulator/recorded evidence never sets `hardware_verified` or `deployment_approved`, and observations do not modify an Event Plan, Assignment, Revision or Capability Registry.
+
+pySerial 3.5 is the reviewed dependency. It is declared in the API project, constrained in `constraints-py312.txt`, and collected explicitly for PyInstaller. The portable runtime does not automatically enumerate or open serial ports; CON-01 is not reachable from the UI or production API. Real Windows COM discovery, real serial lease behavior and real device authentication remain hardware acceptance items.
