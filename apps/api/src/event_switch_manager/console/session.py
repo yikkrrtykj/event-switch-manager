@@ -457,12 +457,15 @@ class ConsoleSession:
             if read.auth is not None:
                 raise UnexpectedAuthPrompt("authentication prompt during query")
             self._check_bound_prompt(read)
-            output = redact_console_output(
-                _strip_echo(read.output, spec.command),
-                self._redaction_secrets,
-            )
+            raw_output = _strip_echo(read.output, spec.command)
             status = (
-                QueryStatus.FAILED if command_error_present(output) else QueryStatus.OK
+                QueryStatus.FAILED
+                if command_error_present(raw_output)
+                else QueryStatus.OK
+            )
+            output = redact_console_output(
+                raw_output,
+                self._redaction_secrets,
             )
             result = ConsoleQueryResult(
                 query=query,

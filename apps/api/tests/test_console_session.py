@@ -761,6 +761,24 @@ def test_transport_write_failure_closes_and_releases_lease() -> None:
     assert manager.active_owner("sim:scripted") is None
 
 
+def test_error_detection_precedes_credential_redaction() -> None:
+    transport = _ScriptedTransport(
+        "R1>\n",
+        {"show version": "show version\n% Invalid input detected at '^' marker.\nR1>\n"},
+    )
+    session = ConsoleSession(
+        transport,
+        lease_manager=ConsoleLeaseManager(),
+        timeout=1.0,
+    )
+    session.open(ConsoleCredentials("console", "input", None))
+    try:
+        with pytest.raises(DeviceCommandError):
+            session.query(ConsoleQuery.VERSION)
+    finally:
+        session.close()
+
+
 def test_query_output_redacts_exact_credential_values() -> None:
     transport = _ScriptedTransport(
         "R1>\n",
