@@ -64,6 +64,7 @@ def _session(
     error_commands: frozenset[ConsoleQuery] = frozenset(),
     pagination: bool = True,
     chunk_size: int = 5,
+    timeout: float = 1.0,
 ) -> ConsoleSession:
     transport = SimulatedConsoleTransport(
         profile=profile,
@@ -78,7 +79,7 @@ def _session(
     return ConsoleSession(
         transport,
         lease_manager=manager,
-        timeout=1.0,
+        timeout=timeout,
     )
 
 
@@ -404,12 +405,15 @@ def test_buffered_trailing_response_after_candidate_prompt_is_rejected() -> None
     assert transport.writes == ["show version\r"]
 
 
-def test_simulator_restores_exec_state_after_pagination() -> None:
+@pytest.mark.parametrize("chunk_size", [1, 9])
+def test_simulator_restores_exec_state_after_pagination(chunk_size: int) -> None:
     profile = replace(
         PROFILE,
         interfaces=tuple(f"Gi1/0/{index}" for index in range(1, 10)),
     )
-    session = _session(profile=profile, pagination=True, chunk_size=9)
+    session = _session(
+        profile=profile, pagination=True, chunk_size=chunk_size,
+    )
     session.open(CREDS)
     session.set_profile(resolve_profile("C9300L-24P-4X", "17.12.4"))
     try:
@@ -417,6 +421,26 @@ def test_simulator_restores_exec_state_after_pagination() -> None:
         assert "Gi1/0/9" in interfaces
         assert "FIXTURE930001" in session.query(ConsoleQuery.VERSION)
         assert session.state is SessionState.PRIVILEGED_EXEC
+    finally:
+        session.close()
+
+
+def test_discovery_deadline_bounds_silent_transport_read() -> None:
+    import time
+
+    session = _session(
+        timeout=0.5,
+        timeout_commands=frozenset({ConsoleQuery.VERSION}),
+    )
+    session.open(CREDS)
+    session.start_discovery(deadline_seconds=0.01)
+    started = time.monotonic()
+    try:
+        with pytest.raises(Exception) as error:
+            session.query(ConsoleQuery.VERSION)
+        elapsed = time.monotonic() - started
+        assert type(error.value).__name__ == "DiscoveryTimeout"
+        assert elapsed < 0.25
     finally:
         session.close()
 

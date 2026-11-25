@@ -483,8 +483,31 @@ class ConsoleSession:
                 raise
             raise SessionError("console operation failed") from exc
 
+    def _drain_pending_whitespace(self) -> bool:
+        """Drain pending bytes only when they are terminal whitespace."""
+        pending_fn = getattr(self._transport, "pending_data", None)
+        while callable(pending_fn) and pending_fn():
+            self._check_discovery_budget()
+            read_deadline = self._read_deadline()
+            remaining = read_deadline - time.monotonic()
+            if remaining <= 0:
+                self._check_discovery_budget()
+                return False
+            chunk = self._transport.read_chunk(max(0.001, remaining))
+            if not chunk:
+                break
+            if chunk.strip():
+                return False
+        return True
+
+    def _read_deadline(self) -> float:
+        prompt_deadline = time.monotonic() + self._timeout
+        if self._discovery_deadline is not None:
+            return min(prompt_deadline, self._discovery_deadline)
+        return prompt_deadline
+
     def _read_for_prompt(self, *, allow_pagination: bool = False) -> _PromptRead:
-        deadline = time.monotonic() + self._timeout
+        deadline = self._read_deadline()
         output = ""
         candidate: _PromptRead | None = None
         while time.monotonic() < deadline:
@@ -503,7 +526,7 @@ class ConsoleSession:
                         "prompt-like text occurred in command output",
                     )
                 return candidate
-            remaining = max(0.01, deadline - time.monotonic())
+            remaining = max(0.001, deadline - time.monotonic())
             chunk = self._transport.read_chunk(remaining)
             if not chunk:
                 continue
@@ -522,8 +545,7 @@ class ConsoleSession:
                         raise AmbiguousConsoleOutput("pagination after prompt")
                     if not allow_pagination:
                         raise UnsafeConsoleState("unexpected console pagination")
-                    pending_pages = getattr(self._transport, "pending_data", None)
-                    if callable(pending_pages) and pending_pages():
+                    if not self._drain_pending_whitespace():
                         raise AmbiguousConsoleOutput(
                             "pagination marker occurred with pending terminal data",
                         )
@@ -540,6 +562,7 @@ class ConsoleSession:
                 raise AmbiguousConsoleOutput(
                     "prompt-like text occurred in command output",
                 )
+        self._check_discovery_budget()
         raise ConsoleTimeout("console prompt timeout")
 
     def close(self) -> None:
