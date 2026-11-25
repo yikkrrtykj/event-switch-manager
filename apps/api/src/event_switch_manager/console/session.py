@@ -496,13 +496,12 @@ class ConsoleSession:
                 raise
             raise SessionError("console operation failed") from exc
 
-    def _drain_pending_whitespace(self) -> bool:
+    def _drain_pending_whitespace(self, deadline: float) -> bool:
         """Drain pending bytes only when they are terminal whitespace."""
         pending_fn = getattr(self._transport, "pending_data", None)
         while callable(pending_fn) and pending_fn():
             self._check_discovery_budget()
-            read_deadline = self._read_deadline()
-            remaining = read_deadline - time.monotonic()
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._check_discovery_budget()
                 return False
@@ -558,7 +557,7 @@ class ConsoleSession:
                         raise AmbiguousConsoleOutput("pagination after prompt")
                     if not allow_pagination:
                         raise UnsafeConsoleState("unexpected console pagination")
-                    if not self._drain_pending_whitespace():
+                    if not self._drain_pending_whitespace(deadline):
                         raise AmbiguousConsoleOutput(
                             "pagination marker occurred with pending terminal data",
                         )

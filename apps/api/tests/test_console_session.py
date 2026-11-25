@@ -459,6 +459,47 @@ def test_discovery_deadline_bounds_silent_transport_read() -> None:
         session.close()
 
 
+class _WhitespacePendingTransport(_ScriptedTransport):
+    def __init__(self) -> None:
+        super().__init__("R1>\n", {"show version": "show version\n--More--"})
+        self.whitespace_reads = 0
+        self.query_started = False
+
+    def write(self, text: str) -> None:
+        self.query_started = True
+        super().write(text)
+
+    def pending_data(self) -> bool:
+        return self.query_started and self.whitespace_reads < 20
+
+    def read_chunk(self, timeout: float) -> str:
+        if self.query_started and self.whitespace_reads < 20:
+            import time
+
+            time.sleep(0.005)
+            self.whitespace_reads += 1
+            return "\n"
+        return super().read_chunk(timeout)
+
+
+def test_pagination_whitespace_drain_uses_one_deadline() -> None:
+    import time
+
+    session = ConsoleSession(
+        _WhitespacePendingTransport(),
+        lease_manager=ConsoleLeaseManager(),
+        timeout=0.01,
+    )
+    session.open(None)
+    started = time.monotonic()
+    try:
+        with pytest.raises(SessionError):
+            session.query(ConsoleQuery.VERSION)
+        assert time.monotonic() - started < 0.1
+    finally:
+        session.close()
+
+
 def test_body_pagination_at_chunk_boundary_is_not_continued() -> None:
     transport = _ScriptedTransport(
         "R1>\n",
