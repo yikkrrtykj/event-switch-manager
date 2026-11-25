@@ -48,3 +48,43 @@ See the [PR #2 data model design](pr2-data-model.md) for migration inputs, domai
 A durable run transitions through DISCOVER → BACKUP → PRECHECK → APPROVAL → RESET → REBOOT → BOOTSTRAP → DEPLOY → VERIFY → SAVE → COMPLETE. FAIL, SKIP, STOP_FOR_MANUAL and RECOVERY_REQUIRED preserve evidence and explain how to continue. Checkpoints bind the approved plan hash, exact device and Stack identity, platform strategy, backup evidence and approved maintenance context. Stop on missing or failed backup, unknown software, unhealthy Stack, uncertain reboot outcome or Console disconnect. Recovery begins with read-only rediscovery. A lost connection cannot trigger automatic replay of reset or reload.
 
 An approved strategy handles startup configuration and independent VLAN data without modifying boot variables, deleting images, formatting Flash, clearing licenses or invoking `factory-reset all`. Core approval additionally requires serial and role confirmation, a maintenance window and confirmation that the device is out of production, L3 and Stack checks, and a separate disruptive-operation confirmation. Verify authentication recovery via Console, running intent, save outcome and persistence. Only certified model/version combinations can become eligible.
+
+## CON-01 console read-only discovery
+
+`event_switch_manager.console` is a backend-only, observation-only foundation for Issue #9. It does not expose an HTTP endpoint, is not launched by the packaged runtime and never opens a real serial port automatically.
+
+- `discovery.py` enumerates Windows COM ports through pySerial `list_ports` and keeps adapter identity separate from a dynamic COM name. Missing serial numbers and duplicate adapters are marked ambiguous; enumeration never opens or writes a port. Non-Windows platforms return an explicit unsupported status.
+- `transport.py` defines explicit serial parameters and the disabled live adapter. `SerialTransport` refuses `open()` in CON-01; only simulator and recorded-fixture transports are used by tests. No BREAK, DTR/RTS toggle or reset escape sequence is sent.
+- `lease.py` supplies an in-process single-owner lease. It does not claim Windows driver or cross-process exclusivity; OS exclusivity remains `NOT_VERIFIED`.
+- `session.py` separates login/enable handling from typed read-only queries. Configuration mode, ROMMON, initial configuration dialog, unknown prompts, timeouts and disconnects fail closed. There is no generic command method.
+- `parser.py` incrementally recognizes IOS/IOS XE prompts, auth prompts, pagination, ANSI/backspace noise and bounded output. Device output is never executed and never used to construct an arbitrary next command.
+- `allowlist.py` maps only seven typed `ConsoleQuery` values to reviewed `show` commands. Query support differs by family and IOS/IOS XE; C1000 has no native Stack query and 2960X/C1000 intentionally do not get the IOS XE license/boot/storage set.
+
+  | Query | Command | Families |
+  | --- | --- | --- |
+  | VERSION | `show version` | 2960X, 3850, 9200, 9300, C1000 |
+  | INVENTORY | `show inventory` | 2960X, 3850, 9200, 9300, C1000 |
+  | INTERFACES | `show interfaces status` | 2960X, 3850, 9200, 9300, C1000 |
+  | STACK | `show switch` | 2960X, 3850, 9200, 9300 |
+  | LICENSE | `show license` | 3850, 9200, 9300 |
+  | BOOT | `show boot` | 3850, 9200, 9300 |
+  | STORAGE | `show file systems` | 3850, 9200, 9300 |
+
+  Query source URLs are bound in `console/allowlist.py`; a missing or unknown family permits bootstrap VERSION and INVENTORY only. No string command entry point exists.
+- `simulator.py` drives the full session/transport/parser/allowlist/observation path for 2960X, 3850, 9200, 9300 and C1000. Fixtures are synthetic or explicitly recorded; they are not real hardware certification.
+- `observation.py` produces a versioned evidence envelope, including source, capture time, session identity, query results, completeness, unknown fields and content fingerprint. `LIVE_DEVICE` is modeled but rejected in R82. Simulator/recorded evidence never sets `hardware_verified` or `deployment_approved`, and observations do not modify an Event Plan, Assignment, Revision or Capability Registry.
+
+pySerial 3.5 is the reviewed dependency. It is declared in the API project, constrained in `constraints-py312.txt`, and collected explicitly for PyInstaller. The portable runtime does not automatically enumerate or open serial ports; CON-01 is not reachable from the UI or production API. Real Windows COM discovery, real serial lease behavior and real device authentication remain hardware acceptance items.
+R83 hardening adds a single shared process-local lease manager keyed by both physical adapter identity and canonical COM endpoint, prompt identity binding, exact PID/release profile resolution, bounded discovery deadlines/cancellation, multi-component inventory and multi-license parsing, partial-evidence failure recording and exact-value redaction. The live serial adapter remains hard-disabled even if constructed with a test-only flag; OS-level exclusivity is still `NOT_VERIFIED`.
+
+If transport cleanup fails, the application lease is retained so a new session cannot claim the endpoint; `close()` can be retried after the transport recovers. `cancel_discovery()` sets the cancellation event without taking the session state lock, so it is not blocked by an in-flight query. A false `pending_data()` result is not treated as proof that a real serial response has ended; real live serial prompt boundaries remain a future hardware gate, not a CON-01 software claim.
+
+### CON-01 hardware acceptance plan (not executed in R82/R83)
+
+1. Install the Windows USB Console driver and identify one adapter; record VID/PID, USB serial, COM endpoint and driver version.
+2. Confirm the switch is a lab device with no production or business links; record exact PID, chassis serial, IOS/IOS XE image and active license from labels/console.
+3. Configure only 9600-8-N-1, no flow control, unless the device-specific Cisco documentation says otherwise; do not send BREAK or toggle DTR/RTS.
+4. Establish OS-level exclusive access evidence from an independent process, open the COM session, log in and enable once, then perform only the reviewed read-only query set.
+5. Verify exact PID/release/profile match, Stack members, license fields, completeness and evidence fingerprint; record only sanitized evidence.
+6. Test adapter unplug, timeout, authentication failure, enable failure and recovery; verify lease release and no command replay.
+7. Record hardware success separately from capability, management or deployment certification. `CON-01-HARDWARE` remains `NOT_VERIFIED` until this plan is separately authorized and executed.
