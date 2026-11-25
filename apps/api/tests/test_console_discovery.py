@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -106,15 +107,17 @@ def test_non_windows_returns_explicit_unsupported_status_without_fake_records() 
     assert discovery.ports == ()
 
 
-def test_default_windows_enumeration_is_safe_without_opening_a_port() -> None:
-    discovery = discover_serial_ports(platform_name="win32")
-    assert discovery.status in {
-        SerialPlatformStatus.SUPPORTED,
-        SerialPlatformStatus.ENUMERATION_ERROR,
-    }
-    assert discovery.ports == () or all(
-        port.port.startswith("COM") for port in discovery.ports
-    )
+def test_default_enumeration_matches_the_host_platform() -> None:
+    discovery = discover_serial_ports()
+    if sys.platform == "win32":
+        assert discovery.status in {
+            SerialPlatformStatus.SUPPORTED,
+            SerialPlatformStatus.ENUMERATION_ERROR,
+        }
+        assert all(port.port.startswith("COM") for port in discovery.ports)
+    else:
+        assert discovery.status is SerialPlatformStatus.UNSUPPORTED_PLATFORM
+        assert discovery.ports == ()
 
 
 def test_live_serial_adapter_is_disabled_and_os_exclusivity_is_not_claimed() -> None:
