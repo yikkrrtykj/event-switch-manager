@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 
 import uvicorn
@@ -53,12 +54,18 @@ def _prepare_database(settings: Settings) -> None:
         engine.dispose()
 
 
-def _open_when_ready(server: uvicorn.Server, url: str) -> None:
-    deadline = time.monotonic() + 30
+def _open_when_ready(
+    server: uvicorn.Server,
+    url: str,
+    *,
+    timeout_seconds: float = 30,
+    open_browser: Callable[[str], bool] = webbrowser.open,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
     while not server.started and time.monotonic() < deadline:
         time.sleep(0.1)
     if server.started:
-        webbrowser.open(url)
+        open_browser(url)
 
 
 def main() -> int:

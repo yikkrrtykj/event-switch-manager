@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from event_switch_manager.__main__ import _ensure_loopback_port_available
+from event_switch_manager.__main__ import (
+    _ensure_loopback_port_available,
+    _open_when_ready,
+)
 from event_switch_manager.app import create_app
 from event_switch_manager.settings import (
     Settings,
@@ -41,9 +44,17 @@ def test_frozen_paths_are_independent_of_working_directory(
     assert frozen_bundle_root() == tmp_path
     assert default_web_dist() == tmp_path / "web"
     migrations = tmp_path / "event_switch_manager" / "migrations"
-    with pytest.raises(RuntimeError, match="Packaged Alembic migrations"):
+    with pytest.raises(RuntimeError, match="Packaged Alembic migration resources"):
         default_migrations_location()
     migrations.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="env.py"):
+        default_migrations_location()
+    (migrations / "env.py").write_text("")
+    (migrations / "script.py.mako").write_text("")
+    (migrations / "versions").mkdir()
+    with pytest.raises(RuntimeError, match="versions"):
+        default_migrations_location()
+    (migrations / "versions" / "0001_initial.py").write_text("")
     assert default_migrations_location() == str(migrations)
 
 
@@ -76,3 +87,31 @@ def test_loopback_port_can_be_reused_after_listener_closes() -> None:
     port = listener.getsockname()[1]
     listener.close()
     _ensure_loopback_port_available(port)
+
+
+def test_browser_contract_opens_only_after_server_ready() -> None:
+    calls: list[str] = []
+
+    def fake_open(url: str) -> bool:
+        calls.append(url)
+        return True
+
+    from typing import Any, cast
+
+    class FakeServer:
+        started = False
+
+    _open_when_ready(
+        cast(Any, FakeServer()), "http://127.0.0.1:8765", timeout_seconds=0.01,
+        open_browser=fake_open,
+    )
+    assert calls == []
+
+    class ReadyServer:
+        started = True
+
+    _open_when_ready(
+        cast(Any, ReadyServer()), "http://127.0.0.1:8765", timeout_seconds=0.01,
+        open_browser=fake_open,
+    )
+    assert calls == ["http://127.0.0.1:8765"]

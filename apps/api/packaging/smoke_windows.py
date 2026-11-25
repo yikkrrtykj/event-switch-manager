@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
-import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -79,21 +80,72 @@ def _wait_port_free(port: int, timeout: float = 15) -> bool:
     return False
 
 
-def _stop(process: subprocess.Popen[bytes]) -> int:
+def _listener_addresses(port: int) -> list[str]:
+    command = (
+        f"Get-NetTCPConnection -LocalPort {port} -State Listen | "
+        "Select-Object -ExpandProperty LocalAddress"
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _console_signal(process: subprocess.Popen[bytes]) -> bool:
+    """Deliver the same Ctrl+C event a user generates in a real console."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.AttachConsole.argtypes = [ctypes.c_uint32]
+    kernel32.AttachConsole.restype = ctypes.c_bool
+    kernel32.FreeConsole.restype = ctypes.c_bool
+    kernel32.GenerateConsoleCtrlEvent.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    kernel32.GenerateConsoleCtrlEvent.restype = ctypes.c_bool
+    detached = kernel32.FreeConsole()
+    attached = kernel32.AttachConsole(process.pid)
+    sent = False
+    try:
+        if attached:
+            sent = bool(kernel32.GenerateConsoleCtrlEvent(0, process.pid))
+    finally:
+        kernel32.FreeConsole()
+    return bool(detached or attached) and sent
+
+
+def _shutdown_gracefully(
+    process: subprocess.Popen[bytes], log: Path,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "shutdown_method": "windows-console-ctrl-c",
+        "forced_termination_used": False,
+        "graceful_shutdown_observed": False,
+        "process_tree_exited": False,
+    }
     if process.poll() is not None:
-        return int(process.returncode or 0)
-    try:
-        if hasattr(signal, "CTRL_C_EVENT"):
-            process.send_signal(signal.CTRL_C_EVENT)
-        else:
-            process.terminate()
-    except (OSError, ValueError):
-        process.terminate()
-    try:
-        return int(process.wait(timeout=15))
-    except subprocess.TimeoutExpired:
+        result["exit_code"] = int(process.returncode or 0)
+        result["error"] = "process exited before Ctrl+C"
+        return result
+    if not _console_signal(process):
+        result["error"] = "console Ctrl+C delivery failed"
         process.kill()
-        return int(process.wait(timeout=10))
+        process.wait(timeout=10)
+        result["forced_termination_used"] = True
+        result["exit_code"] = int(process.returncode or 0)
+        result["process_tree_exited"] = process.poll() is not None
+        return result
+    try:
+        exit_code = int(process.wait(timeout=20))
+    except subprocess.TimeoutExpired:
+        result["error"] = "Ctrl+C shutdown timed out"
+        process.kill()
+        exit_code = int(process.wait(timeout=10))
+        result["forced_termination_used"] = True
+    result["exit_code"] = exit_code
+    result["process_tree_exited"] = process.poll() is not None
+    text = log.read_text(errors="replace") if log.is_file() else ""
+    result["graceful_shutdown_observed"] = (
+        "Shutting down" in text and "Application shutdown complete" in text
+    )
+    return result
 
 
 def _start(
@@ -103,7 +155,6 @@ def _start(
     cwd = workspace / cwd_name
     cwd.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    # The portable executable must not need a Python or Node installation.
     system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
     env["PATH"] = str(system_root / "System32") + os.pathsep + str(system_root)
     for name in ("PYTHONHOME", "PYTHONPATH", "NODE_PATH"):
@@ -113,18 +164,24 @@ def _start(
     env["HTTPS_PROXY"] = "http://127.0.0.1:9"
     log.parent.mkdir(parents=True, exist_ok=True)
     output = log.open("wb")
-    database_args: list[str] = []
+    args = [str(exe), "--no-browser"]
+    if port != 8765:
+        args.extend(["--port", str(port)])
     if not use_default_database:
         database = workspace / "UserData" / "esm.sqlite3"
         database.parent.mkdir(parents=True, exist_ok=True)
-        database_args = ["--database", str(database)]
+        args.extend(["--database", str(database)])
+    flags = (
+        getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    )
     return subprocess.Popen(
-        [str(exe), "--no-browser", "--port", str(port), *database_args],
+        args,
         cwd=cwd,
         env=env,
         stdout=output,
         stderr=subprocess.STDOUT,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        creationflags=flags,
     )
 
 
@@ -155,6 +212,12 @@ def _module_check(process: subprocess.Popen[bytes], package: Path) -> list[str]:
     return findings
 
 
+def _integrity(path: Path) -> str:
+    with sqlite3.connect(path) as connection:
+        row = connection.execute("PRAGMA integrity_check").fetchone()
+    return "ok" if row is not None and row[0] == "ok" else str(row)
+
+
 def _make_plan(event_id: str) -> tuple[dict[str, Any], str]:
     tests = Path(__file__).resolve().parents[1] / "tests"
     source = Path(__file__).resolve().parents[1] / "src"
@@ -169,6 +232,31 @@ def _make_plan(event_id: str) -> tuple[dict[str, Any], str]:
     core["management_domain"] = "example.com"
     core["credential_reference"] = "credref:" + event_id + ":netops"
     return plan, str(core["id"])
+
+
+def _database_path(workspace: Path, args: argparse.Namespace) -> Path:
+    if args.use_default_database:
+        return Path(os.environ.get("LOCALAPPDATA", "")) / "EventSwitchManager" / "esm.sqlite3"
+    return workspace / "UserData" / "esm.sqlite3"
+
+
+def _record_normal_shutdown(
+    report: dict[str, Any], key: str, process: subprocess.Popen[bytes],
+    log: Path, port: int,
+) -> None:
+    shutdown = _shutdown_gracefully(process, log)
+    released = _wait_port_free(port)
+    shutdown["port_released"] = released
+    report[key] = shutdown
+    if (
+        shutdown["forced_termination_used"]
+        or not shutdown["graceful_shutdown_observed"]
+        or shutdown.get("exit_code") != 0
+        or not shutdown["process_tree_exited"]
+        or not released
+    ):
+        raise RuntimeError(f"{key} was not a verified graceful shutdown: {shutdown}")
+    report["checks"].append(key.replace("_shutdown", "").replace("_", "-") + "-shutdown")
 
 
 def main() -> int:
@@ -187,10 +275,13 @@ def main() -> int:
     exe = args.exe.resolve()
     package = exe.parent
     ORIGIN = f"http://127.0.0.1:{args.port}"
+    database_path = _database_path(args.workspace, args)
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "exe": str(exe),
         "port": args.port,
+        "default_port_used": args.port == 8765,
+        "database_path": str(database_path),
         "checks": [],
         "status": "failed",
     }
@@ -208,12 +299,17 @@ def main() -> int:
         )
         _wait_health(process)
         report["checks"].append("health")
+        addresses = _listener_addresses(args.port)
+        report["listener_addresses"] = addresses
+        if not addresses or any(address != "127.0.0.1" for address in addresses):
+            raise RuntimeError(f"unexpected listener addresses: {addresses}")
+        report["checks"].append("loopback-only")
         dashboard, _ = _request("/")
         if "<div id=\"root\"" not in dashboard and "Event Switch Manager" not in dashboard:
             raise RuntimeError("dashboard HTML was not served")
         report["checks"].append("dashboard")
         event, _ = _request("/api/v1/events", method="POST", payload={
-            "name": "R75 Portable Smoke",
+            "name": "R77 Portable Smoke",
             "management_vlan": 10,
         })
         event_id = event["id"]
@@ -262,21 +358,16 @@ def main() -> int:
         if findings:
             raise RuntimeError(f"host runtime modules loaded: {findings}")
         report["checks"].append("no-host-python-node-modules")
-        if args.use_default_database:
-            local = Path(os.environ.get("LOCALAPPDATA", ""))
-            database_path = local / "EventSwitchManager" / "esm.sqlite3"
-        else:
-            database_path = args.workspace / "UserData" / "esm.sqlite3"
-        report["database_path"] = str(database_path)
         if not database_path.is_file():
             raise RuntimeError("database was not created outside the package")
         report["checks"].append("data-outside-package")
-        first_code = _stop(process)
+        _record_normal_shutdown(report, "first_shutdown", process, first_log, args.port)
         process = None
-        if not _wait_port_free(args.port):
-            raise RuntimeError("port was not released after graceful shutdown")
-        report["checks"].append("port-release")
-        report["first_exit_code"] = first_code
+        integrity = _integrity(database_path)
+        report["database_integrity_after_normal_shutdown"] = integrity
+        if integrity != "ok":
+            raise RuntimeError(f"database integrity after shutdown: {integrity}")
+        report["checks"].append("database-integrity-normal")
 
         second_log = args.workspace / "second.log"
         process = _start(
@@ -290,13 +381,66 @@ def main() -> int:
         revisions, _ = _request(f"/api/v1/events/{event_id}/plan-revisions")
         if not any(item["id"] == revision_id for item in revisions):
             raise RuntimeError("revision did not persist across restart")
+        report["restart_persistence"] = True
         report["checks"].append("restart-persistence")
-        second_code = _stop(process)
+        _record_normal_shutdown(report, "second_shutdown", process, second_log, args.port)
         process = None
-        if not _wait_port_free(args.port):
-            raise RuntimeError("port was not released after second shutdown")
-        report["checks"].append("second-port-release")
-        report["second_exit_code"] = second_code
+        integrity = _integrity(database_path)
+        report["database_integrity_after_restart"] = integrity
+        if integrity != "ok":
+            raise RuntimeError(f"database integrity after restart: {integrity}")
+        second = report["second_shutdown"]
+        report["shutdown_method"] = second["shutdown_method"]
+        report["exit_code"] = second["exit_code"]
+        report["graceful_shutdown_observed"] = second["graceful_shutdown_observed"]
+        report["forced_termination_used"] = False
+        report["process_tree_exited"] = second["process_tree_exited"]
+        report["port_released"] = second["port_released"]
+        report["database_integrity"] = integrity
+        report["restart_persistence"] = True
+
+        # Forced termination recovery is deliberately separate from normal shutdown.
+        force_log = args.workspace / "forced.log"
+        process = _start(
+            exe, args.workspace, "cwd-c", args.port, force_log,
+            args.use_default_database,
+        )
+        _wait_health(process)
+        process.kill()
+        process.wait(timeout=10)
+        forced_code = int(process.returncode or 0)
+        process = None
+        forced_released = _wait_port_free(args.port)
+        forced_integrity = _integrity(database_path)
+        report["forced_termination"] = {
+            "forced_termination_used": True,
+            "exit_code": forced_code,
+            "port_released": forced_released,
+            "database_integrity": forced_integrity,
+        }
+        if not forced_released or forced_integrity != "ok":
+            raise RuntimeError(
+                f"forced termination recovery failed: {report['forced_termination']}"
+            )
+        report["checks"].append("forced-termination-recovery-start")
+        restart_log = args.workspace / "restart-after-force.log"
+        process = _start(
+            exe, args.workspace, "cwd-d", args.port, restart_log,
+            args.use_default_database,
+        )
+        _wait_health(process)
+        events, _ = _request("/api/v1/events")
+        revisions, _ = _request(f"/api/v1/events/{event_id}/plan-revisions")
+        if not any(item["id"] == event_id for item in events) or not any(
+            item["id"] == revision_id for item in revisions
+        ):
+            raise RuntimeError("data was not readable after forced termination")
+        report["forced_termination"]["restart_persistence"] = True
+        report["checks"].append("forced-termination-restart-persistence")
+        _record_normal_shutdown(
+            report, "restart_after_force_shutdown", process, restart_log, args.port,
+        )
+        process = None
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as owner:
             if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
@@ -305,7 +449,7 @@ def main() -> int:
             owner.listen()
             conflict_log = args.workspace / "conflict.log"
             conflict = _start(
-                exe, args.workspace, "cwd-c", args.port, conflict_log,
+                exe, args.workspace, "cwd-e", args.port, conflict_log,
                 args.use_default_database,
             )
             try:
@@ -313,12 +457,14 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 conflict.kill()
                 conflict_code = conflict.wait(timeout=10)
+                raise RuntimeError("port-conflict instance did not fail promptly") from None
             if conflict_code == 0:
                 raise RuntimeError("port-conflict EXE unexpectedly exited successfully")
             if owner.getsockname()[1] != args.port:
                 raise RuntimeError("port owner was disturbed")
+            report["port_conflict"] = {"exit_code": conflict_code, "owner_unchanged": True}
             report["checks"].append("port-conflict-safe")
-            report["port_conflict_exit_code"] = conflict_code
+        report["console_close"] = "NOT_VERIFIED"
         report["status"] = "passed"
         return 0
     except Exception as exc:
@@ -327,14 +473,18 @@ def main() -> int:
         return 1
     finally:
         if process is not None and process.poll() is None:
-            _stop(process)
+            process.kill()
+            process.wait(timeout=10)
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _log_tail(workspace: Path) -> str:
     text = ""
-    for name in ("first.log", "second.log", "conflict.log"):
+    for name in (
+        "first.log", "second.log", "forced.log",
+        "restart-after-force.log", "conflict.log",
+    ):
         path = workspace / name
         if path.is_file():
             text += f"\n--- {name} ---\n" + path.read_text(errors="replace")[-4000:]

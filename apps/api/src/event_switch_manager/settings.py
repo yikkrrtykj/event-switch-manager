@@ -46,8 +46,23 @@ def default_migrations_location() -> str:
     if root is None:
         return "event_switch_manager:migrations"
     migrations = root / "event_switch_manager" / "migrations"
-    if not migrations.is_dir():
-        raise RuntimeError(f"Packaged Alembic migrations are missing: {migrations}")
+    required = (
+        migrations / "env.py",
+        migrations / "script.py.mako",
+        migrations / "versions",
+    )
+    missing = [str(path) for path in required if not path.exists()]
+    versions = migrations / "versions"
+    if versions.is_dir() and not any(
+        item.suffix == ".py" and item.name != "__init__.py"
+        for item in versions.iterdir()
+    ):
+        missing.append(str(versions / "*.py"))
+    if not migrations.is_dir() or missing:
+        detail = ", ".join(missing) if missing else str(migrations)
+        raise RuntimeError(
+            f"Packaged Alembic migration resources are missing: {detail}"
+        )
     return str(migrations)
 
 

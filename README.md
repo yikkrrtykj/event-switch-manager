@@ -69,10 +69,15 @@ portable directory. Use `--database PATH` for an isolated workspace. Use
 `--no-browser` when running a smoke test or scripted startup.
 
 Close the application with Ctrl+C or by closing its console; the listening
-port is released. If port 8765 is occupied, startup fails with an explicit
-message and does not stop the other process. For an offline backup, stop the
-application first, then copy `esm.sqlite3` to a separate location. Migration
-failure is reported without deleting or recreating an existing database.
+port is released. The packaged default is `127.0.0.1:8765`; `--port` is only
+for isolated tests and does not change the default contract. The Windows
+smoke test verifies real console Ctrl+C shutdown, exit code, process exit,
+database integrity and port release. `--no-browser` disables only the browser
+launch; it does not change serving behavior. If port 8765 is occupied,
+startup fails with an explicit message and does not stop the other process.
+For an offline backup, stop the application first, then copy `esm.sqlite3` to
+a separate location. Migration failure is reported without deleting or
+recreating an existing database.
 
 The real EXE smoke test (health, dashboard, Event, saved Revision, Cisco Review
 Bundle JSON, restart persistence, arbitrary working directories, port conflict
