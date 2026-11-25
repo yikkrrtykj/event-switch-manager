@@ -5,7 +5,10 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import URL, Engine, create_engine, event
 
-from .settings import default_migrations_location
+from .settings import (
+    default_migrations_location,
+    escape_alembic_script_location,
+)
 
 
 def create_database_engine(path: Path) -> Engine:
@@ -22,7 +25,10 @@ def create_database_engine(path: Path) -> Engine:
 
 def upgrade_database(engine: Engine) -> None:
     config = Config()
-    config.set_main_option("script_location", default_migrations_location())
+    config.set_main_option(
+        "script_location",
+        escape_alembic_script_location(default_migrations_location()),
+    )
     with engine.connect() as connection:
         # Take the SQLite writer lock before reading the migration version.
         connection.exec_driver_sql("BEGIN IMMEDIATE")

@@ -44,12 +44,20 @@ PACKAGED_REVISION_IDS = ("0001_event_inventory", "0002_event_plans")
 PACKAGED_HEAD_ID = "0002_event_plans"
 
 
+def escape_alembic_script_location(location: str) -> str:
+    """Escape percent signs at Alembic's ConfigParser interpolation boundary."""
+    return location.replace("%", "%%")
+
+
 def _validate_packaged_migrations(migrations: Path) -> None:
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
     config = Config()
-    config.set_main_option("script_location", str(migrations))
+    config.set_main_option(
+        "script_location",
+        escape_alembic_script_location(str(migrations)),
+    )
     try:
         script = ScriptDirectory.from_config(config)
         for revision_id in PACKAGED_REVISION_IDS:

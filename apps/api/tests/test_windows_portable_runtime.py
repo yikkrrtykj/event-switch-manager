@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -12,17 +13,23 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy.orm import Session
 
 from event_switch_manager.__main__ import (
     _ensure_loopback_port_available,
     _open_when_ready,
 )
 from event_switch_manager.app import create_app
+from event_switch_manager.database import create_database_engine, upgrade_database
+from event_switch_manager.models import Event
 from event_switch_manager.settings import (
     Settings,
     default_database_path,
     default_migrations_location,
     default_web_dist,
+    escape_alembic_script_location,
     frozen_bundle_root,
 )
 
@@ -68,6 +75,100 @@ def test_frozen_paths_are_independent_of_working_directory(
     for name in ("0001_event_inventory.py", "0002_event_plans.py"):
         shutil.copy2(source_versions / name, migrations / "versions" / name)
     assert default_migrations_location() == str(migrations)
+
+
+def _copy_migrations(root: Path) -> Path:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "event_switch_manager" / "migrations"
+    )
+    target = root / "event_switch_manager" / "migrations"
+    shutil.copytree(source, target)
+    return target
+
+
+@pytest.mark.parametrize("path_name", [
+    "normal",
+    "100% portable",
+    "100%% portable",
+    "%(here)s portable",
+    "中文 100% portable",
+])
+def test_percent_paths_roundtrip_and_migrate(
+    path_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / path_name
+    migrations = _copy_migrations(root)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(root), raising=False)
+    raw_location = default_migrations_location()
+    assert raw_location == str(migrations)
+    config = Config()
+    config.set_main_option(
+        "script_location",
+        escape_alembic_script_location(raw_location),
+    )
+    assert config.get_main_option("script_location") == raw_location
+    database = tmp_path / "migrated.sqlite3"
+    engine = create_database_engine(database)
+    try:
+        upgrade_database(engine)
+        upgrade_database(engine)
+    finally:
+        engine.dispose()
+    with sqlite3.connect(database) as connection:
+        version = connection.execute(
+            "SELECT version_num FROM alembic_version",
+        ).fetchone()
+    assert version == ("0002_event_plans",)
+
+
+def test_percent_path_old_schema_preserves_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "100% portable"
+    migrations = _copy_migrations(root)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(root), raising=False)
+    database = tmp_path / "old.sqlite3"
+    engine = create_database_engine(database)
+    config = Config()
+    config.set_main_option(
+        "script_location",
+        escape_alembic_script_location(str(migrations)),
+    )
+    with engine.connect() as connection:
+        config.attributes["connection"] = connection
+        command.upgrade(config, "0001_event_inventory")
+        connection.commit()
+    with Session(engine) as session:
+        session.add(Event(name="Percent Path Preserved", management_vlan=10))
+        session.commit()
+    try:
+        upgrade_database(engine)
+    finally:
+        engine.dispose()
+    with sqlite3.connect(database) as connection:
+        version = connection.execute(
+            "SELECT version_num FROM alembic_version",
+        ).fetchone()
+        event = connection.execute(
+            "SELECT name FROM events WHERE name = ?",
+            ("Percent Path Preserved",),
+        ).fetchone()
+    assert version == ("0002_event_plans",)
+    assert event == ("Percent Path Preserved",)
+
+
+def test_percent_path_missing_migration_fails_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "100% portable"
+    (root / "event_switch_manager" / "migrations").mkdir(parents=True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(root), raising=False)
+    with pytest.raises(RuntimeError, match="Packaged Alembic migration resources"):
+        default_migrations_location()
 
 
 def test_packaged_migration_graph_requires_both_revisions(

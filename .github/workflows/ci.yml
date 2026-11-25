@@ -185,15 +185,44 @@ jobs:
           $report = Get-Content "apps/api/dist/EventSwitchManager-smoke-report.json" -Raw | ConvertFrom-Json
           if ($report.status -ne "passed") { throw "Portable smoke report did not pass." }
           Write-Output "Portable smoke checks: $($report.checks -join ', ')"
+      - name: Run percent-path EXE smoke
+        shell: pwsh
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $extract = Join-Path $env:RUNNER_TEMP "中文 100% portable"
+          if (Test-Path $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          Expand-Archive -LiteralPath "apps/api/dist/EventSwitchManager-windows-x64.zip" `
+            -DestinationPath $extract -Force
+          $workspace = Join-Path $env:RUNNER_TEMP "esm-portable-percent-smoke"
+          if (Test-Path $workspace) { Remove-Item -LiteralPath $workspace -Recurse -Force }
+          python apps/api/packaging/smoke_windows.py `
+            --exe (Join-Path $extract "EventSwitchManager\EventSwitchManager.exe") `
+            --workspace $workspace `
+            --report "apps/api/dist/EventSwitchManager-smoke-percent-report.json" `
+            --build-record "apps/api/dist/EventSwitchManager-build-record.json" `
+            --zip "apps/api/dist/EventSwitchManager-windows-x64.zip" `
+            --expected-git-sha "$env:EXPECTED_HEAD_SHA" `
+            --use-default-database
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content "apps/api/dist/EventSwitchManager-smoke-percent-report.json" -Raw | ConvertFrom-Json
+          if ($report.status -ne "passed") { throw "Percent-path smoke report did not pass." }
+          Write-Output "Percent-path checks: $($report.checks -join ', ')"
       - name: Preserve raw Windows smoke logs
         if: always()
         shell: pwsh
         run: |
-          $workspace = Join-Path $env:RUNNER_TEMP "esm-portable-smoke"
-          $logDir = "apps/api/dist/EventSwitchManager-smoke-logs"
-          New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-          if (Test-Path $workspace) {
-            Copy-Item -Path (Join-Path $workspace "*.log") -Destination $logDir -Force
+          $workspaces = [ordered]@{
+            "EventSwitchManager-smoke-logs" = (Join-Path $env:RUNNER_TEMP "esm-portable-smoke")
+            "EventSwitchManager-smoke-logs-percent" = (Join-Path $env:RUNNER_TEMP "esm-portable-percent-smoke")
+          }
+          foreach ($pair in $workspaces.GetEnumerator()) {
+            $logDir = Join-Path "apps/api/dist" $pair.Key
+            New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+            if (Test-Path $pair.Value) {
+              Copy-Item -Path (Join-Path $pair.Value "*.log") -Destination $logDir -Force
+            }
           }
       - name: Upload Windows portable evidence
         if: always()
@@ -205,7 +234,9 @@ jobs:
             apps/api/dist/EventSwitchManager-windows-x64.zip
             apps/api/dist/EventSwitchManager-build-record.json
             apps/api/dist/EventSwitchManager-smoke-report.json
+            apps/api/dist/EventSwitchManager-smoke-percent-report.json
             apps/api/dist/EventSwitchManager-smoke-logs
+            apps/api/dist/EventSwitchManager-smoke-logs-percent
 
   secrets:
     name: Gitleaks
