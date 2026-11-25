@@ -77,6 +77,8 @@ An approved strategy handles startup configuration and independent VLAN data wit
 pySerial 3.5 is the reviewed dependency. It is declared in the API project, constrained in `constraints-py312.txt`, and collected explicitly for PyInstaller. The portable runtime does not automatically enumerate or open serial ports; CON-01 is not reachable from the UI or production API. Real Windows COM discovery, real serial lease behavior and real device authentication remain hardware acceptance items.
 R83 hardening adds a single shared process-local lease manager keyed by both physical adapter identity and canonical COM endpoint, prompt identity binding, exact PID/release profile resolution, bounded discovery deadlines/cancellation, multi-component inventory and multi-license parsing, partial-evidence failure recording and exact-value redaction. The live serial adapter remains hard-disabled even if constructed with a test-only flag; OS-level exclusivity is still `NOT_VERIFIED`.
 
+If transport cleanup fails, the application lease is retained so a new session cannot claim the endpoint; `close()` can be retried after the transport recovers. `cancel_discovery()` sets the cancellation event without taking the session state lock, so it is not blocked by an in-flight query. A false `pending_data()` result is not treated as proof that a real serial response has ended; real live serial prompt boundaries remain a future hardware gate, not a CON-01 software claim.
+
 ### CON-01 hardware acceptance plan (not executed in R82/R83)
 
 1. Install the Windows USB Console driver and identify one adapter; record VID/PID, USB serial, COM endpoint and driver version.

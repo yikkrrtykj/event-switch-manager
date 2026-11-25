@@ -271,9 +271,12 @@ class ConsoleSession:
             self._cancel_discovery_event = None
 
     def cancel_discovery(self) -> None:
-        with self._state_lock:
-            if self._cancel_discovery_event is not None:
-                self._cancel_discovery_event.set()
+        # Cancellation must not queue behind a query holding the state lock.
+        # Reading the immutable event reference is sufficient; setting an Event
+        # is thread-safe.
+        event = self._cancel_discovery_event
+        if event is not None:
+            event.set()
 
     def _check_discovery_budget(self) -> None:
         if (
@@ -545,15 +548,18 @@ class ConsoleSession:
                 self._transport.close()
             except Exception as exc:
                 cleanup_error = exc
-            lease = self._lease
-            self._lease = None
-            if lease is not None:
-                try:
-                    lease.release()
-                except Exception as exc:
-                    cleanup_error = cleanup_error or exc
             self._redaction_secrets = ()
+            if cleanup_error is None:
+                lease = self._lease
+                self._lease = None
+                if lease is not None:
+                    try:
+                        lease.release()
+                    except Exception as exc:
+                        cleanup_error = exc
             if cleanup_error is not None:
+                # Keep the lease when the transport may still own the OS
+                # endpoint. A later close() may retry cleanup.
                 self._state = SessionState.FAILED
                 raise SessionCleanupError("console cleanup failed") from cleanup_error
             self._state = SessionState.CLOSED
@@ -564,14 +570,15 @@ class ConsoleSession:
             self._transport.close()
         except Exception as exc:
             cleanup_error = exc
-        lease = self._lease
-        self._lease = None
-        if lease is not None:
-            try:
-                lease.release()
-            except Exception as exc:
-                cleanup_error = cleanup_error or exc
         self._redaction_secrets = ()
+        if cleanup_error is None:
+            lease = self._lease
+            self._lease = None
+            if lease is not None:
+                try:
+                    lease.release()
+                except Exception as exc:
+                    cleanup_error = exc
         self._state = SessionState.FAILED
         if cleanup_error is not None:
             raise SessionCleanupError("console cleanup failed") from cleanup_error

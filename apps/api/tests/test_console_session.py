@@ -492,6 +492,41 @@ class _SlowTransport(_ScriptedTransport):
         return super().read_chunk(timeout)
 
 
+def test_cancel_discovery_does_not_block_on_query_held_state_lock() -> None:
+    import threading
+    import time
+
+    session = ConsoleSession(
+        _SlowTransport("R1>\n", {"show version": "show version\nR1>\n"}),
+        lease_manager=ConsoleLeaseManager(),
+        timeout=2.0,
+    )
+    session.open(None)
+    session.start_discovery(deadline_seconds=30)
+    errors: list[BaseException] = []
+
+    def run_query() -> None:
+        try:
+            session.query(ConsoleQuery.VERSION)
+        except BaseException as exc:  # record the expected cancellation
+            errors.append(exc)
+
+    query_thread = threading.Thread(target=run_query)
+    query_thread.start()
+    time.sleep(0.01)
+    started = time.monotonic()
+    session.cancel_discovery()
+    cancel_elapsed = time.monotonic() - started
+    query_thread.join(timeout=5)
+    try:
+        assert not query_thread.is_alive()
+        assert cancel_elapsed < 0.5
+        assert errors and isinstance(errors[0], SessionError)
+        assert session.state is SessionState.FAILED
+    finally:
+        session.close()
+
+
 def test_close_during_query_has_a_defined_serialized_outcome() -> None:
     import threading
     import time
@@ -529,8 +564,21 @@ class _OpenFailure(_ScriptedTransport):
 
 
 class _CloseFailure(_ScriptedTransport):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.close_attempts = 0
+
     def close(self) -> None:
+        self.close_attempts += 1
         raise TransportError("safe-close-failure")
+
+
+class _RecoveringCloseFailure(_CloseFailure):
+    def close(self) -> None:
+        self.close_attempts += 1
+        if self.close_attempts == 1:
+            raise TransportError("safe-close-failure")
+        super(_CloseFailure, self).close()
 
 
 class _WriteFailure(_ScriptedTransport):
@@ -554,7 +602,45 @@ def test_transport_close_failure_does_not_claim_safe_release() -> None:
     with pytest.raises(SessionCleanupError):
         session.close()
     assert session.state is SessionState.FAILED
+    # The transport may still own the endpoint; the application lease must
+    # remain held rather than falsely advertising a safe release.
+    assert manager.active_owner("sim:scripted") is not None
+
+
+def test_failed_cleanup_can_be_retried_after_transport_recovers() -> None:
+    manager = ConsoleLeaseManager()
+    transport = _RecoveringCloseFailure("R1>\n", {})
+    session = ConsoleSession(transport, lease_manager=manager)
+    session.open(None)
+    with pytest.raises(SessionCleanupError):
+        session.close()
+    assert manager.active_owner("sim:scripted") is not None
+    session.close()
+    assert session.state is SessionState.CLOSED
     assert manager.active_owner("sim:scripted") is None
+
+
+class _ReadAndCloseFailure(_ScriptedTransport):
+    def read_chunk(self, timeout: float) -> str:
+        _ = timeout
+        if self._queue:
+            return self._queue.pop(0)
+        raise TransportError("safe-read-failure")
+
+    def close(self) -> None:
+        raise TransportError("safe-close-failure")
+
+
+def test_transport_read_failure_retains_lease_when_close_fails() -> None:
+    manager = ConsoleLeaseManager()
+    session = ConsoleSession(
+        _ReadAndCloseFailure("R1>\n", {}), lease_manager=manager,
+    )
+    session.open(None)
+    with pytest.raises(SessionCleanupError):
+        session.query(ConsoleQuery.VERSION)
+    assert session.state is SessionState.FAILED
+    assert manager.active_owner("sim:scripted") is not None
 
 
 def test_transport_write_failure_closes_and_releases_lease() -> None:
