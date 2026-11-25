@@ -143,6 +143,7 @@ def _shutdown_gracefully(
 def _start(
     exe: Path, workspace: Path, cwd_name: str, port: int,
     log: Path, use_default_database: bool = False,
+    database_override: Path | None = None,
 ) -> subprocess.Popen[bytes]:
     cwd = workspace / cwd_name
     cwd.mkdir(parents=True, exist_ok=True)
@@ -159,8 +160,10 @@ def _start(
     args = [str(exe), "--no-browser"]
     if port != 8765:
         args.extend(["--port", str(port)])
-    if not use_default_database:
+    database = database_override
+    if database is None and not use_default_database:
         database = workspace / "UserData" / "esm.sqlite3"
+    if database is not None:
         database.parent.mkdir(parents=True, exist_ok=True)
         args.extend(["--database", str(database)])
     # A dedicated console makes CTRL_C_EVENT group 0 target only this server
@@ -384,6 +387,8 @@ def _make_plan(event_id: str) -> tuple[dict[str, Any], str]:
 
 
 def _database_path(workspace: Path, args: argparse.Namespace) -> Path:
+    if args.database is not None:
+        return args.database
     if args.use_default_database:
         return Path(os.environ.get("LOCALAPPDATA", "")) / "EventSwitchManager" / "esm.sqlite3"
     return workspace / "UserData" / "esm.sqlite3"
@@ -442,6 +447,7 @@ def main() -> int:
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--database", type=Path)
     parser.add_argument("--build-record", type=Path)
     parser.add_argument("--zip", type=Path)
     parser.add_argument("--expected-git-sha")
@@ -499,7 +505,7 @@ def main() -> int:
         first_log = args.workspace / "first.log"
         process = _start(
             exe, args.workspace, "cwd-a", args.port, first_log,
-            args.use_default_database,
+            args.use_default_database, args.database,
         )
         _wait_health(process)
         report["checks"].append("health")
@@ -607,7 +613,7 @@ def main() -> int:
         second_log = args.workspace / "second.log"
         process = _start(
             exe, args.workspace, "cwd-b", args.port, second_log,
-            args.use_default_database,
+            args.use_default_database, args.database,
         )
         _wait_health(process)
         second_children = _capture_process(
@@ -644,7 +650,7 @@ def main() -> int:
         force_log = args.workspace / "forced.log"
         process = _start(
             exe, args.workspace, "cwd-c", args.port, force_log,
-            args.use_default_database,
+            args.use_default_database, args.database,
         )
         _wait_health(process)
         force_children = _capture_process(
@@ -679,7 +685,7 @@ def main() -> int:
         restart_log = args.workspace / "restart-after-force.log"
         process = _start(
             exe, args.workspace, "cwd-d", args.port, restart_log,
-            args.use_default_database,
+            args.use_default_database, args.database,
         )
         _wait_health(process)
         restart_children = _capture_process(
@@ -707,7 +713,7 @@ def main() -> int:
             conflict_log = args.workspace / "conflict.log"
             conflict = _start(
                 exe, args.workspace, "cwd-e", args.port, conflict_log,
-                args.use_default_database,
+                args.use_default_database, args.database,
             )
             try:
                 conflict_code = conflict.wait(timeout=20)

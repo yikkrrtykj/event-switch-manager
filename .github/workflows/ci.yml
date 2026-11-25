@@ -203,8 +203,8 @@ jobs:
             --report "apps/api/dist/EventSwitchManager-smoke-percent-report.json" `
             --build-record "apps/api/dist/EventSwitchManager-build-record.json" `
             --zip "apps/api/dist/EventSwitchManager-windows-x64.zip" `
-            --expected-git-sha "$env:EXPECTED_HEAD_SHA" `
-            --use-default-database
+            --database "$env:RUNNER_TEMP\esm-percent-smoke.sqlite3" `
+            --expected-git-sha "$env:EXPECTED_HEAD_SHA"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $report = Get-Content "apps/api/dist/EventSwitchManager-smoke-percent-report.json" -Raw | ConvertFrom-Json
           if ($report.status -ne "passed") { throw "Percent-path smoke report did not pass." }
