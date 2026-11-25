@@ -125,6 +125,8 @@ def test_live_serial_adapter_is_disabled_and_os_exclusivity_is_not_claimed() -> 
     transport = SerialTransport(port)
     with pytest.raises(LiveSerialDisabled, match="live serial is disabled"):
         transport.open()
+    with pytest.raises(LiveSerialDisabled, match="live serial is disabled"):
+        SerialTransport(port, allow_live=True).open()
     assert OS_EXCLUSIVITY_STATUS == "NOT_VERIFIED"
     assert SerialParameters().baudrate == 9600
     with pytest.raises(ValueError):

@@ -11,6 +11,8 @@ from .discovery import SerialPortInfo
 from .lease import OS_EXCLUSIVITY_STATUS
 from .models import ConsoleSource
 
+LIVE_SERIAL_AUTHORIZATION_ENABLED = False
+
 
 class TransportError(RuntimeError):
     """Base class for safe console transport errors."""
@@ -71,6 +73,8 @@ class ConsoleTransport(Protocol):
 
     def read_chunk(self, timeout: float) -> str: ...
 
+    def pending_data(self) -> bool: ...
+
 
 class SerialTransport:
     """Real adapter that cannot open a port unless a live experiment opts in.
@@ -101,60 +105,91 @@ class SerialTransport:
         return self._port.adapter_identity
 
     @property
+    def lease_endpoint(self) -> str:
+        return self._port.port
+
+    @property
+    def identity_quality(self) -> str:
+        return self._port.identity_quality.value
+
+    @property
     def is_open(self) -> bool:
         return self._is_open
 
+    def pending_data(self) -> bool:
+        return bool(self._is_open and self._serial is not None and self._serial.in_waiting)
+
     def open(self) -> None:
-        if not self._allow_live:
+        # Even an accidental allow_live=True cannot authorize a real port in
+        # the product tree.  A future live experiment must add a separately
+        # reviewed authorization boundary and OS-level exclusivity evidence.
+        if not self._allow_live or not LIVE_SERIAL_AUTHORIZATION_ENABLED:
             raise LiveSerialDisabled(
                 "live serial is disabled for CON-01; use simulator/recorded fixtures",
             )
-        from serial import Serial  # type: ignore[import-untyped]
+        try:
+            from serial import Serial  # type: ignore[import-untyped]
 
-        flow = self._parameters.flow_control
-        self._serial = Serial(
-            self._port.port,
-            baudrate=self._parameters.baudrate,
-            bytesize=self._parameters.data_bits,
-            parity=self._parameters.parity,
-            stopbits=self._parameters.stop_bits,
-            timeout=self._parameters.read_timeout_seconds,
-            write_timeout=self._parameters.write_timeout_seconds,
-            xonxoff=flow == "xonxoff",
-            rtscts=flow == "rtscts",
-            dsrdtr=False,
-        )
-        self._is_open = True
+            flow = self._parameters.flow_control
+            self._serial = Serial(
+                self._port.port,
+                baudrate=self._parameters.baudrate,
+                bytesize=self._parameters.data_bits,
+                parity=self._parameters.parity,
+                stopbits=self._parameters.stop_bits,
+                timeout=self._parameters.read_timeout_seconds,
+                write_timeout=self._parameters.write_timeout_seconds,
+                xonxoff=flow == "xonxoff",
+                rtscts=flow == "rtscts",
+                dsrdtr=False,
+            )
+            self._is_open = True
+        except Exception as exc:
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise TransportError("serial-open-failed") from exc
 
     def close(self) -> None:
         serial_port = self._serial
         self._serial = None
         self._is_open = False
         if serial_port is not None:
-            serial_port.close()
+            try:
+                serial_port.close()
+            except Exception as exc:
+                raise TransportError("serial-close-failed") from exc
 
     def write(self, text: str) -> None:
         if not self._is_open or self._serial is None:
             raise TransportDisconnected("serial transport is not open")
         if not text:
             return
-        # No BREAK, DTR/RTS toggle, reload or arbitrary escape sequence is sent.
-        self._serial.write(text.encode("ascii"))
+        try:
+            # No BREAK, DTR/RTS toggle, reload or arbitrary escape sequence is sent.
+            self._serial.write(text.encode("ascii"))
+        except Exception as exc:
+            raise TransportError("serial-write-failed") from exc
 
     def read_chunk(self, timeout: float) -> str:
         if not self._is_open or self._serial is None:
             raise TransportDisconnected("serial transport is not open")
         if not 0 < timeout <= 30:
             raise ValueError("read timeout must be in (0, 30] seconds")
-        self._serial.timeout = timeout
-        data = self._serial.read(max(1, self._serial.in_waiting or 1))
-        if not data:
-            return ""
-        return str(data.decode("ascii", errors="replace"))
+        try:
+            self._serial.timeout = timeout
+            data = self._serial.read(max(1, self._serial.in_waiting or 1))
+            if not data:
+                return ""
+            return str(data.decode("ascii", errors="replace"))
+        except Exception as exc:
+            raise TransportError("serial-read-failed") from exc
 
 
 __all__ = [
     "ConsoleTransport",
+    "LIVE_SERIAL_AUTHORIZATION_ENABLED",
     "LiveSerialDisabled",
     "SerialParameters",
     "SerialTransport",

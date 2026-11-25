@@ -270,6 +270,14 @@ class SimulatedConsoleTransport:
         return "sim:" + self.profile.fixture_id
 
     @property
+    def lease_endpoint(self) -> str:
+        return self.port_identity
+
+    @property
+    def identity_quality(self) -> str:
+        return "stable"
+
+    @property
     def source(self) -> ConsoleSource:
         return self.profile.source
 
@@ -298,6 +306,9 @@ class SimulatedConsoleTransport:
     def close(self) -> None:
         self._closed = True
         self._queue.clear()
+
+    def pending_data(self) -> bool:
+        return bool(self._queue)
 
     def read_chunk(self, timeout: float) -> str:
         _ = timeout

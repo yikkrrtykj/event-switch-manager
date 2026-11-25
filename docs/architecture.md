@@ -75,3 +75,14 @@ An approved strategy handles startup configuration and independent VLAN data wit
 - `observation.py` produces a versioned evidence envelope, including source, capture time, session identity, query results, completeness, unknown fields and content fingerprint. `LIVE_DEVICE` is modeled but rejected in R82. Simulator/recorded evidence never sets `hardware_verified` or `deployment_approved`, and observations do not modify an Event Plan, Assignment, Revision or Capability Registry.
 
 pySerial 3.5 is the reviewed dependency. It is declared in the API project, constrained in `constraints-py312.txt`, and collected explicitly for PyInstaller. The portable runtime does not automatically enumerate or open serial ports; CON-01 is not reachable from the UI or production API. Real Windows COM discovery, real serial lease behavior and real device authentication remain hardware acceptance items.
+R83 hardening adds a single shared process-local lease manager keyed by both physical adapter identity and canonical COM endpoint, prompt identity binding, exact PID/release profile resolution, bounded discovery deadlines/cancellation, multi-component inventory and multi-license parsing, partial-evidence failure recording and exact-value redaction. The live serial adapter remains hard-disabled even if constructed with a test-only flag; OS-level exclusivity is still `NOT_VERIFIED`.
+
+### CON-01 hardware acceptance plan (not executed in R82/R83)
+
+1. Install the Windows USB Console driver and identify one adapter; record VID/PID, USB serial, COM endpoint and driver version.
+2. Confirm the switch is a lab device with no production or business links; record exact PID, chassis serial, IOS/IOS XE image and active license from labels/console.
+3. Configure only 9600-8-N-1, no flow control, unless the device-specific Cisco documentation says otherwise; do not send BREAK or toggle DTR/RTS.
+4. Establish OS-level exclusive access evidence from an independent process, open the COM session, log in and enable once, then perform only the reviewed read-only query set.
+5. Verify exact PID/release/profile match, Stack members, license fields, completeness and evidence fingerprint; record only sanitized evidence.
+6. Test adapter unplug, timeout, authentication failure, enable failure and recovery; verify lease release and no command replay.
+7. Record hardware success separately from capability, management or deployment certification. `CON-01-HARDWARE` remains `NOT_VERIFIED` until this plan is separately authorized and executed.

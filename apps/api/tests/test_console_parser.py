@@ -19,7 +19,35 @@ def _kinds(events: tuple[object, ...]) -> list[ParserEventKind]:
 
 
 def test_ansi_backspace_and_crlf_are_cleaned() -> None:
-    assert sanitize_console_text("\x1b[31mR1\x1b[0m\b1\r\nok") == "R1\r\nok".replace("\r\n", "\n")
+    assert sanitize_console_text("\x1b[31mR1\x1b[0m\b1\r\nok") == "R1\nok"
+
+
+def test_incremental_terminal_state_ansi_backspace_and_crlf() -> None:
+    parser = ConsolePromptParser()
+    assert parser.feed("\x1b[") == ()
+    assert parser.feed("31mR1\x1b[0") == ()
+    assert parser.feed("m\b1\r") == ()
+    events = parser.feed("\nR1>")
+    assert _kinds(events) == [ParserEventKind.OUTPUT, ParserEventKind.PROMPT]
+    assert events[0].output.endswith("R1\n")
+    assert events[1].prompt == "R1>"
+
+
+def test_pagination_marker_may_be_split_but_body_marker_is_not_paging() -> None:
+    parser = ConsolePromptParser()
+    assert parser.feed("line\n--Mo") == ()
+    events = parser.feed("re--")
+    assert _kinds(events) == [ParserEventKind.OUTPUT, ParserEventKind.PAGINATION]
+    body = ConsolePromptParser()
+    events = body.feed("This body mentions --More-- inline\nR1>")
+    assert _kinds(events) == [ParserEventKind.OUTPUT, ParserEventKind.PROMPT]
+
+
+def test_same_hostname_prompt_in_body_is_marked_as_collision() -> None:
+    parser = ConsolePromptParser()
+    events = parser.feed("R1#\nR1>")
+    assert _kinds(events) == [ParserEventKind.OUTPUT, ParserEventKind.PROMPT]
+    assert parser.prompt_collision is True
 
 
 def test_fragmented_prompt_is_bounded_and_recognized() -> None:
@@ -59,6 +87,8 @@ def test_auth_prompts_and_unsafe_modes() -> None:
     assert events[0].reason == "configuration-mode"
     events = parser.feed("rommon 2 >")
     assert events[0].reason == "bootloader-rommon"
+    events = parser.feed("switch:")
+    assert events[0].reason == "switch-boot-prompt"
     events = parser.feed("Would you like to enter the initial configuration dialog? [yes/no]:")
     assert events[-1].reason == "initial-configuration-dialog"
 

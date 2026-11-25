@@ -53,6 +53,13 @@ class ObservationCompleteness(StrEnum):
     INCOMPLETE = "incomplete"
 
 
+class LicenseFeature(Record):
+    feature: str
+    license_type: str | None = None
+    status: str | None = None
+    next_boot: str | None = None
+
+
 class LicenseObservation(Record):
     """Separate declared, observed, next-boot and active-license claims."""
 
@@ -60,6 +67,7 @@ class LicenseObservation(Record):
     observed: str | None = None
     next_boot: str | None = None
     status: str | None = None
+    features: tuple[LicenseFeature, ...] = ()
     active_verified: Literal[False] = False
     ambiguous: bool = False
 
@@ -119,7 +127,11 @@ class ConsoleObservation(Record):
         return value.astimezone(UTC)
 
     def to_switch_observation(self) -> SwitchObservation:
-        """Return the existing integration shape without upgrading verification."""
+        """Return the legacy integration shape, not a hardware attestation.
+
+        This conversion intentionally loses source/completeness metadata.  It
+        must not be used as a substitute for ``ConsoleEvidence``.
+        """
         return SwitchObservation(
             family=self.family,
             model=self.exact_pid or self.hardware_model or "unknown",
@@ -148,6 +160,7 @@ class ConsoleEvidence(Record):
     source: ConsoleSource
     fixture_id: str | None = None
     query_results: tuple[ConsoleQueryResult, ...] = ()
+    unsupported_queries: tuple[ConsoleQuery, ...] = ()
     completeness: ObservationCompleteness = ObservationCompleteness.INCOMPLETE
     unknown_fields: tuple[str, ...] = ()
     content_fingerprint: str = ""
@@ -187,6 +200,7 @@ def build_evidence(
     query_results: tuple[ConsoleQueryResult, ...],
     *,
     fixture_id: str | None = None,
+    unsupported_queries: tuple[ConsoleQuery, ...] = (),
 ) -> ConsoleEvidence:
     """Build immutable read-only evidence.
 
@@ -195,15 +209,31 @@ def build_evidence(
     """
     if observation.source is ConsoleSource.LIVE_DEVICE:
         raise ConsoleEvidenceRejected("live-device-evidence-disabled")
+    if any(not result.command.startswith("show ") for result in query_results):
+        raise ConsoleEvidenceRejected("non-read-only-query-in-evidence")
+    if len(set(unsupported_queries)) != len(unsupported_queries):
+        raise ConsoleEvidenceRejected("duplicate-unsupported-query")
     evidence = ConsoleEvidence(
         observation=observation,
         source=observation.source,
         fixture_id=fixture_id,
         query_results=query_results,
+        unsupported_queries=unsupported_queries,
         completeness=observation.completeness,
         unknown_fields=observation.unknown_fields,
         content_fingerprint="",
     )
     return evidence.model_copy(
         update={"content_fingerprint": compute_evidence_fingerprint(evidence)},
+    )
+
+
+def verify_evidence(evidence: ConsoleEvidence) -> bool:
+    """Recompute a fingerprint and re-check source/completeness consistency."""
+    return bool(
+        evidence.source is evidence.observation.source
+        and evidence.completeness is evidence.observation.completeness
+        and evidence.unknown_fields == evidence.observation.unknown_fields
+        and evidence.content_fingerprint
+        == compute_evidence_fingerprint(evidence)
     )

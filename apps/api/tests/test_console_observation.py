@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import pytest
 
+from event_switch_manager.console.lease import ConsoleLeaseManager
 from event_switch_manager.console.models import (
     ConsoleEvidenceRejected,
     ConsoleObservation,
@@ -13,10 +14,14 @@ from event_switch_manager.console.models import (
     ObservationCompleteness,
     QueryStatus,
     build_evidence,
+    verify_evidence,
 )
 from event_switch_manager.console.observation import (
     CiscoObservationAdapter,
     IdentityConflict,
+    _chassis_inventory,
+    _license_info,
+    _stack,
     redact_console_output,
 )
 from event_switch_manager.console.session import ConsoleCredentials, ConsoleSession
@@ -82,7 +87,9 @@ def test_five_family_full_simulator_pipeline() -> None:
         assert converted.model == profile.model
         assert converted.serial_number == profile.serial_number
         assert len(converted.interfaces) == 3
-        if profile.family.value in {"catalyst-2960x", "catalyst-c1000"}:
+        if profile.family.value in {
+            "catalyst-2960x", "catalyst-3850", "catalyst-c1000",
+        }:
             assert observation.completeness is ObservationCompleteness.PARTIAL
         else:
             assert observation.completeness is ObservationCompleteness.COMPLETE
@@ -128,6 +135,12 @@ class _FakeSession:
     def __init__(self) -> None:
         self.family: object | None = None
 
+    def start_discovery(self, **_: object) -> None:
+        return
+
+    def end_discovery(self) -> None:
+        return
+
     def query_result(self, query: ConsoleQuery) -> ConsoleQueryResult:
         if query is ConsoleQuery.VERSION:
             return ConsoleQueryResult(
@@ -140,11 +153,17 @@ class _FakeSession:
             )
         return ConsoleQueryResult(
             query=query, command="show inventory", status=QueryStatus.OK,
-            output='PID: C9200L-24P-4X, VID: V02, SN: FAKE9200\n',
+            output=(
+                'NAME: "Chassis", DESCR: "Cisco C9200L-24P-4X"\n'
+                "PID: C9200L-24P-4X, VID: V02, SN: FAKE9200\n"
+            ),
         )
 
     def set_family(self, family: object) -> None:
         self.family = family
+
+    def set_profile(self, profile: object) -> None:
+        self.family = getattr(profile, "family", None)
 
 
 def test_conflicting_version_and_inventory_identity_is_rejected() -> None:
@@ -158,6 +177,13 @@ def test_redaction_and_fingerprint_are_deterministic() -> None:
         "username admin\npassword synthetic-password\nshow version",
     )
     assert "[REDACTED]" in redact_console_output("enable password: synthetic-enable")
+    assert redact_console_output(
+        "bare-value-42 appears here", ("bare-value-42",),
+    ) == "[REDACTED] appears here"
+    assert "synthetic-password" not in redact_console_output(
+        "show version\nsynthetic-password\n",
+        ("synthetic-password",),
+    )
     profile = profiles()[3]
     first = _session(profile)
     first.open(CREDS)
@@ -186,6 +212,161 @@ def test_c1000_is_not_interpreted_as_a_native_stack() -> None:
     assert observation.family.value == "catalyst-c1000"
     assert observation.stack == ()
     assert "stack" not in observation.unknown_fields
+
+
+def test_inventory_chassis_is_separated_from_other_components() -> None:
+    pid, serial, issues = _chassis_inventory(
+        'NAME: "Power Supply 1", DESCR: "PSU"\n'
+        "PID: PWR-1, VID: V01, SN: PSU001\n"
+        'NAME: "Chassis", DESCR: "Switch"\n'
+        "PID: C9300L-24P-4X, VID: V02, SN: CHASSIS001\n",
+    )
+    assert (pid, serial, issues) == ("C9300L-24P-4X", "CHASSIS001", ())
+
+
+def test_multiple_license_features_preserve_declared_observed_and_next_boot() -> None:
+    info = _license_info(
+        "License Level: Network Advantage\n",
+        "Index 1 Feature: network-advantage\n"
+        "License Type: Permanent\n"
+        "License State: Active, In Use\n"
+        "Next reboot license level: network-advantage\n"
+        "Index 2 Feature: dna-essentials\n"
+        "License Type: Subscription\n"
+        "License State: Active, In Use\n"
+        "Next reboot license level: dna-essentials\n",
+    )
+    assert info.declared == "Network Advantage"
+    assert len(info.features) == 2
+    assert info.next_boot == "network-advantage"
+    assert info.observed == "Network Advantage, Dna Essentials"
+    assert info.ambiguous is False
+    assert info.active_verified is False
+
+
+def test_stack_duplicate_number_and_serial_are_rejected() -> None:
+    duplicate_number = (
+        "Switch  Role     Model      Serial   Version  State\n"
+        "1       Active   C9300-24T  SER1     17.12.4  Ready\n"
+        "1       Standby  C9300-24T  SER2     17.12.4  Ready\n"
+    )
+    with pytest.raises(IdentityConflict):
+        _stack(duplicate_number)
+    duplicate_serial = (
+        "Switch  Role     Model      Serial   Version  State\n"
+        "1       Active   C9300-24T  SER1     17.12.4  Ready\n"
+        "2       Standby  C9300-24T  SER1     17.12.4  Ready\n"
+    )
+    with pytest.raises(IdentityConflict):
+        _stack(duplicate_serial)
+
+
+def test_query_timeout_becomes_partial_evidence_without_further_commands() -> None:
+    profile = profiles()[3]
+    transport = SimulatedConsoleTransport(
+        profile=profile,
+        timeout_commands=frozenset({ConsoleQuery.LICENSE}),
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=0.2,
+    )
+    session.open(CREDS)
+    evidence = CiscoObservationAdapter().observe(session)
+    session.close()
+    assert evidence.completeness is ObservationCompleteness.PARTIAL
+    assert any(
+        item.query is ConsoleQuery.LICENSE and item.status is QueryStatus.TIMEOUT
+        for item in evidence.query_results
+    )
+    assert not any(
+        item.query in {ConsoleQuery.BOOT, ConsoleQuery.STORAGE}
+        for item in evidence.query_results
+    )
+    assert "license" in evidence.observation.unknown_fields
+
+
+def test_unsupported_queries_are_explicit_in_evidence() -> None:
+    profile = replace(profiles()[3], software_version="17.12.5")
+    session = _session(profile)
+    session.open(CREDS)
+    try:
+        evidence = CiscoObservationAdapter().observe(session)
+    finally:
+        session.close()
+    assert ConsoleQuery.LICENSE in evidence.unsupported_queries
+    assert evidence.completeness is ObservationCompleteness.PARTIAL
+
+
+def test_evidence_fingerprint_is_verifiable_and_tamper_is_rejected() -> None:
+    session = _session()
+    session.open(CREDS)
+    try:
+        evidence = CiscoObservationAdapter().observe(session)
+    finally:
+        session.close()
+    assert verify_evidence(evidence) is True
+    tampered = evidence.model_copy(update={
+        "observation": evidence.observation.model_copy(update={
+            "serial_number": "TAMPERED",
+        }),
+    })
+    assert verify_evidence(tampered) is False
+    mismatched_source = evidence.model_copy(update={"source": ConsoleSource.RECORDED_FIXTURE})
+    assert verify_evidence(mismatched_source) is False
+    with pytest.raises(ConsoleEvidenceRejected):
+        build_evidence(
+            evidence.observation,
+            (ConsoleQueryResult(
+                query=ConsoleQuery.VERSION,
+                command="configure terminal",
+                status=QueryStatus.OK,
+            ),),
+        )
+
+
+def test_discovery_cancellation_and_deadline_are_propagated() -> None:
+    from threading import Event
+
+    from event_switch_manager.console.session import (
+        DiscoveryCancelled,
+        DiscoveryTimeout,
+    )
+
+    session = _session()
+    session.open(CREDS)
+    cancelled = Event()
+    cancelled.set()
+    try:
+        with pytest.raises(DiscoveryCancelled):
+            CiscoObservationAdapter().observe(session, cancel_event=cancelled)
+    finally:
+        session.close()
+    second = _session()
+    second.open(CREDS)
+    try:
+        second.start_discovery(deadline_seconds=0.001)
+        import time
+        time.sleep(0.01)
+        with pytest.raises(DiscoveryTimeout):
+            second.query(ConsoleQuery.VERSION)
+    finally:
+        second.close()
+
+
+def test_unknown_exact_pid_stops_after_bootstrap_queries() -> None:
+    unknown = replace(profiles()[3], model="C9300-99T")
+    session = _session(unknown)
+    session.open(CREDS)
+    try:
+        evidence = CiscoObservationAdapter().observe(session)
+    finally:
+        session.close()
+    assert evidence.observation.exact_pid == "C9300-99T"
+    assert evidence.observation.completeness is ObservationCompleteness.PARTIAL
+    assert "exact-profile" in evidence.observation.unknown_fields
+    assert {item.query for item in evidence.query_results} == {
+        ConsoleQuery.VERSION, ConsoleQuery.INVENTORY,
+    }
 
 
 def test_evidence_contains_query_results_but_no_live_source() -> None:

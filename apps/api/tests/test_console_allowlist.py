@@ -6,10 +6,14 @@ from event_switch_manager.console.allowlist import (
     BOOTSTRAP_QUERIES,
     QUERY_SPECS,
     FamilyUnknown,
+    ProfileNotVerified,
     QueryNotAllowed,
     QueryNotSupported,
+    resolve_profile,
     resolve_query,
+    resolve_query_for_profile,
     supported_queries,
+    supported_queries_for_profile,
 )
 from event_switch_manager.domain import DeviceFamily
 from event_switch_manager.integrations import ConsoleQuery
@@ -50,6 +54,29 @@ def test_unsupported_query_and_arbitrary_string_are_rejected() -> None:
         resolve_query(DeviceFamily.CATALYST_C1000, ConsoleQuery.STACK)
     with pytest.raises(QueryNotAllowed):
         resolve_query(DeviceFamily.CATALYST_9300, "show version")  # type: ignore[arg-type]
+
+
+def test_exact_profile_resolution_and_release_scope_are_component_based() -> None:
+    c9300 = resolve_profile("C9300L-24P-4X", "17.12.4")
+    assert c9300.family is DeviceFamily.CATALYST_9300
+    assert ConsoleQuery.LICENSE in supported_queries_for_profile(c9300)
+    assert resolve_query_for_profile(c9300, ConsoleQuery.LICENSE).command == "show license"
+
+    future_release = resolve_profile("C9300L-24P-4X", "17.12.5")
+    assert supported_queries_for_profile(future_release) == BOOTSTRAP_QUERIES
+    with pytest.raises(QueryNotSupported):
+        resolve_query_for_profile(future_release, ConsoleQuery.LICENSE)
+
+    ios_xe_maintenance = resolve_profile("WS-C3850-24P", "16.12.10a")
+    assert supported_queries_for_profile(ios_xe_maintenance) == BOOTSTRAP_QUERIES
+
+    c1000 = resolve_profile("C1000-24P-4G-L", "15.2(7)E1")
+    assert ConsoleQuery.STACK not in supported_queries_for_profile(c1000)
+
+    with pytest.raises(ProfileNotVerified):
+        resolve_profile("C9300-99T", "17.12.4")
+    with pytest.raises(ProfileNotVerified):
+        resolve_profile("C9300L-24P-4X", "17.12.99")
 
 
 def test_no_generic_cli_or_write_command_exists() -> None:

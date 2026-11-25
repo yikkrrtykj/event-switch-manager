@@ -13,8 +13,7 @@ from enum import StrEnum
 
 from .models import CONSOLE_PARSER_VERSION
 
-_ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-_PAGINATION = re.compile(r"(?:--\s*More\s*--|<---\s*More\s*--->)")
+_PAGINATION_END = re.compile(r"(?:--\s*More\s*--|<---\s*More\s*--->)\s*$")
 _PROMPT = re.compile(
     r"(?m)^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,63})(?P<suffix>[>#])\s*$",
 )
@@ -22,6 +21,7 @@ _CONFIG_PROMPT = re.compile(
     r"(?m)^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?:\([^)]*\))#\s*$",
 )
 _ROMMON_PROMPT = re.compile(r"(?mi)^rommon(?:\s+\d+)?\s*>\s*$")
+_SWITCH_PROMPT = re.compile(r"(?mi)^switch:\s*$")
 _INITIAL_DIALOG = re.compile(r"(?i)initial configuration dialog.*\[yes/no\]")
 _AUTH_PROMPT = re.compile(
     r"(?im)^(?P<label>username|password|enable password|enter password)\s*:\s*$",
@@ -57,6 +57,7 @@ class AuthPromptKind(StrEnum):
 class ParserEvent:
     kind: ParserEventKind
     output: str = ""
+    prompt: str | None = None
     mode: PromptMode | None = None
     auth_prompt: AuthPromptKind | None = None
     reason: str | None = None
@@ -70,19 +71,60 @@ class ConsolePaginationLimit(RuntimeError):
     """The device requested more pages than the configured bound."""
 
 
+class _TerminalSanitizer:
+    """Stateful TERMINAL noise removal across arbitrary chunk boundaries."""
+
+    def __init__(self) -> None:
+        self._escape: str | None = None
+        self._pending_cr = False
+
+    def reset(self) -> None:
+        self._escape = None
+        self._pending_cr = False
+
+    def feed(self, data: str) -> str:
+        output: list[str] = []
+        for character in data:
+            if self._pending_cr:
+                self._pending_cr = False
+                output.append("\n")
+                if character == "\n":
+                    continue
+            if self._escape is not None:
+                self._escape += character
+                if self._escape.startswith("\x1b["):
+                    if len(self._escape) > 2 and 0x40 <= ord(character) <= 0x7E:
+                        self._escape = None
+                elif self._escape.startswith("\x1b]"):
+                    if character == "\x07" or self._escape.endswith("\x1b\\"):
+                        self._escape = None
+                elif len(self._escape) >= 2:
+                    self._escape = None
+                continue
+            if character == "\x1b":
+                self._escape = "\x1b"
+                continue
+            if character == "\r":
+                self._pending_cr = True
+                continue
+            if character == "\b":
+                output.append("\b")
+                continue
+            if character in {"\t", "\n"} or 0x20 <= ord(character) <= 0x7E:
+                output.append(character)
+        return "".join(output)
+
+
 def sanitize_console_text(text: str) -> str:
-    """Remove ANSI/control noise and apply backspace without trusting content."""
-    text = _ANSI.sub("", text)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    """Best-effort one-shot sanitizer retained for callers and tests."""
+    sanitizer = _TerminalSanitizer()
+    raw = sanitizer.feed(text)
     output: list[str] = []
-    for character in text:
+    for character in raw:
         if character == "\b":
             if output:
                 output.pop()
-            continue
-        if character in {"\x00", "\x07"}:
-            continue
-        if character in {"\t", "\n"} or 0x20 <= ord(character) <= 0x7E:
+        else:
             output.append(character)
     return "".join(output)
 
@@ -109,6 +151,8 @@ class ConsolePromptParser:
         self._max_response_bytes = max_response_bytes
         self._max_pagination_pages = max_pagination_pages
         self._pages = 0
+        self._terminal = _TerminalSanitizer()
+        self._prompt_collision = False
         self.parser_version = CONSOLE_PARSER_VERSION
 
     @property
@@ -116,45 +160,56 @@ class ConsolePromptParser:
         return self._pages
 
     @property
+    def prompt_collision(self) -> bool:
+        return self._prompt_collision
+
+    @property
     def buffered_bytes(self) -> int:
         return len(self._buffer.encode("utf-8", errors="replace"))
+
+    def mark_prompt_collision(self) -> None:
+        self._prompt_collision = True
 
     def reset(self) -> None:
         self._buffer = ""
         self._pages = 0
+        self._terminal.reset()
+        self._prompt_collision = False
 
     def feed(self, data: str) -> tuple[ParserEvent, ...]:
         if not isinstance(data, str):
             raise TypeError("console parser input must be text")
-        cleaned = sanitize_console_text(data)
-        self._buffer += cleaned
+        for character in self._terminal.feed(data):
+            if character == "\b":
+                self._buffer = self._buffer[:-1]
+            else:
+                self._buffer += character
         if self.buffered_bytes > self._max_response_bytes:
             self.reset()
             raise ConsoleOutputLimit("console response exceeded the byte limit")
 
         events: list[ParserEvent] = []
         while self._buffer:
-            pagination = _PAGINATION.search(self._buffer)
+            stripped = self._buffer.rstrip()
+            pagination = _PAGINATION_END.search(stripped)
             if pagination is not None:
                 if self._pages >= self._max_pagination_pages:
                     self.reset()
                     raise ConsolePaginationLimit("console pagination limit exceeded")
                 self._pages += 1
-                if pagination.start():
-                    events.append(ParserEvent(
-                        ParserEventKind.OUTPUT,
-                        output=self._buffer[:pagination.start()],
-                    ))
-                self._buffer = self._buffer[pagination.end():]
+                output = stripped[:pagination.start()]
+                self._buffer = ""
+                if output:
+                    events.append(ParserEvent(ParserEventKind.OUTPUT, output=output))
                 events.append(ParserEvent(ParserEventKind.PAGINATION))
                 continue
 
-            stripped = self._buffer.rstrip()
             last_line = stripped.rsplit("\n", 1)[-1]
 
             auth = _AUTH_PROMPT.fullmatch(last_line.strip())
             if auth is not None:
-                output = self._buffer[:self._buffer.rfind(last_line)]
+                start = self._buffer.rfind(last_line)
+                output = self._buffer[:start]
                 self._buffer = ""
                 if output:
                     events.append(ParserEvent(ParserEventKind.OUTPUT, output=output))
@@ -191,15 +246,26 @@ class ConsolePromptParser:
                 ))
                 continue
 
+            if _SWITCH_PROMPT.fullmatch(last_line.strip()):
+                self._buffer = ""
+                events.append(ParserEvent(
+                    ParserEventKind.UNSAFE_STATE,
+                    reason="switch-boot-prompt",
+                ))
+                continue
+
             prompt = _PROMPT.fullmatch(last_line.strip())
             if prompt is not None:
                 start = self._buffer.rfind(last_line)
                 output = self._buffer[:start]
                 self._buffer = ""
                 if output:
+                    if _PROMPT.search(output) is not None:
+                        self._prompt_collision = True
                     events.append(ParserEvent(ParserEventKind.OUTPUT, output=output))
                 events.append(ParserEvent(
                     ParserEventKind.PROMPT,
+                    prompt=last_line.strip(),
                     mode=(
                         PromptMode.PRIVILEGED_EXEC
                         if prompt.group("suffix") == "#"
@@ -207,7 +273,6 @@ class ConsolePromptParser:
                     ),
                 ))
                 continue
-
             break
         return tuple(events)
 
