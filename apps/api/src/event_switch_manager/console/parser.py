@@ -72,14 +72,21 @@ class ConsolePaginationLimit(RuntimeError):
 
 
 class _TerminalSanitizer:
-    """Stateful TERMINAL noise removal across arbitrary chunk boundaries."""
+    """Bounded, stateful terminal noise removal across chunk boundaries.
+
+    CSI/OSC payloads are deliberately discarded rather than accumulated.  The
+    state machine only retains the few bits needed to recognize a terminator,
+    so an unterminated escape sequence cannot bypass response limits.
+    """
 
     def __init__(self) -> None:
-        self._escape: str | None = None
+        self._escape_mode: str | None = None
+        self._osc_escape = False
         self._pending_cr = False
 
     def reset(self) -> None:
-        self._escape = None
+        self._escape_mode = None
+        self._osc_escape = False
         self._pending_cr = False
 
     def feed(self, data: str) -> str:
@@ -90,19 +97,33 @@ class _TerminalSanitizer:
                 output.append("\n")
                 if character == "\n":
                     continue
-            if self._escape is not None:
-                self._escape += character
-                if self._escape.startswith("\x1b["):
-                    if len(self._escape) > 2 and 0x40 <= ord(character) <= 0x7E:
-                        self._escape = None
-                elif self._escape.startswith("\x1b]"):
-                    if character == "\x07" or self._escape.endswith("\x1b\\"):
-                        self._escape = None
-                elif len(self._escape) >= 2:
-                    self._escape = None
+            if self._escape_mode is not None:
+                if self._escape_mode == "start":
+                    if character == "[":
+                        self._escape_mode = "csi"
+                    elif character == "]":
+                        self._escape_mode = "osc"
+                    else:
+                        self._escape_mode = None
+                    continue
+                if self._escape_mode == "csi":
+                    if 0x40 <= ord(character) <= 0x7E:
+                        self._escape_mode = None
+                    continue
+                if self._escape_mode == "osc":
+                    if self._osc_escape:
+                        self._osc_escape = False
+                        if character == "\\":
+                            self._escape_mode = None
+                        continue
+                    if character == "\x07":
+                        self._escape_mode = None
+                    elif character == "\x1b":
+                        self._osc_escape = True
+                    continue
                 continue
             if character == "\x1b":
-                self._escape = "\x1b"
+                self._escape_mode = "start"
                 continue
             if character == "\r":
                 self._pending_cr = True

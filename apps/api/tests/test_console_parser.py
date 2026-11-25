@@ -22,6 +22,19 @@ def test_ansi_backspace_and_crlf_are_cleaned() -> None:
     assert sanitize_console_text("\x1b[31mR1\x1b[0m\b1\r\nok") == "R1\nok"
 
 
+def test_unterminated_osc_cannot_bypass_parser_memory_bound() -> None:
+    parser = ConsolePromptParser(max_response_bytes=32)
+    assert parser.feed("\x1b]" + "x" * 100_000) == ()
+    assert parser.buffered_bytes == 0
+
+
+def test_terminated_osc_is_discarded_and_prompt_still_works() -> None:
+    parser = ConsolePromptParser()
+    events = parser.feed("\x1b]0;window title\x07R1>")
+    assert _kinds(events) == [ParserEventKind.PROMPT]
+    assert events[0].prompt == "R1>"
+
+
 def test_incremental_terminal_state_ansi_backspace_and_crlf() -> None:
     parser = ConsolePromptParser()
     assert parser.feed("\x1b[") == ()
