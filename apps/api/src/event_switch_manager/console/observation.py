@@ -218,8 +218,11 @@ def _stack(output: str | None) -> tuple[ConsoleStackMember, ...]:
         return ()
     values: list[ConsoleStackMember] = []
     for line in output.splitlines():
-        match = _STACK_ROW.match(line.strip())
+        stripped = line.strip()
+        match = _STACK_ROW.match(stripped)
         if match is None:
+            if re.match(r"^\d+\s+", stripped):
+                raise IdentityConflict("malformed stack member row")
             continue
         values.append(ConsoleStackMember(
             number=int(match.group("number")),

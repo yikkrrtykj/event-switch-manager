@@ -6,7 +6,7 @@ presented as real device captures and cannot promote hardware verification.
 
 from __future__ import annotations
 
-import time
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -257,6 +257,7 @@ class SimulatedConsoleTransport:
     echo: bool = True
     _closed: bool = field(init=False, default=False)
     _queue: deque[str] = field(init=False, default_factory=deque)
+    _data_available: threading.Event = field(init=False, default_factory=threading.Event)
     _stage: str = field(init=False, default="username")
     _paging_remaining: str | None = field(init=False, default=None)
     _paging_prompt: str | None = field(init=False, default=None)
@@ -296,28 +297,38 @@ class SimulatedConsoleTransport:
     def _enqueue(self, text: str) -> None:
         for index in range(0, len(text), self.chunk_size):
             self._queue.append(text[index:index + self.chunk_size])
+        if self._queue:
+            self._data_available.set()
 
     def open(self) -> None:
         self._closed = False
         self._queue.clear()
+        self._data_available.clear()
         self._stage = "username"
         self._enqueue("Cisco console simulator fixture\nUsername: ")
 
     def close(self) -> None:
         self._closed = True
         self._queue.clear()
+        self._data_available.set()
 
     def pending_data(self) -> bool:
         return bool(self._queue)
 
     def read_chunk(self, timeout: float) -> str:
-        _ = timeout
         if self._closed:
             raise TransportDisconnected("simulated console disconnected")
         if not self._queue:
-            time.sleep(0.001)
-            return ""
-        return self._queue.popleft()
+            self._data_available.clear()
+            self._data_available.wait(timeout)
+            if self._closed:
+                raise TransportDisconnected("simulated console disconnected")
+            if not self._queue:
+                return ""
+        value = self._queue.popleft()
+        if not self._queue:
+            self._data_available.clear()
+        return value
 
     def write(self, text: str) -> None:
         if self._closed:

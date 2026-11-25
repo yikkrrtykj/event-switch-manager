@@ -259,6 +259,12 @@ def test_stack_duplicate_number_and_serial_are_rejected() -> None:
     )
     with pytest.raises(IdentityConflict):
         _stack(duplicate_serial)
+    malformed = (
+        "Switch  Role     Model      Serial   Version  State\n"
+        "1       Active   C9300-24T\n"
+    )
+    with pytest.raises(IdentityConflict):
+        _stack(malformed)
 
 
 def test_query_timeout_becomes_partial_evidence_without_further_commands() -> None:
@@ -346,7 +352,7 @@ def test_discovery_cancellation_and_deadline_are_propagated() -> None:
     try:
         second.start_discovery(deadline_seconds=0.001)
         import time
-        time.sleep(0.01)
+        time.sleep(0.05)
         with pytest.raises(DiscoveryTimeout):
             second.query(ConsoleQuery.VERSION)
     finally:

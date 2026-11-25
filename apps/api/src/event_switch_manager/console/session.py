@@ -499,7 +499,6 @@ class ConsoleSession:
             remaining = max(0.01, deadline - time.monotonic())
             chunk = self._transport.read_chunk(remaining)
             if not chunk:
-                time.sleep(0.002)
                 continue
             for event in self._parser.feed(chunk):
                 if event.kind is ParserEventKind.OUTPUT:
