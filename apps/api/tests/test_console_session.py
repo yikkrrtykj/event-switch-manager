@@ -356,6 +356,20 @@ def test_prompt_identity_must_remain_bound_to_initial_exec_prompt() -> None:
     assert manager.active_owner("sim:scripted") is None
 
 
+def test_query_prompt_privilege_mode_cannot_silently_change() -> None:
+    manager = ConsoleLeaseManager()
+    transport = _ScriptedTransport(
+        "R1#\n",
+        {"show version": "show version\nR1>\n"},
+    )
+    session = ConsoleSession(transport, lease_manager=manager, timeout=1.0)
+    session.open(None)
+    with pytest.raises(UnexpectedConsolePrompt):
+        session.query(ConsoleQuery.VERSION)
+    assert session.state is SessionState.FAILED
+    assert manager.active_owner("sim:scripted") is None
+
+
 def test_prompt_like_text_in_body_fails_complete_output() -> None:
     manager = ConsoleLeaseManager()
     transport = _ScriptedTransport(

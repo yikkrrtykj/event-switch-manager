@@ -383,7 +383,7 @@ class ConsoleSession:
             read = self._read_for_prompt()
         if read.auth is not None or read.mode is not PromptMode.PRIVILEGED_EXEC:
             raise EnableError("enable authentication failed")
-        self._check_bound_prompt(read)
+        self._check_bound_prompt(read, allow_privilege_upgrade=True)
         self._state = SessionState.PRIVILEGED_EXEC
         self._prompt_mode = PromptMode.PRIVILEGED_EXEC
 
@@ -401,16 +401,29 @@ class ConsoleSession:
             else SessionState.USER_EXEC
         )
 
-    def _check_bound_prompt(self, read: _PromptRead) -> None:
+    def _check_bound_prompt(
+        self,
+        read: _PromptRead,
+        *,
+        allow_privilege_upgrade: bool = False,
+    ) -> None:
         if read.prompt is None or read.mode is None:
             raise UnexpectedConsolePrompt("console did not return an EXEC prompt")
         name = read.prompt[:-1].strip()
         if self._prompt_name is None or name != self._prompt_name:
             raise UnexpectedConsolePrompt("console prompt identity changed")
+        if self._prompt_mode is None:
+            raise UnexpectedConsolePrompt("console prompt mode was not bound")
+        upgrade = (
+            allow_privilege_upgrade
+            and self._prompt_mode is PromptMode.USER_EXEC
+            and read.mode is PromptMode.PRIVILEGED_EXEC
+        )
+        if read.mode is not self._prompt_mode and not upgrade:
+            raise UnexpectedConsolePrompt("console prompt mode changed")
         expected_suffix = "#" if read.mode is PromptMode.PRIVILEGED_EXEC else ">"
         if not read.prompt.endswith(expected_suffix):
             raise UnexpectedConsolePrompt("console prompt mode changed")
-        self._prompt_mode = read.mode
 
     def query(self, query: ConsoleQuery) -> str:
         result = self.query_result(query)
