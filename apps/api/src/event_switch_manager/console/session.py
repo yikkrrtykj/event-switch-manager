@@ -492,6 +492,10 @@ class ConsoleSession:
             pending_fn = getattr(self._transport, "pending_data", None)
             pending = bool(pending_fn()) if callable(pending_fn) else False
             if candidate is not None and not pending:
+                if self._parser.has_unconsumed_non_whitespace:
+                    raise AmbiguousConsoleOutput(
+                        "terminal output remained after candidate prompt",
+                    )
                 extra = output[len(candidate.output):].strip()
                 if extra:
                     self._parser.mark_prompt_collision()

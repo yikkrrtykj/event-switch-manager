@@ -261,6 +261,7 @@ class SimulatedConsoleTransport:
     _stage: str = field(init=False, default="username")
     _paging_remaining: str | None = field(init=False, default=None)
     _paging_prompt: str | None = field(init=False, default=None)
+    _paging_return_stage: str | None = field(init=False, default=None)
     _last_command: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
@@ -358,7 +359,8 @@ class SimulatedConsoleTransport:
             return
         if self._stage == "paging":
             if value.strip() == "":
-                self._stage = "command"
+                self._stage = self._paging_return_stage or "user-exec"
+                self._paging_return_stage = None
                 if self._paging_remaining is not None:
                     self._enqueue(self._paging_remaining)
                 if self._paging_prompt is not None:
@@ -402,6 +404,7 @@ class SimulatedConsoleTransport:
             marker = output.index("--More--")
             first = output[:marker + len("--More--")] + "\n"
             remaining = output[marker + len("--More--"):].lstrip("\n") + prompt
+            self._paging_return_stage = self._stage
             self._stage = "paging"
             self._paging_remaining = remaining
             self._paging_prompt = ""

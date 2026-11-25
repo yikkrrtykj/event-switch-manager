@@ -291,6 +291,23 @@ def test_query_timeout_becomes_partial_evidence_without_further_commands() -> No
     assert "license" in evidence.observation.unknown_fields
 
 
+def test_pagination_does_not_truncate_a_complete_observation() -> None:
+    profile = replace(
+        profiles()[3],
+        interfaces=tuple(f"Gi1/0/{index}" for index in range(1, 10)),
+    )
+    session = _session(profile)
+    session.open(CREDS)
+    try:
+        evidence = CiscoObservationAdapter().observe(session)
+    finally:
+        session.close()
+    assert len(evidence.observation.interfaces) == 9
+    assert evidence.observation.completeness is ObservationCompleteness.COMPLETE
+    assert any(item.query is ConsoleQuery.LICENSE for item in evidence.query_results)
+    assert evidence.observation.license.features
+
+
 def test_unsupported_queries_are_explicit_in_evidence() -> None:
     profile = replace(profiles()[3], software_version="17.12.5")
     session = _session(profile)

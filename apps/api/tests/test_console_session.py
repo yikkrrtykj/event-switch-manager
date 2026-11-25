@@ -392,6 +392,35 @@ def test_auth_prompt_during_query_does_not_send_credentials() -> None:
     assert transport.writes == ["show version\r"]
 
 
+def test_buffered_trailing_response_after_candidate_prompt_is_rejected() -> None:
+    transport = _ScriptedTransport(
+        "R1>\n",
+        {"show version": ("show version\nR1>", "\nstill in response")},
+    )
+    session = ConsoleSession(transport, lease_manager=ConsoleLeaseManager(), timeout=1.0)
+    session.open(None)
+    with pytest.raises(SessionError):
+        session.query(ConsoleQuery.VERSION)
+    assert transport.writes == ["show version\r"]
+
+
+def test_simulator_restores_exec_state_after_pagination() -> None:
+    profile = replace(
+        PROFILE,
+        interfaces=tuple(f"Gi1/0/{index}" for index in range(1, 10)),
+    )
+    session = _session(profile=profile, pagination=True, chunk_size=9)
+    session.open(CREDS)
+    session.set_profile(resolve_profile("C9300L-24P-4X", "17.12.4"))
+    try:
+        interfaces = session.query(ConsoleQuery.INTERFACES)
+        assert "Gi1/0/9" in interfaces
+        assert "FIXTURE930001" in session.query(ConsoleQuery.VERSION)
+        assert session.state is SessionState.PRIVILEGED_EXEC
+    finally:
+        session.close()
+
+
 def test_body_pagination_at_chunk_boundary_is_not_continued() -> None:
     transport = _ScriptedTransport(
         "R1>\n",

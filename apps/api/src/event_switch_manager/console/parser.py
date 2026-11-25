@@ -167,6 +167,10 @@ class ConsolePromptParser:
     def buffered_bytes(self) -> int:
         return len(self._buffer.encode("utf-8", errors="replace"))
 
+    @property
+    def has_unconsumed_non_whitespace(self) -> bool:
+        return bool(self._buffer.strip())
+
     def mark_prompt_collision(self) -> None:
         self._prompt_collision = True
 
