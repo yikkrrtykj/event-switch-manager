@@ -32,6 +32,53 @@ From the repository root, run `.\.venv\Scripts\python.exe -m event_switch_manage
 
 For hot reload, add `--dev` to the backend command and run `npm --prefix apps/web run dev` in a second terminal. Use [http://127.0.0.1:5173](http://127.0.0.1:5173) and the default API port. The Vite proxy preserves the browser's Host and Origin.
 
+## Windows offline portable package (R75)
+
+The onedir package does not require Python, Node.js or Docker on the target
+Windows x64 computer. It listens only on `127.0.0.1:8765`, applies Alembic
+migrations to the user database and opens the local browser after startup.
+
+Build the package on a Windows workstation with Python 3.12 and Node.js:
+
+```powershell
+npm --prefix apps/web ci
+npm --prefix apps/web run build
+python -m venv .venv-packaging
+.\.venv-packaging\Scripts\python.exe -m pip install -c apps/api/constraints-py312.txt ./apps/api
+.\.venv-packaging\Scripts\python.exe -m pip install -r apps/api/packaging/requirements-packaging.txt
+powershell -NoProfile -ExecutionPolicy Bypass -File apps/api/packaging/build_windows.ps1 `
+  -Python ".venv-packaging/Scripts/python.exe" -WebDist "apps/web/dist"
+```
+
+The build writes these local artifacts (not a GitHub Release):
+
+```text
+apps/api/dist/EventSwitchManager-windows-x64.zip
+apps/api/dist/EventSwitchManager-build-record.json
+apps/api/dist/EventSwitchManager/EventSwitchManager.exe
+```
+
+The build record contains the version, Git SHA, SHA-256 of the ZIP and EXE,
+static assets, Alembic migrations and Python package inventory.
+
+Extract the ZIP and run `EventSwitchManager.exe`; the browser opens the local
+dashboard. The portable directory can be moved or replaced without moving the
+database. The normal Windows database is
+`%LOCALAPPDATA%\EventSwitchManager\esm.sqlite3`; never put user data in the
+portable directory. Use `--database PATH` for an isolated workspace. Use
+`--no-browser` when running a smoke test or scripted startup.
+
+Close the application with Ctrl+C or by closing its console; the listening
+port is released. If port 8765 is occupied, startup fails with an explicit
+message and does not stop the other process. For an offline backup, stop the
+application first, then copy `esm.sqlite3` to a separate location. Migration
+failure is reported without deleting or recreating an existing database.
+
+The real EXE smoke test (health, dashboard, Event, saved Revision, Cisco Review
+Bundle JSON, restart persistence, arbitrary working directories, port conflict
+and port release) is run by the Windows Portable Runtime CI job; its ZIP and
+smoke report are uploaded as CI artifacts, not published as a Release.
+
 ## Planning API
 
 | Method | Path under `/api/v1` |

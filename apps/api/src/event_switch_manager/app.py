@@ -1,3 +1,4 @@
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -193,6 +194,8 @@ def create_app(settings: Settings) -> FastAPI:
     _install_openapi_component_compatibility(app)
 
     web_dist = settings.web_dist.resolve()
+    if getattr(sys, "frozen", False) and not (web_dist / "index.html").is_file():
+        raise RuntimeError(f"Packaged web assets are missing: {web_dist}")
     assets = web_dist / "assets"
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=assets), name="assets")
