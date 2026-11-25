@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import pytest
 
+from event_switch_manager.console.allowlist import resolve_profile
 from event_switch_manager.console.lease import ConsoleLeaseManager
 from event_switch_manager.console.models import (
     ConsoleEvidenceRejected,
@@ -35,8 +36,17 @@ from event_switch_manager.integrations import ConsoleQuery
 CREDS = ConsoleCredentials("console", "synthetic-password", "synthetic-enable")
 
 
-def _session(profile: SimulatorProfile | None = None) -> ConsoleSession:
-    transport = SimulatedConsoleTransport(profile=profile or profiles()[3])
+def _session(
+    profile: SimulatorProfile | None = None,
+    *,
+    pagination: bool = True,
+    chunk_size: int = 1024,
+) -> ConsoleSession:
+    transport = SimulatedConsoleTransport(
+        profile=profile or profiles()[3],
+        pagination=pagination,
+        chunk_size=chunk_size,
+    )
     return ConsoleSession(transport, timeout=1.0)
 
 
@@ -289,6 +299,23 @@ def test_query_timeout_becomes_partial_evidence_without_further_commands() -> No
         for item in evidence.query_results
     )
     assert "license" in evidence.observation.unknown_fields
+
+
+def test_disabled_pagination_removes_simulator_marker() -> None:
+    profile = replace(
+        profiles()[3],
+        interfaces=tuple(f"Gi1/0/{index}" for index in range(1, 10)),
+    )
+    session = _session(profile, pagination=False, chunk_size=1)
+    session.open(CREDS)
+    session.set_profile(resolve_profile("C9300L-24P-4X", "17.12.4"))
+    try:
+        interfaces = session.query(ConsoleQuery.INTERFACES)
+        assert "Gi1/0/9" in interfaces
+        assert "--More--" not in interfaces
+        assert "FIXTURE930001" in session.query(ConsoleQuery.VERSION)
+    finally:
+        session.close()
 
 
 def test_pagination_does_not_truncate_a_complete_observation() -> None:

@@ -400,6 +400,8 @@ class SimulatedConsoleTransport:
             self._enqueue("% Invalid input detected at '^' marker.\n" + prompt)
             return
         output = self.profile.query_output(query)
+        if not self.pagination:
+            output = output.replace("--More--\n", "").replace("--More--", "")
         if self.pagination and "--More--" in output:
             marker = output.index("--More--")
             first = output[:marker + len("--More--")] + "\n"
