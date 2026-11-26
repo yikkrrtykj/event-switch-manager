@@ -588,7 +588,7 @@ def test_enable_credentials_are_requested_only_at_enable_prompt() -> None:
     try:
         assert session.state is SessionState.USER_EXEC
         session.enable_with_operator()
-        assert session.state is SessionState.PRIVILEGED_EXEC
+        assert session.state.name == "PRIVILEGED_EXEC"
         assert prompts == ["ENABLE_PASSWORD"]
     finally:
         session.close()
