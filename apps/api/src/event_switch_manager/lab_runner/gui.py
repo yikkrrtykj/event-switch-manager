@@ -479,7 +479,10 @@ class ConsoleLabGui:
             messagebox.showinfo("ConsoleLab", "尚未生成报告目录。", parent=self.root)
             return
         try:
-            os.startfile(str(directory))
+            opener = getattr(os, "startfile", None)
+            if not callable(opener):
+                raise OSError("directory opener is unavailable")
+            opener(str(directory))
         except Exception as exc:
             messagebox.showerror(
                 "ConsoleLab",
