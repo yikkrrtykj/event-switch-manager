@@ -557,20 +557,36 @@ class ConsoleSession:
             self._wake_sent = True
             self._state = SessionState.AWAITING_PROMPT
 
-    def _enable(self, enable_password: str) -> None:
-        validate_console_input("enable password", enable_password)
+    def _enable(self, enable_password: str | None = None) -> None:
         self._state = SessionState.AUTHENTICATING
         self._parser.reset()
         self._send("enable\r", ConsoleSendOperation.ENABLE)
         read = self._read_for_prompt(timeout=self._auth_timeout)
         if read.auth is AuthPromptKind.PASSWORD:
-            self._send(enable_password + "\r", ConsoleSendOperation.ENABLE_PASSWORD)
+            value = enable_password or self._credential_value(
+                None, AuthPromptKind.ENABLE_PASSWORD,
+            )
+            validate_console_input("enable password", value)
+            self._send(value + "\r", ConsoleSendOperation.ENABLE_PASSWORD)
             read = self._read_for_prompt(timeout=self._auth_timeout)
         if read.auth is not None or read.mode is not PromptMode.PRIVILEGED_EXEC:
             raise EnableError("enable authentication failed")
         self._check_bound_prompt(read, allow_privilege_upgrade=True)
         self._state = SessionState.PRIVILEGED_EXEC
         self._prompt_mode = PromptMode.PRIVILEGED_EXEC
+
+    def enable_with_operator(self) -> None:
+        """Request enable only after an explicit operator decision."""
+        with self._state_lock:
+            if self._state is not SessionState.USER_EXEC:
+                raise SessionStateError("enable is only available from USER EXEC")
+            try:
+                self._enable(None)
+            except Exception as exc:
+                self._fail()
+                if isinstance(exc, SessionError):
+                    raise
+                raise SessionError("enable failed") from exc
 
     def _bind_initial_prompt(self, read: _PromptRead) -> None:
         if read.prompt is None or read.mode is None:

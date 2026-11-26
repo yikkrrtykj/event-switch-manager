@@ -435,6 +435,11 @@ def run_experiment(args: argparse.Namespace) -> int:
             session.finish_attach(None, timeout=30.0)
         if not session.is_attached:
             raise SessionError("no reliable EXEC prompt after passive attach/wake")
+        if session.state is SessionState.USER_EXEC and _confirm(
+            "当前为 USER EXEC；是否需要发送 enable 进入 privileged EXEC？"
+            "密码仅在出现提示时安全读取。输入 y 继续: ",
+        ):
+            session.enable_with_operator()
         print("已获得可靠 EXEC/auth prompt；开始 operator-assisted 只读查询。")
         base_provenance = _lab_provenance(
             authorization,

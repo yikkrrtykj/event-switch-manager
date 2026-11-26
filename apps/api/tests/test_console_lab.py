@@ -553,6 +553,47 @@ def test_operator_gate_blocks_query_before_any_send(monkeypatch: pytest.MonkeyPa
         session.close()
 
 
+def test_enable_credentials_are_requested_only_at_enable_prompt() -> None:
+    class EnableSerial(FakeSerial):
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            if data == b"enable\r":
+                self.buffer += "Password: "
+            elif b"enable-pass" in data:
+                self.buffer += "R1#\n"
+            return len(data)
+
+    port = _port()
+    auth = _auth(port=port)
+    serial = EnableSerial(initial="R1>\n")
+    prompts: list[str] = []
+
+    def provider(kind: Any) -> str:
+        prompts.append(kind.name)
+        return "enable-pass"
+
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        credential_provider=provider,
+        timeout=1.0,
+    )
+    session.open(None, initial_timeout=0.5)
+    try:
+        assert session.state is SessionState.USER_EXEC
+        session.enable_with_operator()
+        assert session.state is SessionState.PRIVILEGED_EXEC
+        assert prompts == ["ENABLE_PASSWORD"]
+    finally:
+        session.close()
+
+
 def test_credentials_only_requested_at_real_auth_prompt() -> None:
     port = _port()
     auth = _auth(port=port)
