@@ -81,6 +81,7 @@ class AuthorizedSerialTransport:
         self._serial: Any = None
         self._is_open = False
         self._cleanup_required = False
+        self._ever_opened = False
 
     @property
     def authorization(self) -> LabAuthorization:
@@ -105,6 +106,10 @@ class AuthorizedSerialTransport:
     @property
     def is_open(self) -> bool:
         return self._is_open
+
+    @property
+    def ever_opened(self) -> bool:
+        return self._ever_opened
 
     @property
     def cleanup_required(self) -> bool:
@@ -144,6 +149,7 @@ class AuthorizedSerialTransport:
             raise TransportError("lab-serial-open-failed") from exc
         self._serial = serial_port
         self._is_open = True
+        self._ever_opened = True
         self._authorization.bind_transport(self)
 
     def close(self) -> None:

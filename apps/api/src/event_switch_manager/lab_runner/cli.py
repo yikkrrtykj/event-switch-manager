@@ -6,8 +6,9 @@ import argparse
 import getpass
 import hashlib
 import json
+import queue
 import sys
-import time
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -144,13 +145,43 @@ def _select_port(discovery: SerialDiscovery, requested: str | None) -> SerialPor
     return matches[0]
 
 
-def _confirm(prompt: str, *, timeout_seconds: float = 120.0) -> bool:
-    start = time.monotonic()
+def _read_prompt(prompt: str, *, timeout_seconds: float, secret: bool) -> str | None:
+    """Read a console interaction with a wall-clock bound.
+
+    A daemon reader is used because Python's input()/getpass() cannot be
+    interrupted portably.  On timeout the caller stops the experiment; the
+    daemon reader is never allowed to drive a later send.
+    """
+    results: queue.Queue[str | None] = queue.Queue(maxsize=1)
+
+    def reader() -> None:
+        try:
+            value = (
+                getpass.getpass(prompt)
+                if secret
+                else input(prompt)
+            )
+        except (EOFError, KeyboardInterrupt):
+            results.put(None)
+        except Exception:
+            results.put(None)
+        else:
+            results.put(value)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        return None
     try:
-        answer = input(prompt)
-    except EOFError:
-        return False
-    if time.monotonic() - start > timeout_seconds:
+        return results.get_nowait()
+    except queue.Empty:
+        return None
+
+
+def _confirm(prompt: str, *, timeout_seconds: float = 120.0) -> bool:
+    answer = _read_prompt(prompt, timeout_seconds=timeout_seconds, secret=False)
+    if answer is None:
         return False
     return answer.strip() == "YES" or answer.strip().casefold() == "y"
 
@@ -159,11 +190,23 @@ def _lab_credential(kind: AuthPromptKind) -> str:
     if not sys.stdin.isatty():
         raise SessionError("a safe interactive terminal is required for credentials")
     if kind is AuthPromptKind.USERNAME:
-        value = input("Console username (不回显控制字符): ").strip()
+        value = _read_prompt(
+            "Console username (不回显控制字符): ",
+            timeout_seconds=120.0,
+            secret=False,
+        )
     elif kind is AuthPromptKind.PASSWORD:
-        value = getpass.getpass("Console password (不回显): ")
+        value = _read_prompt(
+            "Console password (不回显): ",
+            timeout_seconds=120.0,
+            secret=True,
+        )
     else:
-        value = getpass.getpass("Enable password (不回显): ")
+        value = _read_prompt(
+            "Enable password (不回显): ",
+            timeout_seconds=120.0,
+            secret=True,
+        )
     if not value:
         raise SessionError("credential prompt was cancelled or empty")
     return value
@@ -361,8 +404,8 @@ def run_experiment(args: argparse.Namespace) -> int:
     ):
         print("操作者未确认，未打开串口。", file=sys.stderr)
         return EXIT_AUTHORIZATION
-    build = LabBuildMetadata.load()
     try:
+        build = LabBuildMetadata.load()
         build.require_frozen()
     except ArtifactIdentityError as exc:
         print(f"拒绝真实实验：{exc}", file=sys.stderr)
@@ -457,7 +500,7 @@ def run_experiment(args: argparse.Namespace) -> int:
             expected_release=target.expected_release,
             query_hook=_operator_query_hook(session),
             lab_provenance=base_provenance,
-            deadline_seconds=min(900.0, max(1.0, remaining - 1.0)),
+            deadline_seconds=min(290.0, max(10.0, remaining - 1.0)),
         )
         if evidence.completeness is ObservationCompleteness.COMPLETE:
             print("程序完成解析；该结果仍不是硬件认证。")
@@ -470,6 +513,10 @@ def run_experiment(args: argparse.Namespace) -> int:
             cancelled = True
             error = "operator: final result review not confirmed"
             exit_code = EXIT_TRANSPORT
+        else:
+            if session.pending_data():
+                raise ConsoleOperatorAbort("late terminal data during final review")
+            authorization.check_active()
     except LabAuthorizationError as exc:
         error = f"authorization: {exc}"
         exit_code = EXIT_AUTHORIZATION
@@ -550,13 +597,19 @@ def run_experiment(args: argparse.Namespace) -> int:
         operator_confirmed = False
     experiment_verdict = (
         "READONLY_QUERIES_COMPLETED"
-        if queries_complete and cleanup_status == "RELEASED" and not error
+        if (
+            queries_complete
+            and cleanup_status == "RELEASED"
+            and not error
+            and operator_confirmed
+        )
         else "FAILED_OR_CANCELLED"
     )
     connection = {
         "status": connection_state,
         "com_endpoint": port.port,
-        "opened": connection_state in {"OPENED", "RELEASED", "CLEANUP_REQUIRED"},
+        "opened": session.transport_ever_opened,
+        "transport_opened": session.transport_ever_opened,
         "wake_sent": wake_sent,
         "wake_confirmed": wake_confirmed,
         "operator_confirmations": confirmations[0],

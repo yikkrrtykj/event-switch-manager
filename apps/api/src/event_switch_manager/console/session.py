@@ -229,8 +229,8 @@ class ConsoleSession:
         auth_timeout: float = 30.0,
     ) -> None:
         validate_family(family)
-        if not 0 < timeout <= 30:
-            raise ValueError("session timeout must be in (0, 30] seconds")
+        if not 0 < timeout <= 120:
+            raise ValueError("session timeout must be in (0, 120] seconds")
         if max_total_response_bytes <= 0:
             raise ValueError("total response limit must be positive")
         self._transport = transport
@@ -264,6 +264,7 @@ class ConsoleSession:
         self._active_query: ConsoleQuery | None = None
         self._wake_sent = False
         self._cancel_event = threading.Event()
+        self._last_prompt_read_saw_data = False
 
     @property
     def state(self) -> SessionState:
@@ -274,6 +275,10 @@ class ConsoleSession:
     def last_results(self) -> tuple[ConsoleQueryResult, ...]:
         with self._state_lock:
             return tuple(self._last_results)
+
+    @property
+    def transport_ever_opened(self) -> bool:
+        return bool(getattr(self._transport, "ever_opened", False))
 
     @property
     def is_attached(self) -> bool:
@@ -445,9 +450,10 @@ class ConsoleSession:
             try:
                 read = self._read_for_prompt(timeout=initial_timeout)
             except ConsoleTimeout:
-                if allow_silent:
-                    # Keep the transport and lease open for an explicit,
-                    # operator-confirmed single wake; do not assume EXEC.
+                if allow_silent and not self._last_prompt_read_saw_data:
+                    # True silence can be offered an explicit, operator-
+                    # confirmed single wake.  Any consumed banner/output is
+                    # ambiguous and must fail closed instead.
                     self._state = SessionState.AWAITING_PROMPT
                     return
                 raise
@@ -500,10 +506,14 @@ class ConsoleSession:
     ) -> None:
         attempts = 0
         auth_events = 0
+        auth_deadline = time.monotonic() + self._auth_timeout
         while read.auth is not None:
             auth_events += 1
             if auth_events > 6:
                 raise AuthenticationError("console authentication failed")
+            remaining = auth_deadline - time.monotonic()
+            if remaining <= 0:
+                raise AuthenticationError("console authentication budget expired")
             self._state = SessionState.AUTHENTICATING
             if read.auth is AuthPromptKind.USERNAME:
                 value = self._credential_value(credentials, AuthPromptKind.USERNAME)
@@ -516,7 +526,10 @@ class ConsoleSession:
                     raise AuthenticationError("console authentication failed")
                 value = self._credential_value(credentials, AuthPromptKind.PASSWORD)
                 self._send(value + "\r", ConsoleSendOperation.PASSWORD)
-            read = self._read_for_prompt(timeout=self._auth_timeout)
+            remaining = auth_deadline - time.monotonic()
+            if remaining <= 0:
+                raise AuthenticationError("console authentication budget expired")
+            read = self._read_for_prompt(timeout=remaining)
         self._bind_initial_prompt(read)
         if (
             credentials is not None
@@ -536,7 +549,12 @@ class ConsoleSession:
             if self._state is not SessionState.AWAITING_PROMPT:
                 raise SessionStateError("console session is not awaiting a prompt")
             try:
-                read = self._read_for_prompt(timeout=timeout)
+                read = self._read_for_prompt(
+                    timeout=min(
+                        self._auth_timeout,
+                        timeout if timeout is not None else self._auth_timeout,
+                    ),
+                )
                 self._complete_attach(read, credentials)
             except Exception as exc:
                 self._fail()
@@ -560,15 +578,19 @@ class ConsoleSession:
     def _enable(self, enable_password: str | None = None) -> None:
         self._state = SessionState.AUTHENTICATING
         self._parser.reset()
+        deadline = time.monotonic() + self._auth_timeout
         self._send("enable\r", ConsoleSendOperation.ENABLE)
-        read = self._read_for_prompt(timeout=self._auth_timeout)
+        read = self._read_for_prompt(timeout=max(0.001, deadline - time.monotonic()))
         if read.auth is AuthPromptKind.PASSWORD:
             value = enable_password or self._credential_value(
                 None, AuthPromptKind.ENABLE_PASSWORD,
             )
             validate_console_input("enable password", value)
             self._send(value + "\r", ConsoleSendOperation.ENABLE_PASSWORD)
-            read = self._read_for_prompt(timeout=self._auth_timeout)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise EnableError("enable authentication budget expired")
+            read = self._read_for_prompt(timeout=remaining)
         if read.auth is not None or read.mode is not PromptMode.PRIVILEGED_EXEC:
             raise EnableError("enable authentication failed")
         self._check_bound_prompt(read, allow_privilege_upgrade=True)
@@ -759,6 +781,7 @@ class ConsoleSession:
         timeout: float | None = None,
     ) -> _PromptRead:
         deadline = self._read_deadline(timeout=timeout)
+        self._last_prompt_read_saw_data = False
         output = ""
         candidate: _PromptRead | None = None
         while time.monotonic() < deadline:
@@ -795,6 +818,7 @@ class ConsoleSession:
             chunk = self._transport.read_chunk(read_limit)
             if not chunk:
                 continue
+            self._last_prompt_read_saw_data = True
             if self._completion_policy is not None:
                 self._completion_policy.observe_chunk(chunk)
             for event in self._parser.feed(chunk):
@@ -822,6 +846,7 @@ class ConsoleSession:
                         query=self._active_query,
                     )
                 elif event.kind is ParserEventKind.PROMPT:
+                    self._last_prompt_read_saw_data = True
                     if candidate is not None and output[len(candidate.output):].strip():
                         self._parser.mark_prompt_collision()
                     candidate = _PromptRead(
@@ -841,6 +866,9 @@ class ConsoleSession:
             self._completion_policy is None
             or self._completion_policy.candidate_ready()
         ):
+            self._check_discovery_budget()
+            if self._lab_gate is not None:
+                self._lab_gate.check_active()
             pending_fn = getattr(self._transport, "pending_data", None)
             pending = bool(pending_fn()) if callable(pending_fn) else False
             if not pending and not self._parser.has_unconsumed_non_whitespace:

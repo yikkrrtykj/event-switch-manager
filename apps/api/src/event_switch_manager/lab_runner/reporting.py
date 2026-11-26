@@ -126,7 +126,7 @@ class LabReportWriter:
             "vid": f"{port.vid:04x}" if port and port.vid is not None else None,
             "pid": f"{port.pid:04x}" if port and port.pid is not None else None,
             "usb_serial_token": stable_token(port.serial_number) if port else None,
-            "location": port.location if port else None,
+            "location_token": stable_token(port.location) if port else None,
             "adapter_identity_sha256": sha256_text(port.adapter_identity) if port else None,
             "identity_quality": port.identity_quality.value if port else None,
             "duplicate_identity": port.duplicate_identity if port else None,
@@ -409,6 +409,8 @@ def validate_lab_provenance(
     authorization: LabAuthorization,
     target: LabTarget,
     observation: Any,
+    *,
+    require_success: bool = False,
 ) -> None:
     if provenance is None:
         raise LabEvidenceError("lab evidence requires provenance")
@@ -419,12 +421,16 @@ def validate_lab_provenance(
         provenance.expected_pid == target.expected_pid,
         provenance.expected_release == target.expected_release,
         provenance.com_endpoint.casefold() == authorization.com_endpoint.casefold(),
+        provenance.adapter_identity_sha256 == sha256_text(authorization.adapter_identity),
         provenance.artifact_sha256 == authorization.artifact_sha256,
         provenance.software_git_sha == authorization.software_git_sha,
-        provenance.operator_confirmed is True,
-        provenance.cleanup_status == "RELEASED",
         provenance.hardware_evidence == "lab-readonly-unverified",
     )
+    if require_success and not (
+        provenance.operator_confirmed is True
+        and provenance.cleanup_status == "RELEASED"
+    ):
+        raise LabEvidenceError("lab provenance is not a successful operator run")
     if not all(checks):
         raise LabEvidenceError("lab provenance does not match the authorization/run")
     if observation is not None:

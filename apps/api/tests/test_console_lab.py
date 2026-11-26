@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import time
 from dataclasses import replace
@@ -16,6 +17,7 @@ from event_switch_manager.console.discovery import (
     SerialPortInfo,
 )
 from event_switch_manager.console.models import (
+    ConsoleEvidence,
     ConsoleEvidenceRejected,
     ConsoleObservation,
     ConsoleQueryResult,
@@ -50,9 +52,11 @@ from event_switch_manager.lab_runner.completion import LiveCompletionPolicy
 from event_switch_manager.lab_runner.reporting import (
     ArtifactIdentityError,
     LabBuildMetadata,
+    LabEvidenceError,
     LabReportWriter,
     sha256_file,
     sha256_text,
+    validate_lab_provenance,
     verify_report_fingerprint,
 )
 from event_switch_manager.lab_runner.targets import get_target
@@ -434,6 +438,27 @@ def test_passive_attach_requires_one_operator_confirmed_wake() -> None:
         session.close()
 
 
+def test_ambiguous_banner_is_not_treated_as_true_silence_or_woken() -> None:
+    port = _port()
+    auth = _auth(port=port)
+    serial = FakeSerial(initial="UNRECOGNIZED BANNER\n")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        timeout=0.2,
+    )
+    with pytest.raises(SessionError):
+        session.open(None, initial_timeout=0.05, allow_silent=True)
+    assert session.transport_ever_opened
+    assert serial.writes == []
+
+
 def test_unsafe_initial_state_never_wakes_and_has_no_send() -> None:
     port = _port()
     auth = _auth(port=port)
@@ -803,6 +828,7 @@ def test_report_redacts_serials_and_has_stable_fingerprint(tmp_path: Path) -> No
     report = (tmp_path / "console-lab-report.json").read_text(encoding="utf-8")
     assert "CHASSIS-SECRET-01" not in report
     assert "R86ADAPTER" not in report
+    assert "1-2.1" not in report
     assert first["report_fingerprint"] == second["report_fingerprint"]
     assert verify_report_fingerprint(first) is True
     tampered = dict(first)
@@ -849,6 +875,67 @@ def test_artifact_identity_recomputes_exe_sha_and_rejects_forgery(
         LabBuildMetadata.load(exe).require_frozen()
 
 
+def test_report_retains_failed_evidence_without_claiming_success(tmp_path: Path) -> None:
+    observation = ConsoleObservation(
+        source=ConsoleSource.AUTHORIZED_LIVE_LAB,
+        session_identity="lab-session",
+        exact_pid="WS-C2960X-24TS-L",
+        software_version="15.2(7)E10",
+        serial_number="FAILED-EVIDENCE",
+        completeness=ObservationCompleteness.PARTIAL,
+    )
+    auth = _auth()
+    provenance = LabProvenance(
+        experiment_id=auth.experiment_id,
+        target="2960x",
+        authorization_digest=auth.digest,
+        expected_pid="WS-C2960X-24TS-L",
+        expected_release="15.2(7)E10",
+        observed_pid="WS-C2960X-24TS-L",
+        observed_release="15.2(7)E10",
+        com_endpoint="COM3",
+        adapter_identity_sha256=sha256_text(_port().adapter_identity),
+        artifact_sha256=auth.artifact_sha256,
+        software_git_sha=auth.software_git_sha,
+        operator_confirmed=False,
+        cleanup_status="CLEANUP_REQUIRED",
+    )
+    evidence = build_evidence(observation, (), lab_provenance=provenance)
+    with pytest.raises(LabEvidenceError, match="provenance"):
+        validate_lab_provenance(
+            provenance.model_copy(update={"adapter_identity_sha256": "0" * 64}),
+            auth,
+            get_target("2960x"),
+            observation,
+        )
+    writer = LabReportWriter(
+        tmp_path,
+        build=LabBuildMetadata(auth.software_git_sha, auth.artifact_sha256, "test"),
+        authorization=auth,
+        target=get_target("2960x"),
+        discovery=_discovery(_port()),
+        port=_port(),
+    )
+    payload = writer.write(
+        evidence=evidence,
+        connection={
+            "status": "CLEANUP_REQUIRED",
+            "opened": True,
+            "readonly_queries_completed": False,
+            "experiment_verdict": "FAILED_OR_CANCELLED",
+        },
+        cleanup_status="CLEANUP_REQUIRED",
+        operator_confirmations=0,
+        error="cleanup required",
+    )
+    assert payload["evidence"]["source"] == "AUTHORIZED_LIVE_LAB"
+    assert payload["evidence"]["lab_provenance_digest"] is not None
+    assert payload["outcome"]["experiment_verdict"] == "FAILED_OR_CANCELLED"
+    assert "FAILED-EVIDENCE" not in (tmp_path / "console-lab-report.json").read_text(
+        encoding="utf-8",
+    )
+
+
 def test_report_does_not_claim_success_for_never_opened_failure(tmp_path: Path) -> None:
     auth = _auth()
     writer = LabReportWriter(
@@ -875,6 +962,215 @@ def test_report_does_not_claim_success_for_never_opened_failure(tmp_path: Path) 
     assert payload["outcome"]["experiment_verdict"] == "FAILED_OR_CANCELLED"
     assert payload["outcome"]["hardware_verdict"] == "NOT_VERIFIED"
     assert payload["evidence"]["hardware_verified"] is False
+
+
+def test_run_experiment_happy_path_is_wired_without_hardware(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    class IntegrationSerial(FakeSerial):
+        def __init__(self) -> None:
+            super().__init__(initial="R1>\n")
+            self.privileged = False
+
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            if data == b"enable\r":
+                self.privileged = True
+                self.buffer += "R1#\n"
+            elif data and data != b"\r":
+                prompt = "R1#\n" if self.privileged else "R1>\n"
+                self.buffer += data.decode("ascii", errors="replace") + f"\r\n{prompt}"
+            return len(data)
+
+    port = _port()
+    discovery = _discovery(port)
+    serial = IntegrationSerial()
+
+    class FakeAdapter:
+        def observe(
+            self,
+            session: ConsoleSession,
+            *,
+            expected_pid: str,
+            expected_release: str,
+            query_hook: Any,
+            lab_provenance: LabProvenance,
+            deadline_seconds: float,
+        ) -> ConsoleEvidence:
+            _ = (expected_pid, expected_release, query_hook, deadline_seconds)
+            target = get_target("2960x")
+            session.set_profile(target.profile)
+            results = tuple(
+                session.query_result(query) for query in target.allowed_queries
+            )
+            observation = ConsoleObservation(
+                source=ConsoleSource.AUTHORIZED_LIVE_LAB,
+                session_identity="lab-integration",
+                exact_pid=target.expected_pid,
+                software_version=target.expected_release,
+                serial_number="INTEGRATION-SERIAL",
+                completeness=ObservationCompleteness.COMPLETE,
+            )
+            return build_evidence(
+                observation,
+                results,
+                lab_provenance=lab_provenance,
+            )
+
+    metadata = LabBuildMetadata("a" * 40, "b" * 64, "test", True, True)
+    monkeypatch.setattr(
+        LabBuildMetadata, "load", classmethod(lambda _cls: metadata),
+    )
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", lambda: discovery)
+    monkeypatch.setattr(lab_cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(lab_cli, "CiscoObservationAdapter", FakeAdapter)
+    monkeypatch.setattr(
+        lab_cli,
+        "AuthorizedSerialTransport",
+        lambda auth, parameters=None: AuthorizedSerialTransport(
+            auth,
+            discovery=lambda: discovery,
+            serial_factory=lambda _port, _params: serial,
+        ),
+    )
+    exit_code = lab_cli.run_experiment(argparse.Namespace(
+        target="2960x",
+        com="COM3",
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path),
+    ))
+    assert exit_code == 0
+    report = next(tmp_path.glob("experiment-*/console-lab-report.json"))
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["outcome"]["experiment_verdict"] == "READONLY_QUERIES_COMPLETED"
+    assert payload["outcome"]["hardware_verdict"] == "NOT_VERIFIED"
+    assert payload["connection"]["opened"] is True
+    assert payload["connection"]["status"] == "RELEASED"
+    assert payload["evidence"]["source"] == "AUTHORIZED_LIVE_LAB"
+    assert len(payload["queries"]) == len(get_target("2960x").allowed_queries)
+    assert verify_report_fingerprint(payload) is True
+
+
+def test_run_experiment_records_open_failure_truthfully(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    port = _port()
+    discovery = _discovery(port)
+    serial = FakeSerial(initial="switch: \n")
+    metadata = LabBuildMetadata("a" * 40, "b" * 64, "test", True, True)
+    monkeypatch.setattr(LabBuildMetadata, "load", classmethod(lambda _cls: metadata))
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", lambda: discovery)
+    monkeypatch.setattr(lab_cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        lab_cli,
+        "AuthorizedSerialTransport",
+        lambda auth, parameters=None: AuthorizedSerialTransport(
+            auth,
+            discovery=lambda: discovery,
+            serial_factory=lambda _port, _params: serial,
+        ),
+    )
+    exit_code = lab_cli.run_experiment(argparse.Namespace(
+        target="2960x",
+        com="COM3",
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path),
+    ))
+    assert exit_code != 0
+    report = next(tmp_path.glob("experiment-*/console-lab-report.json"))
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["connection"]["status"] == "OPEN_FAILED"
+    assert payload["connection"]["opened"] is True
+    assert payload["connection"]["transport_opened"] is True
+    assert payload["outcome"]["experiment_verdict"] == "FAILED_OR_CANCELLED"
+    assert serial.writes == []
+
+
+def test_late_data_during_final_review_cannot_be_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    class IntegrationSerial(FakeSerial):
+        def __init__(self) -> None:
+            super().__init__(initial="R1>\n")
+            self.privileged = False
+
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            if data == b"enable\r":
+                self.privileged = True
+                self.buffer += "R1#\n"
+            elif data and data != b"\r":
+                prompt = "R1#\n" if self.privileged else "R1>\n"
+                self.buffer += data.decode("ascii", errors="replace") + f"\r\n{prompt}"
+            return len(data)
+
+    port = _port()
+    discovery = _discovery(port)
+    serial = IntegrationSerial()
+    target = get_target("2960x")
+
+    class FakeAdapter:
+        def observe(
+            self,
+            session: ConsoleSession,
+            *,
+            expected_pid: str,
+            expected_release: str,
+            query_hook: Any,
+            lab_provenance: LabProvenance,
+            deadline_seconds: float,
+        ) -> ConsoleEvidence:
+            _ = (expected_pid, expected_release, query_hook, deadline_seconds)
+            session.set_profile(target.profile)
+            results = tuple(session.query_result(q) for q in target.allowed_queries)
+            observation = ConsoleObservation(
+                source=ConsoleSource.AUTHORIZED_LIVE_LAB,
+                session_identity="lab-late",
+                exact_pid=target.expected_pid,
+                software_version=target.expected_release,
+                completeness=ObservationCompleteness.COMPLETE,
+            )
+            evidence = build_evidence(
+                observation, results, lab_provenance=lab_provenance,
+            )
+            serial.buffer += "late asynchronous syslog\r\n"
+            return evidence
+
+    metadata = LabBuildMetadata("a" * 40, "b" * 64, "test", True, True)
+    monkeypatch.setattr(LabBuildMetadata, "load", classmethod(lambda _cls: metadata))
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", lambda: discovery)
+    monkeypatch.setattr(lab_cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(lab_cli, "CiscoObservationAdapter", FakeAdapter)
+    monkeypatch.setattr(
+        lab_cli,
+        "AuthorizedSerialTransport",
+        lambda auth, parameters=None: AuthorizedSerialTransport(
+            auth,
+            discovery=lambda: discovery,
+            serial_factory=lambda _port, _params: serial,
+        ),
+    )
+    exit_code = lab_cli.run_experiment(argparse.Namespace(
+        target="2960x",
+        com="COM3",
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path),
+    ))
+    assert exit_code != 0
+    report = next(tmp_path.glob("experiment-*/console-lab-report.json"))
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["outcome"]["experiment_verdict"] == "FAILED_OR_CANCELLED"
+    assert payload["evidence"]["source"] == "AUTHORIZED_LIVE_LAB"
+    assert payload["evidence"]["lab_provenance_digest"] is not None
 
 
 def test_cli_self_test_and_listing_do_not_open_serial(monkeypatch: pytest.MonkeyPatch) -> None:
