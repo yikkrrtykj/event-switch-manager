@@ -356,6 +356,7 @@ _IDENTITY_REASON_CODES: Mapping[str, str] = {
     "software-is-rommon": "software-release-unverified",
     "software-missing": "software-image-missing",
     "pid-unlisted": "pid-unlisted",
+    "console-only-evidence": "pid-unlisted",
     "family-mismatch": "family-mismatch",
     "target-binding-unknown": "target-binding-unknown",
     "stack-identities-unresolved": "stack-identity-unresolved",

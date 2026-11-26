@@ -285,6 +285,9 @@ def resolve_query_for_profile(
 
 
 def supported_queries_for_profile(profile: ConsoleProfile) -> tuple[ConsoleQuery, ...]:
+    if not isinstance(profile, ConsoleProfile):
+        raise ProfileNotVerified("exact console profile is required")
+    profile = validate_profile(profile)
     allowed: list[ConsoleQuery] = []
     for query in QUERY_SPECS[profile.family]:
         try:

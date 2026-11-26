@@ -398,6 +398,7 @@ def test_non_core_assignment_has_no_l3_pass_and_does_not_boost_completeness(
         ("WS-C2960X-24TS-L", "catalyst-2960x", "15.2(7)E", "LAN Base"),
         ("WS-C3850-24T", "catalyst-3850", "16.12.12", "IP Base"),
         ("C1000-24T-4G-L", "catalyst-c1000", "15.2(7)E1", "LAN Base"),
+        ("C1000-16T-2G-L", "catalyst-c1000", "15.2(7)E2", None),
         ("C9200L-24P-4X", "catalyst-9200", "17.12.5", "Network Advantage"),
     ),
 )

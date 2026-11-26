@@ -334,7 +334,8 @@ def test_r84_console_profile_does_not_expand_production_capabilities(
         client, "C1000-16T-2G-L", image="15.2(7)E2", license_name=None,
     )
     identity = lookup(client, url, "identity")
-    assert identity["verdict"] == "supported"
+    assert identity["verdict"] == "unknown"
+    assert identity["reason_code"] == "console-only-evidence"
     lacp = lookup(client, url, "lacp")
     assert lacp["verdict"] == "unknown"
     assert lacp["reason_code"] == "console-only-evidence"

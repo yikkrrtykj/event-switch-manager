@@ -775,3 +775,26 @@ def test_synthetic_unsupported_and_unknown_capabilities_fail_closed(
     assert result.executable is False
     assert result.cli is None
     assert result.device_writes_enabled is False
+
+def test_r85_console_only_pid_identity_gate_fails_closed(
+    client: TestClient,
+) -> None:
+    event_id = event(client, "R85 console-only identity")
+    plan = make_plan(
+        event_id,
+        pid="C1000-16T-2G-L",
+        image="15.2(7)E2",
+        license_name=None,
+        family="catalyst-c1000",
+        ports=[{"name": "Gi1/0/1", "settings": dict(ACCESS)}],
+    )
+    saved = save(client, event_id, plan)
+    device = first_device(preview(client, event_id, saved["id"]))
+    deployability = device["deployability"]
+    assert deployability["identity_gate"]["status"] == "incomplete"
+    assert "pid-unlisted" in deployability["identity_gate"]["codes"]
+    assert deployability["evidence_gate"] == "identity-incomplete"
+    assert deployability["capability_gate"]["verdict"] == "unknown"
+    assert deployability["deployable"] is False
+    for candidate in items(device):
+        assert candidate["deployability"]["deployable"] is False
