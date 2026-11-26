@@ -231,6 +231,22 @@ def test_manual_c1000_physical_layout_and_logical_port_channel() -> None:
     assert "version-model-missing" in observation.unknown_fields
 
 
+def test_ancillary_boot_fields_without_boot_path_are_not_complete() -> None:
+    data = _load("r85_c1000_manual.json")
+    data = json.loads(json.dumps(data))
+    data["responses"]["BOOT"] = (
+        "Config file         : flash:/config.text\n"
+        "Private Config file : flash:/private-config.text\n"
+        "Manual Boot         : no\n"
+        "Enable Break        : yes\n"
+    )
+    observation = _observe(data).observation
+    assert observation.boot_entries
+    assert observation.boot_state is None
+    assert "boot" in observation.unknown_fields
+    assert observation.completeness is ObservationCompleteness.PARTIAL
+
+
 def test_manual_c1000_boot_and_storage_key_rows() -> None:
     observation = _observe(_load("r85_c1000_manual.json")).observation
     assert len(observation.boot_entries) == 1

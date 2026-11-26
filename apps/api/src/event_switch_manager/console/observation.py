@@ -795,7 +795,11 @@ class CiscoObservationAdapter:
                     unknown.append("interfaces-partial")
             if ConsoleQuery.STACK in supported and not stack:
                 unknown.append("stack")
-            if ConsoleQuery.BOOT in supported and not boot_entries:
+            boot_has_path = any(
+                entry.boot_path_list or entry.boot_variable
+                for entry in boot_entries
+            )
+            if ConsoleQuery.BOOT in supported and not boot_has_path:
                 unknown.append("boot")
             if ConsoleQuery.STORAGE in supported and not storage_entries:
                 unknown.append("storage")
