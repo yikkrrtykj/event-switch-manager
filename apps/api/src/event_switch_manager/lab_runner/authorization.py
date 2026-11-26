@@ -101,6 +101,12 @@ class LabAuthorization:
         if self.binding_mode == "manual-bluetooth":
             if self.identity_confidence != "manual-bound":
                 raise LabAuthorizationError("manual lab binding confidence is invalid")
+            if self.bluetooth_direction not in {
+                "incoming", "outgoing", "unknown",
+            }:
+                raise LabAuthorizationError(
+                    "manual Bluetooth binding must pin a direction",
+                )
         elif self.identity_confidence != "stable":
             raise LabAuthorizationError("strict lab binding confidence is invalid")
         if not self.operator_confirmed:
@@ -135,12 +141,15 @@ class LabAuthorization:
         if self.binding_mode == "manual-bluetooth":
             if port.transport_kind is not PortTransportKind.BLUETOOTH_SPP:
                 raise LabAuthorizationError("manual binding requires Bluetooth SPP")
+            if not port.pnp_instance_identity:
+                raise LabAuthorizationError(
+                    "manual binding requires a Bluetooth PnP instance identity",
+                )
             if port.duplicate_identity:
                 raise LabAuthorizationError("Bluetooth PnP identity is duplicated")
-            if self.bluetooth_direction is not None:
-                expected = BluetoothDirection(self.bluetooth_direction)
-                if port.bluetooth_direction is not expected:
-                    raise LabAuthorizationError("Bluetooth direction changed")
+            expected = BluetoothDirection(str(self.bluetooth_direction))
+            if port.bluetooth_direction is not expected:
+                raise LabAuthorizationError("Bluetooth direction changed")
             return
         if (
             port.transport_kind is PortTransportKind.BLUETOOTH_SPP
@@ -292,8 +301,10 @@ def issue_authorization(
     if binding_mode == "manual-bluetooth":
         if identity_confidence != "manual-bound":
             raise LabAuthorizationError("manual Bluetooth binding requires manual confidence")
-        if bluetooth_direction not in {None, "incoming", "outgoing", "unknown"}:
-            raise LabAuthorizationError("invalid Bluetooth direction")
+        if bluetooth_direction not in {"incoming", "outgoing", "unknown"}:
+            raise LabAuthorizationError(
+                "manual Bluetooth binding must pin a direction",
+            )
     elif identity_confidence != "stable":
         raise LabAuthorizationError("strict binding requires stable confidence")
     now = datetime.now(UTC)

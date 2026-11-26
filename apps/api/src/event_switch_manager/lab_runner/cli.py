@@ -198,6 +198,10 @@ def _select_port(
             raise LabAuthorizationError(
                 "Bluetooth SPP 需要显式的人工绑定授权，不能自动连接",
             )
+        if not selected.pnp_instance_identity:
+            raise LabAuthorizationError(
+                "Bluetooth 端口缺少 PnP instance identity，拒绝绑定",
+            )
         if selected.duplicate_identity:
             raise LabAuthorizationError("Bluetooth PnP identity 重复，拒绝绑定")
     elif selected.identity_quality.value != "stable" or selected.duplicate_identity:

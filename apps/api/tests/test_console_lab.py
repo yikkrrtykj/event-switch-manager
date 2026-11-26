@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -458,6 +459,104 @@ def test_gui_bluetooth_manual_binding_validation() -> None:
             non_production_confirmed=True,
             manual_bluetooth_binding=True,
         )
+
+
+def test_bluetooth_without_pnp_or_direction_cannot_bind() -> None:
+    from event_switch_manager.lab_runner.gui import GuiValidationError, validate_selection
+
+    entry = type("Entry", (), {
+        "device": "COM7",
+        "description": "蓝牙链接上的标准串行 (COM7)",
+        "hwid": None,
+        "vid": None,
+        "pid": None,
+        "serial_number": None,
+        "manufacturer": "Microsoft",
+        "location": None,
+        "interface": None,
+    })()
+    discovery = discover_serial_ports(lambda: (entry,), platform_name="win32")
+    port = discovery.ports[0]
+    assert port.transport_kind is PortTransportKind.BLUETOOTH_SPP
+    assert port.pnp_instance_identity is None
+    with pytest.raises(GuiValidationError, match="PnP"):
+        validate_selection(
+            port,
+            non_production_confirmed=True,
+            manual_bluetooth_binding=True,
+        )
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    with pytest.raises(LabAuthorizationError, match="PnP"):
+        lab_cli._select_port(discovery, "COM7", manual_bluetooth_binding=True)
+    with pytest.raises(LabAuthorizationError, match="direction"):
+        issue_authorization(
+            get_target("2960x"),
+            com_endpoint="COM7",
+            adapter_identity=port.adapter_identity,
+            operator_confirmed=True,
+            binding_mode="manual-bluetooth",
+            identity_confidence="manual-bound",
+            bluetooth_direction=None,
+        )
+
+
+def test_gui_log_redacts_identity_like_values() -> None:
+    from event_switch_manager.lab_runner.gui import redact_gui_log
+
+    raw = (
+        "COM8 USB Serial VID:PID=0403:6001 identity=usb:0403:6001:SN123456 "
+        "usb_serial=SN123456 location=1-2.1\n"
+        "已配对设备名称: MySecretSPPName\n"
+        "identity=BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_VID&1\n"
+    )
+    redacted = redact_gui_log(raw)
+    assert "SN123456" not in redacted
+    assert "1-2.1" not in redacted
+    assert "MySecretSPPName" not in redacted
+    assert "BTHENUM" not in redacted
+    assert "<id>" in redacted
+
+
+def test_gui_refresh_is_off_main_thread_and_ui_dispatch_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk display unavailable")
+    from event_switch_manager.lab_runner import gui as gui_module
+
+    root.withdraw()
+    app = gui_module.ConsoleLabGui(root, smoke=True)
+    discovery = _discovery(_port())
+    monkeypatch.setattr(gui_module, "discover_serial_ports", lambda: discovery)
+    app.refresh_ports()
+    assert app.refresh_worker is not None
+    deadline = time.monotonic() + 2
+    while app.discovery is None and time.monotonic() < deadline:
+        root.update()
+        time.sleep(0.02)
+    assert app.discovery is not None
+    assert len(app.port_tree.get_children()) == 1
+
+    holder: dict[str, str] = {}
+    worker = threading.Thread(
+        target=lambda: holder.update(
+            value=app._run_on_ui(lambda: "dispatched", 2.0),
+        ),
+    )
+    worker.start()
+    deadline = time.monotonic() + 2
+    while worker.is_alive() and time.monotonic() < deadline:
+        root.update()
+        time.sleep(0.02)
+    worker.join(timeout=1)
+    assert holder.get("value") == "dispatched"
+    app.on_close()
 
 
 def test_gui_window_close_without_worker_is_safe() -> None:

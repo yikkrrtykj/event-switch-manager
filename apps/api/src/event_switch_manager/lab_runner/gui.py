@@ -13,6 +13,7 @@ import io
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import tkinter as tk
@@ -21,6 +22,7 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from event_switch_manager.console.discovery import (
+    BluetoothDirection,
     PortTransportKind,
     SerialDiscovery,
     SerialPortInfo,
@@ -42,6 +44,26 @@ class GuiValidationError(RuntimeError):
     pass
 
 
+_LOG_REDACTIONS = (
+    (re.compile(r"(?i)(usb:[0-9a-f]{4}:[0-9a-f]{4}:)[^\s]+"), r"\1<id>"),
+    (re.compile(r"(?i)(usb_serial\s*[=:]\s*)[^\s,;]+"), r"\1<id>"),
+    (re.compile(r"(?i)(location\s*[=:]\s*)[^\s,;]+"), r"\1<id>"),
+    (re.compile(r"(?i)(serial\s*[=:]\s*)[^\s,;]+"), r"\1<id>"),
+    (re.compile(r"(?i)(identity\s*=\s*)BTHENUM[^\s]+"), r"\1<bt-pnp>"),
+    (re.compile(r"(?i)(已配对设备名称\s*[:：]\s*).+"), r"\1<redacted>"),
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "<ip>"),
+    (re.compile(r"(?i)\b(?:[0-9a-f]{4}\.){2}[0-9a-f]{4}\b"), "<mac>"),
+)
+
+
+def redact_gui_log(text: str) -> str:
+    """Redact identity-like values before they reach the GUI log widget."""
+    redacted = text
+    for pattern, replacement in _LOG_REDACTIONS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
 def validate_selection(
     port: SerialPortInfo,
     *,
@@ -56,6 +78,14 @@ def validate_selection(
     if port.transport_kind is PortTransportKind.BLUETOOTH_SPP:
         if not manual_bluetooth_binding:
             raise GuiValidationError("Bluetooth SPP 需要勾选人工绑定")
+        if not port.pnp_instance_identity:
+            raise GuiValidationError("Bluetooth 端口缺少 PnP instance identity，拒绝绑定")
+        if port.bluetooth_direction not in {
+            BluetoothDirection.INCOMING,
+            BluetoothDirection.OUTGOING,
+            BluetoothDirection.UNKNOWN,
+        }:
+            raise GuiValidationError("Bluetooth 方向不可确认，拒绝绑定")
         if port.identity_quality.value not in {"ambiguous", "stable"}:
             raise GuiValidationError("Bluetooth identity quality 不受支持")
         return
@@ -95,7 +125,7 @@ class _QueueWriter(io.TextIOBase):
 
     def write(self, text: str) -> int:
         if text:
-            self._output.put(("log", text))
+            self._output.put(("log", redact_gui_log(text)))
         return len(text)
 
     def flush(self) -> None:
@@ -121,7 +151,9 @@ class ConsoleLabGui:
         self.root.geometry("1180x820")
         self.root.minsize(980, 680)
         self.output_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self.ui_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.worker: threading.Thread | None = None
+        self.refresh_worker: threading.Thread | None = None
         self.worker_result: int | None = None
         self.discovery: SerialDiscovery | None = None
         self.last_output_dir: Path | None = None
@@ -263,10 +295,31 @@ class ConsoleLabGui:
     def refresh_ports(self) -> None:
         if self.worker is not None and self.worker.is_alive():
             return
-        self.discovery = discover_serial_ports()
+        if self.refresh_worker is not None and self.refresh_worker.is_alive():
+            return
+        self.port_count_label.configure(text="枚举中…（不打开串口）")
+
+        def enumerate_ports() -> None:
+            try:
+                discovery = discover_serial_ports()
+            except Exception:
+                discovery = None
+            self.output_queue.put(("ports", discovery))
+
+        self.refresh_worker = threading.Thread(
+            target=enumerate_ports, name="console-lab-enumeration", daemon=True,
+        )
+        self.refresh_worker.start()
+
+    def _apply_discovery(self, discovery: SerialDiscovery | None) -> None:
+        self.refresh_worker = None
+        if discovery is None:
+            self.port_count_label.configure(text="枚举失败（未打开串口）")
+            return
+        self.discovery = discovery
         for item in self.port_tree.get_children():
             self.port_tree.delete(item)
-        for port in self.discovery.ports:
+        for port in discovery.ports:
             self.port_tree.insert("", "end", iid=port.port, values=(
                 port.port,
                 port.transport_kind.value,
@@ -276,7 +329,7 @@ class ConsoleLabGui:
                 "YES" if port.duplicate_identity else "no",
             ))
         self.port_count_label.configure(
-            text=f"{len(self.discovery.ports)} 个端口，status={self.discovery.status.value}",
+            text=f"{len(discovery.ports)} 个端口，status={discovery.status.value}",
         )
         self._update_auth_panel()
 
@@ -321,33 +374,58 @@ class ConsoleLabGui:
         self.warning_label.configure(text=warning)
 
     # ---------- operator dialogs ----------
-    def ask_confirmation(self, prompt: str, timeout_seconds: float = 120.0) -> bool:
-        result: dict[str, bool] = {}
+    def _run_on_ui(self, callback: Any, timeout_seconds: float) -> Any:
         done = threading.Event()
+        result: dict[str, Any] = {}
 
-        def show() -> None:
+        def wrapper() -> None:
             try:
-                result["value"] = bool(
-                    messagebox.askyesno("ConsoleLab 安全确认", prompt, parent=self.root),
-                )
-            except tk.TclError:
-                result["value"] = False
+                result["value"] = callback()
+            except Exception:
+                result["value"] = None
             finally:
                 done.set()
 
-        try:
-            self.root.after(0, show)
-        except tk.TclError:
-            return False
+        self.ui_queue.put(("ui", wrapper))
         if not done.wait(timeout_seconds):
-            return False
-        return result.get("value", False)
+            return None
+        return result.get("value")
+
+    def ask_confirmation(self, prompt: str, timeout_seconds: float = 120.0) -> bool:
+        def show() -> bool:
+            result: dict[str, bool] = {"value": False}
+            dialog = tk.Toplevel(self.root)
+            dialog.title("ConsoleLab 安全确认")
+            dialog.transient(self.root)
+            dialog.grab_set()
+            ttk.Label(dialog, text=prompt, wraplength=560, justify="left").pack(
+                padx=18, pady=(16, 8),
+            )
+            buttons = ttk.Frame(dialog)
+            buttons.pack(pady=(0, 14))
+
+            def accept() -> None:
+                result["value"] = True
+                dialog.destroy()
+
+            def reject() -> None:
+                result["value"] = False
+                dialog.destroy()
+
+            ttk.Button(buttons, text="确认 / YES", command=accept).pack(side="left", padx=5)
+            ttk.Button(buttons, text="取消", command=reject).pack(side="left", padx=5)
+            dialog.protocol("WM_DELETE_WINDOW", reject)
+            dialog.bind("<Return>", lambda _event: accept())
+            dialog.bind("<Escape>", lambda _event: reject())
+            dialog.after(int(max(1.0, timeout_seconds) * 1000), reject)
+            dialog.wait_window()
+            return bool(result["value"])
+
+        return bool(self._run_on_ui(show, timeout_seconds + 2))
 
     def ask_credential(self, kind: AuthPromptKind) -> str:
-        result: dict[str, str] = {}
-        done = threading.Event()
-
-        def show() -> None:
+        def show() -> str:
+            result: dict[str, str] = {}
             dialog = tk.Toplevel(self.root)
             dialog.title("设备认证（凭据不保存）")
             dialog.transient(self.root)
@@ -360,7 +438,9 @@ class ConsoleLabGui:
             ttk.Label(dialog, text=label).pack(padx=16, pady=(14, 4))
             value = tk.StringVar()
             entry = ttk.Entry(
-                dialog, textvariable=value, show="*" if kind is not AuthPromptKind.USERNAME else "",
+                dialog,
+                textvariable=value,
+                show="" if kind is AuthPromptKind.USERNAME else "*",
                 width=34,
             )
             entry.pack(padx=16, pady=4)
@@ -369,12 +449,10 @@ class ConsoleLabGui:
             def accept() -> None:
                 result["value"] = value.get()
                 dialog.destroy()
-                done.set()
 
             def cancel() -> None:
                 result["value"] = ""
                 dialog.destroy()
-                done.set()
 
             buttons = ttk.Frame(dialog)
             buttons.pack(pady=10)
@@ -383,14 +461,11 @@ class ConsoleLabGui:
             dialog.protocol("WM_DELETE_WINDOW", cancel)
             dialog.bind("<Return>", lambda _event: accept())
             dialog.bind("<Escape>", lambda _event: cancel())
+            dialog.after(120_000, cancel)
+            dialog.wait_window()
+            return result.get("value", "")
 
-        try:
-            self.root.after(0, show)
-        except tk.TclError:
-            return ""
-        if not done.wait(120):
-            return ""
-        return result.get("value", "")
+        return str(self._run_on_ui(show, 120) or "")
 
     # ---------- experiment ----------
     def connect(self) -> None:
@@ -508,12 +583,24 @@ class ConsoleLabGui:
                 kind, payload = self.output_queue.get_nowait()
                 if kind == "log":
                     self._append_log(str(payload))
+                elif kind == "ports":
+                    self._apply_discovery(payload)
                 elif kind == "done":
                     self._finish_worker(int(payload))
         except queue.Empty:
             pass
-        if self.root.winfo_exists():
-            self.root.after(100, self._poll_output)
+        try:
+            while True:
+                kind, callback = self.ui_queue.get_nowait()
+                if kind == "ui" and callable(callback):
+                    callback()
+        except queue.Empty:
+            pass
+        try:
+            if self.root.winfo_exists():
+                self.root.after(100, self._poll_output)
+        except tk.TclError:
+            return
 
     def _finish_worker(self, code: int) -> None:
         self.worker_result = code

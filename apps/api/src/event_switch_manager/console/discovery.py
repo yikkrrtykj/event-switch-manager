@@ -71,6 +71,19 @@ class SerialPortInfo(Record):
     def manual_binding_required(self) -> bool:
         return self.transport_kind is PortTransportKind.BLUETOOTH_SPP
 
+    @property
+    def bluetooth_bindable(self) -> bool:
+        return bool(
+            self.transport_kind is PortTransportKind.BLUETOOTH_SPP
+            and self.pnp_instance_identity
+            and self.bluetooth_direction
+            in {
+                BluetoothDirection.INCOMING,
+                BluetoothDirection.OUTGOING,
+                BluetoothDirection.UNKNOWN,
+            }
+        )
+
 
 class SerialDiscovery(Record):
     platform: str
