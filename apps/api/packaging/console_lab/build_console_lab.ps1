@@ -67,12 +67,15 @@ $pyInstallerArgs = @(
     "--hidden-import", "serial.tools.list_ports",
     "--hidden-import", "serial.tools.list_ports_windows",
     "--hidden-import", "serial.tools.list_ports_linux",
-    "--add-data", "$stageInstructions;instructions",
     $launcher
 )
 & $pythonExe @pyInstallerArgs
 if ($LASTEXITCODE -ne 0) { throw "ConsoleLab PyInstaller build failed." }
 if (-not (Test-Path $exePath)) { throw "ConsoleLab executable was not produced." }
+$packageInstructions = Join-Path $packageDir "instructions"
+New-Item -ItemType Directory -Force -Path $packageInstructions | Out-Null
+Copy-Item -LiteralPath $instructions -Destination (Join-Path $packageInstructions "README.zh-CN.txt") -Force
+Copy-Item -LiteralPath $acceptance -Destination (Join-Path $packageInstructions "H0-H4-ACCEPTANCE-TEMPLATE.txt") -Force
 
 $exeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $record = [ordered]@{
