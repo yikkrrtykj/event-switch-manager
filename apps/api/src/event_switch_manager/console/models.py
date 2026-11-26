@@ -272,6 +272,10 @@ def compute_evidence_fingerprint(evidence: ConsoleEvidence) -> str:
         observation.pop("observation_id", None)
         observation.pop("captured_at", None)
         observation.pop("session_identity", None)
+    # Query timing is runtime telemetry, not evidence content.
+    for result in payload.get("query_results", []):
+        if isinstance(result, dict):
+            result.pop("duration_seconds", None)
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 

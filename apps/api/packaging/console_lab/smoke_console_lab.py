@@ -30,11 +30,11 @@ def main() -> int:
         errors.append("missing-executable")
     else:
         checks.append("executable-present")
-    if not (package / "instructions" / "操作说明.txt").exists():
+    if not (package / "instructions" / "README.zh-CN.txt").exists():
         errors.append("missing-instructions")
     else:
         checks.append("instructions-present")
-    if not (package / "instructions" / "H0-H4-验收模板.txt").exists():
+    if not (package / "instructions" / "H0-H4-ACCEPTANCE-TEMPLATE.txt").exists():
         errors.append("missing-acceptance-template")
     else:
         checks.append("acceptance-template-present")

@@ -21,8 +21,8 @@ $zipPath = Join-Path $outputRoot "$packageName-windows-x64.zip"
 $recordPath = Join-Path $outputRoot "$packageName-build-record.json"
 $packageRecordPath = Join-Path $packageDir "$packageName-build-record.json"
 $launcher = Join-Path $PSScriptRoot "launcher.py"
-$instructions = Join-Path $PSScriptRoot "操作说明.txt"
-$acceptance = Join-Path $PSScriptRoot "H0-H4-验收模板.txt"
+$instructions = Join-Path $PSScriptRoot "README.zh-CN.txt"
+$acceptance = Join-Path $PSScriptRoot "H0-H4-ACCEPTANCE-TEMPLATE.txt"
 
 if (-not (Get-Command $Python -ErrorAction SilentlyContinue)) {
     throw "Python executable not found: $Python"
@@ -46,8 +46,8 @@ foreach ($path in @($buildRoot, $stageRoot, $stageInstructions)) {
 if (Test-Path $packageDir) { Remove-Item -LiteralPath $packageDir -Recurse -Force }
 if (Test-Path $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 New-Item -ItemType Directory -Force -Path $stageInstructions, $outputRoot | Out-Null
-Copy-Item -LiteralPath $instructions -Destination (Join-Path $stageInstructions "操作说明.txt") -Force
-Copy-Item -LiteralPath $acceptance -Destination (Join-Path $stageInstructions "H0-H4-验收模板.txt") -Force
+Copy-Item -LiteralPath $instructions -Destination (Join-Path $stageInstructions "README.zh-CN.txt") -Force
+Copy-Item -LiteralPath $acceptance -Destination (Join-Path $stageInstructions "H0-H4-ACCEPTANCE-TEMPLATE.txt") -Force
 
 $pyInstallerArgs = @(
     "-m", "PyInstaller",
@@ -91,8 +91,8 @@ $record = [ordered]@{
     no_web_service = $true
     no_product_database = $true
     offline = $true
-    instructions = "instructions/操作说明.txt"
-    acceptance_template = "instructions/H0-H4-验收模板.txt"
+    instructions = "instructions/README.zh-CN.txt"
+    acceptance_template = "instructions/H0-H4-ACCEPTANCE-TEMPLATE.txt"
     lab_source = "AUTHORIZED_LIVE_LAB"
     product_live_serial = "DISABLED"
     real_serial_completion = "NOT_VERIFIED"

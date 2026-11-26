@@ -111,6 +111,6 @@ erase、reload、delete、format、show running-config、show startup-config 都
 
 9. 报告与硬件验收
 ------------------
-真实设备验收见同目录 H0-H4-验收模板.txt。
+真实设备验收见同目录 H0-H4-ACCEPTANCE-TEMPLATE.txt。
 真实读取的观察只能作为 lab evidence，不自动成为硬件能力认证、verified_serial 或
 部署许可。所有真实硬件门禁在人工实验完成前保持 NOT_VERIFIED。
