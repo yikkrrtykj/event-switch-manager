@@ -52,6 +52,27 @@ IOS_XE_FAMILIES = frozenset({
     DeviceFamily.CATALYST_9300,
 })
 
+# R84 exact console review adds these releases even though the production
+# release/capability inventories remain frozen at their R83 scopes.
+CONSOLE_RELEASE_EXTRAS: dict[str, tuple[str, ...]] = {
+    "WS-C2960X-24TS-L": ("15.2(7)E10",),
+    "C1000-16T-2G-L": ("15.2(7)E2",),
+}
+CONSOLE_INTERFACE_RELEASES = {
+    DeviceFamily.CATALYST_2960X: ("15.2(7)E", "15.2(7)E7", "15.2(7)E10"),
+    DeviceFamily.CATALYST_C1000: ("15.2(7)E1", "15.2(7)E2"),
+    DeviceFamily.CATALYST_3850: GUIDE_SCOPES[DeviceFamily.CATALYST_3850].interfaces,
+    DeviceFamily.CATALYST_9200: GUIDE_SCOPES[DeviceFamily.CATALYST_9200].interfaces,
+    DeviceFamily.CATALYST_9300: GUIDE_SCOPES[DeviceFamily.CATALYST_9300].interfaces,
+}
+CONSOLE_QUERY_RELEASES = {
+    (DeviceFamily.CATALYST_2960X, ConsoleQuery.LICENSE): ("15.2(7)E10",),
+    (DeviceFamily.CATALYST_2960X, ConsoleQuery.BOOT): ("15.2(7)E10",),
+    (DeviceFamily.CATALYST_2960X, ConsoleQuery.STORAGE): ("15.2(7)E10",),
+    (DeviceFamily.CATALYST_C1000, ConsoleQuery.BOOT): ("15.2(7)E2",),
+    (DeviceFamily.CATALYST_C1000, ConsoleQuery.STORAGE): ("15.2(7)E2",),
+}
+
 
 class QueryNotAllowed(ValueError):
     """The requested query is not a typed allowlisted query."""
@@ -127,12 +148,23 @@ def _build_specs() -> dict[DeviceFamily, dict[ConsoleQuery, QuerySpec]]:
     specs: dict[DeviceFamily, dict[ConsoleQuery, QuerySpec]] = {}
     for family in DeviceFamily:
         table = _common_specs(family)
-        if family in IOS_XE_FAMILIES:
+        if family in IOS_XE_FAMILIES or family is DeviceFamily.CATALYST_2960X:
             source = RELEASES[family].source.url
             table.update({
                 ConsoleQuery.LICENSE: QuerySpec(
                     ConsoleQuery.LICENSE, "show license", source, "Licensing",
                 ),
+                ConsoleQuery.BOOT: QuerySpec(
+                    ConsoleQuery.BOOT, "show boot", source, "Software boot modes",
+                ),
+                ConsoleQuery.STORAGE: QuerySpec(
+                    ConsoleQuery.STORAGE, "show file systems", source,
+                    "File systems and storage",
+                ),
+            })
+        if family is DeviceFamily.CATALYST_C1000:
+            source = RELEASES[family].source.url
+            table.update({
                 ConsoleQuery.BOOT: QuerySpec(
                     ConsoleQuery.BOOT, "show boot", source, "Software boot modes",
                 ),
@@ -160,32 +192,46 @@ def resolve_profile(exact_pid: str, release: str) -> ConsoleProfile:
     """Resolve an exact registered PID and reviewed release, fail closed."""
     if not exact_pid or not release:
         raise ProfileNotVerified("exact PID and release are required")
-    profile = _PROFILE_PIDS.get(exact_pid.strip().upper())
+    canonical_pid = exact_pid.strip().upper()
+    profile = _PROFILE_PIDS.get(canonical_pid)
     if profile is None:
         raise ProfileNotVerified("exact PID is not registered")
     inventory = RELEASES[profile.family]
+    candidates = tuple(inventory.releases) + CONSOLE_RELEASE_EXTRAS.get(canonical_pid, ())
     wanted = release.strip().casefold()
     canonical = next(
-        (version for version in inventory.releases if version.casefold() == wanted),
+        (version for version in candidates if version.casefold() == wanted),
         None,
     )
     if canonical is None:
         raise ProfileNotVerified("release is not registered for this PID")
-    return ConsoleProfile(profile.family, exact_pid.strip().upper(), canonical)
+    return ConsoleProfile(profile.family, canonical_pid, canonical)
 
 
 def _release_in_scope(profile: ConsoleProfile, query: ConsoleQuery) -> bool:
     if query in BOOTSTRAP_QUERIES:
         return True
-    guide = GUIDE_SCOPES[profile.family]
     release = profile.release.casefold()
     if query in {ConsoleQuery.INTERFACES, ConsoleQuery.STACK}:
-        return release in {item.casefold() for item in guide.interfaces}
-    if query in {ConsoleQuery.LICENSE, ConsoleQuery.BOOT, ConsoleQuery.STORAGE}:
-        return (
-            profile.family in IOS_XE_FAMILIES
-            and release in {item.casefold() for item in guide.interfaces}
-        )
+        if query is ConsoleQuery.STACK:
+            if profile.exact_pid not in PROFILES:
+                return False
+            if not PROFILES[profile.exact_pid].stack_limit:
+                return False
+        return release in {
+            item.casefold()
+            for item in CONSOLE_INTERFACE_RELEASES[profile.family]
+        }
+    exact_releases = CONSOLE_QUERY_RELEASES.get((profile.family, query))
+    if exact_releases is not None:
+        return release in {item.casefold() for item in exact_releases}
+    if profile.family in IOS_XE_FAMILIES and query in {
+        ConsoleQuery.LICENSE, ConsoleQuery.BOOT, ConsoleQuery.STORAGE,
+    }:
+        return release in {
+            item.casefold()
+            for item in GUIDE_SCOPES[profile.family].interfaces
+        }
     return False
 
 

@@ -327,6 +327,33 @@ def test_standalone_stacking_capability(
     assert lookup(client, url, "stack")["verdict"] == verdict
 
 
+def test_r84_console_profile_does_not_expand_production_capabilities(
+    client: TestClient,
+) -> None:
+    url, _ = fixture_plan(
+        client, "C1000-16T-2G-L", image="15.2(7)E2", license_name=None,
+    )
+    identity = lookup(client, url, "identity")
+    assert identity["verdict"] == "supported"
+    lacp = lookup(client, url, "lacp")
+    assert lacp["verdict"] == "unknown"
+    assert lacp["reason_code"] == "console-only-evidence"
+    poe = lookup(client, url, "poe", port=True)
+    assert poe["verdict"] == "unknown"
+    assert poe["reason_code"] == "console-only-evidence"
+
+
+def test_r84_console_release_does_not_expand_production_capabilities(
+    client: TestClient,
+) -> None:
+    # R84 adds the console release E10 only; the production release registry
+    # remains frozen and must not match it.
+    url, _ = fixture_plan(
+        client, "WS-C2960X-24TS-L", image="15.2(7)E10", license_name="LAN Base",
+    )
+    assert lookup(client, url, "lacp")["verdict"] == "unknown"
+
+
 @pytest.mark.parametrize(("number", "state", "verdict"), [
     (2, "ready", "supported"), (9, "ready", "unsupported"), (2, "unknown", "unknown"),
 ])

@@ -1,0 +1,20 @@
+{
+  "fixture_id": "r84-c1000-16t-e2",
+  "source": "RECORDED_FIXTURE",
+  "sanitization": "Synthetic hostnames, MAC addresses, serial numbers and file names. No production VLAN or credential data retained.",
+  "profile": {
+    "hostname": "sanitized-c1000",
+    "model": "C1000-16T-2G-L",
+    "serial_number": "R84C1000A",
+    "software_version": "15.2(7)E2",
+    "family": "catalyst-c1000"
+  },
+  "responses": {
+    "VERSION": "Cisco IOS Software, C1000 Software (C1000-UNIVERSALK9-M), Version 15.2(7)E2, RELEASE SOFTWARE (fc3)\nCopyright (c) 1986-2024 by Cisco Systems, Inc.\n--More--\nConfiguration register is 0x2102\n",
+    "INVENTORY": "NAME: \"Chassis\", DESCR: \"Cisco Catalyst C1000-16T-2G-L\"\nPID: C1000-16T-2G-L, VID: V01, SN: R84C1000A\n",
+    "INTERFACES": "Port      Name               Status       Vlan       Duplex  Speed Type\nGi1/0/1                      connected    1          a-full  a-1000 10/100/1000BaseTX\nGi1/0/2                      notconnect   1          auto    auto   10/100/1000BaseTX\nGi1/0/3                      connected    1          a-full  a-1000 10/100/1000BaseTX\nGi1/0/4                      notconnect   1          auto    auto   10/100/1000BaseTX\nGi1/0/5                      connected    1          a-full  a-1000 10/100/1000BaseTX\nGi1/0/6                      notconnect   1          auto    auto   10/100/1000BaseTX\nGi1/0/7                      connected    1          a-full  a-1000 10/100/1000BaseTX\nGi1/0/8                      notconnect   1          auto    auto   10/100/1000BaseTX\nGi1/0/9                      connected    1          a-full  a-1000 10/100/1000BaseTX\nGi1/0/10                     notconnect   1          auto    auto   10/100/1000BaseTX\nGi1/0/11                     connected    1          a-full  a-1000 10/100/1000BaseTX\nGi1/0/12                     notconnect   1          auto    auto   10/100/1000BaseTX\nGi1/0/13                     connected    1          a-full  a-1000 10/100/1000BaseTX\nGi1/0/14                     notconnect   1          auto    auto   10/100/1000BaseTX\nGi1/0/15                     connected    1          a-full  a-1000 10/100/1000BaseTX\nGi1/0/16                     notconnect   1          auto    auto   10/100/1000BaseTX\nGi1/0/17                     notconnect   1          auto    auto   Not Present\nGi1/0/18                     notconnect   1          auto    auto   Not Present\nPo1                          connected    trunk      a-full  a-1000\n",
+    "BOOT": "BOOT variable = flash:/c1000-universalk9-mz.152-7.E2.bin;\nCONFIG_FILE variable = flash:/config.text\nPRIVATE_CONFIG_FILE variable = flash:/private-config.text\nManual Boot = no\nEnable Break = no\n",
+    "STORAGE": "File Systems:\n       Size(b)    Free(b)    Type  Flags  Prefixes\n*  64000000   32000000    flash rw     flash:\n  8000000    3000000     nvram rw     nvram:\n  1000000    1000000     network rw   tftp:\n",
+    "LICENSE": "% Incomplete command.\n"
+  }
+}

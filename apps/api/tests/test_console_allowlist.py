@@ -31,16 +31,33 @@ def test_all_families_expose_only_typed_queries_and_commands() -> None:
         )
 
 
-def test_five_family_query_scope_is_conservative() -> None:
+def test_five_family_query_scope_is_component_and_release_scoped() -> None:
     assert supported_queries(None) == BOOTSTRAP_QUERIES
     assert ConsoleQuery.VERSION in supported_queries(DeviceFamily.CATALYST_C1000)
     assert ConsoleQuery.STACK not in supported_queries(DeviceFamily.CATALYST_C1000)
-    assert ConsoleQuery.LICENSE not in supported_queries(DeviceFamily.CATALYST_2960X)
+    assert ConsoleQuery.LICENSE in supported_queries(DeviceFamily.CATALYST_2960X)
     assert ConsoleQuery.LICENSE in supported_queries(DeviceFamily.CATALYST_3850)
     assert ConsoleQuery.LICENSE in supported_queries(DeviceFamily.CATALYST_9200)
     assert ConsoleQuery.LICENSE in supported_queries(DeviceFamily.CATALYST_9300)
     assert ConsoleQuery.BOOT in supported_queries(DeviceFamily.CATALYST_9300)
     assert ConsoleQuery.STORAGE in supported_queries(DeviceFamily.CATALYST_9300)
+    c2960x_e10 = resolve_profile("WS-C2960X-24TS-L", "15.2(7)E10")
+    assert set(supported_queries_for_profile(c2960x_e10)) == {
+        ConsoleQuery.VERSION, ConsoleQuery.INVENTORY, ConsoleQuery.INTERFACES,
+        ConsoleQuery.STACK, ConsoleQuery.LICENSE, ConsoleQuery.BOOT,
+        ConsoleQuery.STORAGE,
+    }
+    c1000_e2 = resolve_profile("C1000-16T-2G-L", "15.2(7)E2")
+    assert set(supported_queries_for_profile(c1000_e2)) == {
+        ConsoleQuery.VERSION, ConsoleQuery.INVENTORY, ConsoleQuery.INTERFACES,
+        ConsoleQuery.BOOT, ConsoleQuery.STORAGE,
+    }
+    lan_lite = resolve_profile("WS-C2960X-24TS-LL", "15.2(7)E7")
+    assert ConsoleQuery.STACK not in supported_queries_for_profile(lan_lite)
+    with pytest.raises(QueryNotSupported):
+        resolve_query_for_profile(c1000_e2, ConsoleQuery.LICENSE)
+    with pytest.raises(QueryNotSupported):
+        resolve_query_for_profile(c1000_e2, ConsoleQuery.STACK)
 
 
 def test_unknown_family_allows_only_bootstrap() -> None:

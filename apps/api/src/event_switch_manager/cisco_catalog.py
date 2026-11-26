@@ -23,11 +23,19 @@ D1000 = (
     GUIDE + "catalyst1000/hardware/installation/24_48_port_hig/"
     "b_c1000_24_48_hig/product_overview.html"
 )
+D1000_8_16 = (
+    GUIDE + "catalyst1000/hardware/installation/8_16_port_hig/"
+    "b_c1000_8_16_hig/product_overview.html"
+)
 I2960 = G2960 + "m_int_inter_cg.html"
 I3850 = G3850 + "int_hw/b_1612_int_and_hw_3850_cg/configuring_interface_characteristics.html"
 I9200 = G9200 + "int_hw/b_1712_int_and_hw_9200_cg/configuring_interface_characteristics.html"
 I9300 = G9300 + "int_hw/b_1712_int_and_hw_9300_cg/configuring_interface_characteristics.html"
 I1000 = G1000 + "int_hw/b_1527e_int_and_hw_c1000_cg/configuring_interface_characteristics.html"
+I1000_8_16 = (
+    GUIDE + "catalyst1000/software/releases/15_2_7_e/command_reference/"
+    "b_1527e_1000_cr/interface_and_hardware_commands.html"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +135,26 @@ def x1000(poe: bool) -> Profile:
     )
 
 
+def x1000_16(poe: bool) -> Profile:
+    """C1000 16-port layout: 16 copper downlinks and 2 SFP uplinks.
+
+    SFP slots are mapped to Gi1/0/17-18 by the 8/16-port hardware guide.  This
+    is a hardware identity row only; it does not establish native StackWise.
+    """
+    return Profile(
+        DeviceFamily.CATALYST_C1000,
+        Source(D1000_8_16, "Cisco Catalyst 1000 8-Port and 16-Port Switch Models"),
+        I1000_8_16,
+        (),
+        (
+            PortGroup(Medium.COPPER, 0, 1, 16, "gi", (10, 100, 1000), poe),
+            sfp(2, 0, 17),
+        ),
+        None,
+        "Single IP Management is not native StackWise; no native stack profile.",
+    )
+
+
 # Ordering suffixes do not substitute for the active license.
 PROFILES = {
     "WS-C2960X-24TS-L": x2960(False),
@@ -152,7 +180,13 @@ PROFILES = {
     "C9300X-24Y-A": x9300((SFP28,), modular=True),
     "C1000-24T-4G-L": x1000(False),
     "C1000-24P-4G-L": x1000(True),
+    "C1000-16T-2G-L": x1000_16(False),
 }
+
+# R84 adds an exact console evidence row before production capability evidence.
+# Until a separate production review exists, non-identity capability decisions
+# for this PID must stay UNKNOWN; see cisco_capabilities.py.
+R84_CONSOLE_ONLY_PIDS = frozenset({"C1000-16T-2G-L"})
 
 
 class CiscoCapability(StrEnum):

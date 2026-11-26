@@ -12,6 +12,7 @@ from .cisco_catalog import (
     FEATURES,
     GUIDE_SCOPES,
     PROFILES,
+    R84_CONSOLE_ONLY_PIDS,
     RELEASES,
     CapabilityId,
     CiscoCapability,
@@ -400,6 +401,18 @@ def _resolve(
     guides = GUIDE_SCOPES[profile.family]
     if capability == CiscoCapability.IDENTITY:
         return decide((Support.SUPPORTED, "pid-documented", "The PID is listed."), (hardware,))
+    if pid in R84_CONSOLE_ONLY_PIDS:
+        # R84 adds only a console read-only identity/query profile.  Production
+        # capability evidence for this exact PID remains unreviewed.
+        return decide(
+            (
+                Support.UNKNOWN,
+                "console-only-evidence",
+                "R84 reviewed a console read-only profile only; "
+                "production capability evidence is not reviewed.",
+            ),
+            (hardware,),
+        )
     if capability == CiscoCapability.STACK:
         finding = stack_finding(binding, profile)
         stack_hardware = cite(profile.hardware, profile.stack_conditions)
