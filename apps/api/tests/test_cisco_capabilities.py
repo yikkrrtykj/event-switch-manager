@@ -335,13 +335,13 @@ def test_r84_console_profile_does_not_expand_production_capabilities(
     )
     identity = lookup(client, url, "identity")
     assert identity["verdict"] == "unknown"
-    assert identity["reason_code"] == "console-only-evidence"
+    assert identity["reason_code"] == "pid-unlisted"
     lacp = lookup(client, url, "lacp")
     assert lacp["verdict"] == "unknown"
-    assert lacp["reason_code"] == "console-only-evidence"
+    assert lacp["reason_code"] == "pid-unlisted"
     poe = lookup(client, url, "poe", port=True)
     assert poe["verdict"] == "unknown"
-    assert poe["reason_code"] == "console-only-evidence"
+    assert poe["reason_code"] == "pid-unlisted"
 
 
 def test_r84_console_release_does_not_expand_production_capabilities(

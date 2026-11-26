@@ -405,7 +405,10 @@ def _resolve(
         return decide(
             (
                 Support.UNKNOWN,
-                "console-only-evidence",
+                # Use the existing production reason code that the frozen L2
+                # identity gate already maps to an incomplete gate.  The
+                # console-only condition is recorded in the human reason.
+                "pid-unlisted",
                 "R84 reviewed a console read-only profile only; "
                 "production capability evidence is not reviewed.",
             ),
