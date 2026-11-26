@@ -34,6 +34,7 @@ from .cli import (
     EXIT_CLEANUP,
     EXIT_OK,
     cancel_active_experiment,
+    last_report_path,
     reset_active_experiment_cancel,
     run_experiment,
 )
@@ -634,7 +635,7 @@ class ConsoleLabGui:
                 )
             except tk.TclError:
                 pass
-        self._load_latest_report()
+        self._load_completed_report(last_report_path())
         reset_active_experiment_cancel()
         if self._closing:
             self.root.after(50, self._destroy)
@@ -643,15 +644,14 @@ class ConsoleLabGui:
             state="normal" if (self.artifact_ok and self.self_ok) else "disabled",
         )
 
-    def _load_latest_report(self) -> None:
-        base = self.last_output_dir or Path("console-lab-output")
-        reports = sorted(base.glob("experiment-*/console-lab-report.json"))
-        if not reports:
+    def _load_completed_report(self, report_path: Path | None) -> None:
+        if report_path is None:
+            self._append_info("本次实验未生成报告（可能在打开串口前取消或失败）。")
             return
         try:
-            payload = json.loads(reports[-1].read_text(encoding="utf-8"))
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            self._append_info("报告读取失败。")
+            self._append_info("本次实验报告读取失败。")
             return
         observation = payload.get("observation") or {}
         outcome = payload.get("outcome") or {}

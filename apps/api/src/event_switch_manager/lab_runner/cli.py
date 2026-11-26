@@ -67,6 +67,11 @@ _UI_CONTEXT = threading.local()
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE_SESSION: ConsoleSession | None = None
 _PENDING_CANCEL = threading.Event()
+_LAST_REPORT_PATH: Path | None = None
+
+
+def last_report_path() -> Path | None:
+    return _LAST_REPORT_PATH
 
 
 def reset_active_experiment_cancel() -> None:
@@ -490,7 +495,8 @@ def run_experiment(
 
 
 def _run_experiment(args: argparse.Namespace) -> int:
-    global _ACTIVE_SESSION
+    global _ACTIVE_SESSION, _LAST_REPORT_PATH
+    _LAST_REPORT_PATH = None
     _check_cancel()
     if not args.target or not args.com:
         print("实验需要 --target 和明确选择的 --com；不会自动扫描并连接其他端口。", file=sys.stderr)
@@ -838,7 +844,8 @@ def _run_experiment(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"报告写入失败: {type(exc).__name__}", file=sys.stderr)
         return EXIT_TRANSPORT
-    print(f"\n报告: {output_dir / 'console-lab-report.json'}")
+    _LAST_REPORT_PATH = output_dir / "console-lab-report.json"
+    print(f"\n报告: {_LAST_REPORT_PATH}")
     print(f"摘要: {output_dir / 'console-lab-summary.txt'}")
     print(f"报告指纹: {payload['report_fingerprint']}")
     print(

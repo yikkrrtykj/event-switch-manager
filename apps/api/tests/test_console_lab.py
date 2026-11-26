@@ -560,6 +560,75 @@ def test_gui_refresh_is_off_main_thread_and_ui_dispatch_works(
     app.on_close()
 
 
+def test_split_auth_prompt_trailing_space_is_tolerated() -> None:
+    class SplitPromptSerial(FakeSerial):
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            if b"lab-pass" in data:
+                self.buffer += "R1>\n"
+            return len(data)
+
+    port = _port()
+    auth = _auth(port=port)
+    serial = SplitPromptSerial(initial="Password:")
+
+    def provider(_kind: Any) -> str:
+        # Simulate the trailing prompt space arriving while the operator
+        # types the password.
+        serial.buffer += " "
+        return "lab-pass"
+
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        credential_provider=provider,
+        timeout=1.0,
+    )
+    session.open(None, initial_timeout=0.5)
+    try:
+        assert session.state is SessionState.USER_EXEC
+        assert b"lab-pass\r" in serial.writes
+    finally:
+        session.close()
+
+
+def test_gui_uses_exact_completed_report_not_lexicographic_latest(
+    tmp_path: Path,
+) -> None:
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk display unavailable")
+    from event_switch_manager.lab_runner import gui as gui_module
+
+    root.withdraw()
+    app = gui_module.ConsoleLabGui(root, smoke=True)
+    older = tmp_path / "experiment-zzzz" / "console-lab-report.json"
+    newer = tmp_path / "experiment-aaaa" / "console-lab-report.json"
+    older.parent.mkdir()
+    newer.parent.mkdir()
+    older.write_text(json.dumps({
+        "observation": {"exact_pid": "OLD-DEVICE", "completeness": "partial"},
+        "outcome": {"experiment_verdict": "FAILED_OR_CANCELLED"},
+    }), encoding="utf-8")
+    newer.write_text(json.dumps({
+        "observation": {"exact_pid": "NEW-DEVICE", "completeness": "complete"},
+        "outcome": {"experiment_verdict": "READONLY_QUERIES_COMPLETED"},
+    }), encoding="utf-8")
+    app._load_completed_report(newer)
+    info = app.info_text.get("1.0", "end")
+    assert "NEW-DEVICE" in info
+    assert "OLD-DEVICE" not in info
+    app.on_close()
+
+
 def test_gui_credential_masking_and_no_auth_rejection() -> None:
     from event_switch_manager.lab_runner.gui import credential_show_character
 
@@ -1616,6 +1685,7 @@ def test_run_experiment_happy_path_is_wired_without_hardware(
     ))
     assert exit_code == 0
     report = next(tmp_path.glob("experiment-*/console-lab-report.json"))
+    assert lab_cli.last_report_path() == report
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["outcome"]["experiment_verdict"] == "READONLY_QUERIES_COMPLETED"
     assert payload["outcome"]["hardware_verdict"] == "NOT_VERIFIED"

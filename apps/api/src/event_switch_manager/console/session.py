@@ -473,6 +473,32 @@ class ConsoleSession:
                 raise
             raise SessionError("console session failed") from exc
 
+    def _drain_auth_prompt_padding(self) -> None:
+        """Consume bounded trailing whitespace from a split auth prompt.
+
+        Windows terminals may deliver ``Password:`` and its trailing space in
+        separate reads.  Only immediately-following whitespace is tolerated;
+        any non-whitespace byte is an unexpected terminal state and fails
+        closed.  No byte is written here.
+        """
+        pending_fn = getattr(self._transport, "pending_data", None)
+        if not callable(pending_fn):
+            return
+        deadline = time.monotonic() + 0.2
+        drained = 0
+        while pending_fn():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or drained >= 16:
+                raise AmbiguousConsoleOutput("authentication prompt padding did not settle")
+            chunk = self._transport.read_chunk(min(0.02, remaining))
+            if not chunk:
+                continue
+            drained += len(chunk)
+            if chunk.strip():
+                raise AmbiguousConsoleOutput(
+                    "unexpected non-whitespace data at authentication prompt",
+                )
+
     def _credential_value(
         self,
         credentials: ConsoleCredentials | None,
@@ -530,8 +556,10 @@ class ConsoleSession:
             if remaining <= 0:
                 raise AuthenticationError("console authentication budget expired")
             self._state = SessionState.AUTHENTICATING
+            self._drain_auth_prompt_padding()
             if read.auth is AuthPromptKind.USERNAME:
                 value = self._credential_value(credentials, AuthPromptKind.USERNAME)
+                self._drain_auth_prompt_padding()
                 if time.monotonic() >= auth_deadline:
                     raise AuthenticationError("console authentication budget expired")
                 self._send(value + "\r", ConsoleSendOperation.USERNAME)
@@ -542,6 +570,7 @@ class ConsoleSession:
                 if attempts > 2:
                     raise AuthenticationError("console authentication failed")
                 value = self._credential_value(credentials, AuthPromptKind.PASSWORD)
+                self._drain_auth_prompt_padding()
                 if time.monotonic() >= auth_deadline:
                     raise AuthenticationError("console authentication budget expired")
                 self._send(value + "\r", ConsoleSendOperation.PASSWORD)
@@ -601,9 +630,11 @@ class ConsoleSession:
         self._send("enable\r", ConsoleSendOperation.ENABLE)
         read = self._read_for_prompt(timeout=max(0.001, deadline - time.monotonic()))
         if read.auth is AuthPromptKind.PASSWORD:
+            self._drain_auth_prompt_padding()
             value = enable_password or self._credential_value(
                 None, AuthPromptKind.ENABLE_PASSWORD,
             )
+            self._drain_auth_prompt_padding()
             validate_console_input("enable password", value)
             if time.monotonic() >= deadline:
                 raise EnableError("enable authentication budget expired")
