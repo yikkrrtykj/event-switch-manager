@@ -342,6 +342,22 @@ def test_storage_alias_conflict_is_marked() -> None:
     assert [entry.alias_conflict for entry in entries] == [True, True]
 
 
+def test_identical_storage_rows_collapse_but_conflicting_rows_survive() -> None:
+    identical = _storage_entries(
+        "File Systems:\n"
+        "  100  50  flash rw flash:\n"
+        "  100  50  flash rw flash:\n",
+    )
+    assert len(identical) == 1
+    conflicting = _storage_entries(
+        "File Systems:\n"
+        "  100  50  flash rw flash:\n"
+        "  200  60  flash rw flash:\n",
+    )
+    assert len(conflicting) == 2
+    assert [entry.alias_conflict for entry in conflicting] == [True, True]
+
+
 def test_stack_rejects_duplicate_or_reassigned_members() -> None:
     inventory = _load("r85_2960x_manual.json")["responses"]["INVENTORY"]
     from event_switch_manager.console.observation import _inventory_members

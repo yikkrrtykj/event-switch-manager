@@ -484,7 +484,7 @@ def _storage_entries(output: str | None) -> tuple[ConsoleStorageEntry, ...]:
     if output is None:
         return ()
     result: list[ConsoleStorageEntry] = []
-    seen: set[tuple[str, ...]] = set()
+    seen: set[tuple[object, ...]] = set()
     for line in output.splitlines():
         stripped = line.strip()
         if not stripped or stripped.lower().startswith(("file systems", "size")):
@@ -494,9 +494,6 @@ def _storage_entries(output: str | None) -> tuple[ConsoleStorageEntry, ...]:
         prefixes = tuple(dict.fromkeys(_STORAGE_PREFIX.findall(stripped)))
         if not prefixes:
             continue
-        if prefixes in seen:
-            continue
-        seen.add(prefixes)
         numbers = re.findall(r"\b(\d+)\b", stripped)
         tokens = [token.casefold() for token in stripped.split()]
         file_type = next(
@@ -505,13 +502,24 @@ def _storage_entries(output: str | None) -> tuple[ConsoleStorageEntry, ...]:
         flags = next(
             (token for token in tokens if token in {"rw", "ro", "wo"}), None,
         )
-        result.append(ConsoleStorageEntry(
+        entry = ConsoleStorageEntry(
             total_bytes=int(numbers[0]) if numbers else None,
             free_bytes=int(numbers[1]) if len(numbers) > 1 else None,
             file_type=file_type,
             flags=flags,
             prefixes=prefixes,
-        ))
+        )
+        # Only byte-for-byte identical parsed rows are safe to collapse.  Two
+        # rows with the same prefix but different sizes/types/flags are
+        # contradictory observations and must survive to conflict detection.
+        key = (
+            entry.total_bytes, entry.free_bytes, entry.file_type,
+            entry.flags, entry.prefixes,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(entry)
     owners: dict[str, int] = {}
     conflicts: set[int] = set()
     for index, entry in enumerate(result):
