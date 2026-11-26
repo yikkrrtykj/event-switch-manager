@@ -31,8 +31,10 @@ from event_switch_manager.console.discovery import (
 from event_switch_manager.console.parser import AuthPromptKind
 
 from .cli import (
+    EXIT_CLEANUP,
     EXIT_OK,
     cancel_active_experiment,
+    reset_active_experiment_cancel,
     run_experiment,
 )
 from .reporting import ArtifactIdentityError, LabBuildMetadata
@@ -91,6 +93,11 @@ def validate_selection(
         return
     if port.identity_quality.value != "stable":
         raise GuiValidationError("该端口不是唯一稳定 identity，拒绝连接")
+
+
+def credential_show_character(kind: AuthPromptKind) -> str:
+    """Return the Tk Entry mask; usernames are visible, secrets are masked."""
+    return "" if kind is AuthPromptKind.USERNAME else "*"
 
 
 def _self_test() -> tuple[bool, str]:
@@ -157,6 +164,8 @@ class ConsoleLabGui:
         self.worker_result: int | None = None
         self.discovery: SerialDiscovery | None = None
         self.last_output_dir: Path | None = None
+        self._closing = False
+        self.active_dialog: tk.Toplevel | None = None
         self.artifact_ok, artifact_text = _artifact_check()
         self.self_ok, self_text = _self_test()
         self.artifact_text = artifact_text
@@ -375,6 +384,8 @@ class ConsoleLabGui:
 
     # ---------- operator dialogs ----------
     def _run_on_ui(self, callback: Any, timeout_seconds: float) -> Any:
+        if self._closing:
+            return None
         done = threading.Event()
         result: dict[str, Any] = {}
 
@@ -395,6 +406,7 @@ class ConsoleLabGui:
         def show() -> bool:
             result: dict[str, bool] = {"value": False}
             dialog = tk.Toplevel(self.root)
+            self.active_dialog = dialog
             dialog.title("ConsoleLab 安全确认")
             dialog.transient(self.root)
             dialog.grab_set()
@@ -419,6 +431,7 @@ class ConsoleLabGui:
             dialog.bind("<Escape>", lambda _event: reject())
             dialog.after(int(max(1.0, timeout_seconds) * 1000), reject)
             dialog.wait_window()
+            self.active_dialog = None
             return bool(result["value"])
 
         return bool(self._run_on_ui(show, timeout_seconds + 2))
@@ -427,6 +440,7 @@ class ConsoleLabGui:
         def show() -> str:
             result: dict[str, str] = {}
             dialog = tk.Toplevel(self.root)
+            self.active_dialog = dialog
             dialog.title("设备认证（凭据不保存）")
             dialog.transient(self.root)
             dialog.grab_set()
@@ -440,7 +454,7 @@ class ConsoleLabGui:
             entry = ttk.Entry(
                 dialog,
                 textvariable=value,
-                show="" if kind is AuthPromptKind.USERNAME else "*",
+                show=credential_show_character(kind),
                 width=34,
             )
             entry.pack(padx=16, pady=4)
@@ -463,6 +477,7 @@ class ConsoleLabGui:
             dialog.bind("<Escape>", lambda _event: cancel())
             dialog.after(120_000, cancel)
             dialog.wait_window()
+            self.active_dialog = None
             return result.get("value", "")
 
         return str(self._run_on_ui(show, 120) or "")
@@ -522,6 +537,7 @@ class ConsoleLabGui:
                 else "unknown"
             ),
         )
+        reset_active_experiment_cancel()
         self.progress.start(12)
         self.connect_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
@@ -607,11 +623,25 @@ class ConsoleLabGui:
         self.worker = None
         self.progress.stop()
         self.cancel_button.configure(state="disabled")
+        self._append_log(f"\n=== 实验结束 exit={code} ===\n")
+        if code == EXIT_CLEANUP:
+            self._append_log("=== cleanup 未确认：CLEANUP_REQUIRED，未声明端口已释放 ===\n")
+            try:
+                messagebox.showwarning(
+                    "ConsoleLab cleanup",
+                    "Cleanup 未确认；报告为 CLEANUP_REQUIRED。",
+                    parent=self.root,
+                )
+            except tk.TclError:
+                pass
+        self._load_latest_report()
+        reset_active_experiment_cancel()
+        if self._closing:
+            self.root.after(50, self._destroy)
+            return
         self.connect_button.configure(
             state="normal" if (self.artifact_ok and self.self_ok) else "disabled",
         )
-        self._append_log(f"\n=== 实验结束 exit={code} ===\n")
-        self._load_latest_report()
 
     def _load_latest_report(self) -> None:
         base = self.last_output_dir or Path("console-lab-output")
@@ -648,23 +678,39 @@ class ConsoleLabGui:
             print("com_enumeration=SKIPPED_IN_SMOKE")
         self.root.destroy()
 
+    def _destroy(self) -> None:
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+    def _close_active_dialog(self) -> None:
+        dialog = self.active_dialog
+        if dialog is not None:
+            try:
+                dialog.destroy()
+            except tk.TclError:
+                pass
+            self.active_dialog = None
+
     def on_close(self) -> None:
         if self.worker is not None and self.worker.is_alive():
             if not messagebox.askyesno(
                 "ConsoleLab",
-                "实验仍在进行。取消并安全关闭窗口？",
+                "实验仍在进行。取消并安全关闭窗口？\n"
+                "窗口会等待 worker 报告 cleanup 后再关闭。",
                 parent=self.root,
             ):
                 return
+            self._closing = True
+            self.connect_button.configure(state="disabled")
+            self.cancel_button.configure(state="disabled")
+            self._append_log("\n=== 关闭窗口：发送取消请求并等待 cleanup ===\n")
+            self._close_active_dialog()
             cancel_active_experiment()
-            self.worker.join(timeout=5)
-            if self.worker is not None and self.worker.is_alive():
-                messagebox.showwarning(
-                    "ConsoleLab",
-                    "取消请求已发送，但 worker 尚未结束；关闭窗口不会声明 cleanup 已成功。",
-                    parent=self.root,
-                )
-        self.root.destroy()
+            self.progress.start(12)
+            return
+        self._destroy()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -690,6 +736,8 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "ConsoleLabGui",
     "GuiValidationError",
+    "credential_show_character",
     "main",
+    "redact_gui_log",
     "validate_selection",
 ]

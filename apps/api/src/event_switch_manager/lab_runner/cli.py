@@ -66,6 +66,16 @@ class LabUiCallbacks(Protocol):
 _UI_CONTEXT = threading.local()
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE_SESSION: ConsoleSession | None = None
+_PENDING_CANCEL = threading.Event()
+
+
+def reset_active_experiment_cancel() -> None:
+    _PENDING_CANCEL.clear()
+
+
+def _check_cancel() -> None:
+    if _PENDING_CANCEL.is_set():
+        raise ConsoleOperatorAbort("operator cancelled before next send/open")
 
 
 def _ui_callbacks() -> LabUiCallbacks | None:
@@ -75,6 +85,7 @@ def _ui_callbacks() -> LabUiCallbacks | None:
 
 def cancel_active_experiment() -> None:
     """GUI cancellation hook; never opens or reconnects a port."""
+    _PENDING_CANCEL.set()
     with _ACTIVE_LOCK:
         session = _ACTIVE_SESSION
     if session is not None:
@@ -156,10 +167,9 @@ def _print_discovery(discovery: SerialDiscovery, *, as_json: bool) -> None:
         print("未发现串口设备。")
     for row in rows:
         print(
-            f"{row['endpoint']}  {row['description'] or '-'}  "
-            f"VID:PID={row['vid']}:{row['pid']}  "
-            f"kind={row['transport_kind']}  "
+            f"{row['endpoint']}  kind={row['transport_kind']}  "
             f"bt={row['bluetooth_direction']}  "
+            f"VID:PID={row['vid']}:{row['pid']}  "
             f"identity={row['identity']}  quality={row['identity_quality']}  "
             f"duplicate={row['duplicate_identity']}"
         )
@@ -308,6 +318,8 @@ class _OperatorGate:
         ):
             raise ConsoleOperatorAbort("operator did not confirm query start")
         operator_elapsed = time.monotonic() - started
+        if _PENDING_CANCEL.is_set():
+            raise ConsoleOperatorAbort("operator cancelled before query send")
         if self.session is not None:
             self.session.extend_discovery_budget(operator_elapsed)
         self.authorization.check_active()
@@ -467,14 +479,19 @@ def run_experiment(
     _UI_CONTEXT.callbacks = callbacks
     try:
         return _run_experiment(args)
+    except ConsoleOperatorAbort:
+        print("实验在打开串口前被操作者取消。", file=sys.stderr)
+        return EXIT_TRANSPORT
     finally:
         _UI_CONTEXT.callbacks = previous
         with _ACTIVE_LOCK:
             _ACTIVE_SESSION = None
+        _PENDING_CANCEL.clear()
 
 
 def _run_experiment(args: argparse.Namespace) -> int:
     global _ACTIVE_SESSION
+    _check_cancel()
     if not args.target or not args.com:
         print("实验需要 --target 和明确选择的 --com；不会自动扫描并连接其他端口。", file=sys.stderr)
         return EXIT_USAGE
@@ -490,7 +507,9 @@ def _run_experiment(args: argparse.Namespace) -> int:
     requested_direction = str(
         getattr(args, "bluetooth_direction", "unknown"),
     )
+    _check_cancel()
     discovery = discover_serial_ports()
+    _check_cancel()
     _print_discovery(discovery, as_json=False)
     try:
         port = _select_port(
@@ -527,7 +546,10 @@ def _run_experiment(args: argparse.Namespace) -> int:
             f"pnp={sha256_text(port.pnp_instance_identity or '')[:16]}",
         )
         if port.bluetooth_name:
-            print(f"已配对设备名称: {port.bluetooth_name}")
+            print(
+                "已配对设备名称 token: "
+                + sha256_text(port.bluetooth_name)[:16],
+            )
         if not _confirm(
             "确认这是正确的蓝牙设备与端口（不是别的 Bluetooth 串口）；"
             "输入 YES 继续: ",
@@ -544,6 +566,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
     print(f"\n授权目标: {target.label} ({target.expected_pid} / {target.expected_release})")
     print(f"COM: {port.port}  adapter identity: {port.adapter_identity}")
     print(f"允许查询: {', '.join(item.value for item in target.allowed_queries)}")
+    _check_cancel()
     if not _confirm(
         "确认该设备无生产业务、无关键链路，并允许本次受控只读实验。输入 YES 继续: ",
     ):
@@ -555,6 +578,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
     except ArtifactIdentityError as exc:
         print(f"拒绝真实实验：{exc}", file=sys.stderr)
         return EXIT_AUTHORIZATION
+    _check_cancel()
     try:
         authorization = issue_authorization(
             target,
@@ -615,11 +639,14 @@ def _run_experiment(args: argparse.Namespace) -> int:
     exit_code = EXIT_OK
     try:
         connection_state = "OPEN_FAILED"
+        _check_cancel()
         print(
             "\n被动 attach：不预先索取凭据；仅在设备实际出现认证提示时安全读取。",
         )
+        _check_cancel()
         session.open(None, initial_timeout=10.0, allow_silent=True)
         connection_state = "OPENED"
+        _check_cancel()
         if session.state is SessionState.AWAITING_PROMPT:
             print("设备当前静默，未返回任何已确认的 EXEC prompt。")
             if not _confirm(
@@ -629,6 +656,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
                 raise ConsoleOperatorAbort("operator declined the silent-device wake")
             if not _confirm("再次确认发送唯一一次 CR 唤醒？输入 y 继续: "):
                 raise ConsoleOperatorAbort("operator did not confirm wake")
+            _check_cancel()
             session.wake_once()
             wake_sent = True
             wake_confirmed = True
@@ -681,6 +709,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
         final_review_confirmed = _confirm(
             "请核对以上全部脱敏查询结果；确认本次只读流程结束时输入 YES: ",
         )
+        _check_cancel()
         if not final_review_confirmed:
             cancelled = True
             error = "operator: final result review not confirmed"

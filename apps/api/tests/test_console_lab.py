@@ -32,6 +32,7 @@ from event_switch_manager.console.models import (
     build_evidence,
 )
 from event_switch_manager.console.observation import CiscoObservationAdapter
+from event_switch_manager.console.parser import AuthPromptKind
 from event_switch_manager.console.session import (
     ConsoleOperatorAbort,
     ConsoleSendOperation,
@@ -557,6 +558,163 @@ def test_gui_refresh_is_off_main_thread_and_ui_dispatch_works(
     worker.join(timeout=1)
     assert holder.get("value") == "dispatched"
     app.on_close()
+
+
+def test_gui_credential_masking_and_no_auth_rejection() -> None:
+    from event_switch_manager.lab_runner.gui import credential_show_character
+
+    assert credential_show_character(AuthPromptKind.USERNAME) == ""
+    assert credential_show_character(AuthPromptKind.PASSWORD) == "*"
+    assert credential_show_character(AuthPromptKind.ENABLE_PASSWORD) == "*"
+    port = _port()
+    from event_switch_manager.lab_runner.gui import GuiValidationError, validate_selection
+
+    with pytest.raises(GuiValidationError, match="非生产"):
+        validate_selection(
+            port,
+            non_production_confirmed=False,
+            manual_bluetooth_binding=False,
+        )
+
+
+def test_gui_cancel_before_session_activation_stops_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    called: list[bool] = []
+
+    def fake_discovery() -> SerialDiscovery:
+        called.append(True)
+        return _discovery(_port())
+
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", fake_discovery)
+    lab_cli.reset_active_experiment_cancel()
+    lab_cli.cancel_active_experiment()
+    try:
+        code = lab_cli.run_experiment(argparse.Namespace(
+            target="2960x",
+            com="COM3",
+            ttl_minutes=5.0,
+            output_dir="unused",
+        ))
+    finally:
+        lab_cli.reset_active_experiment_cancel()
+    assert code == lab_cli.EXIT_TRANSPORT
+    assert called == []
+
+
+def test_gui_close_waits_for_live_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk display unavailable")
+    from event_switch_manager.lab_runner import gui as gui_module
+
+    root.withdraw()
+    app = gui_module.ConsoleLabGui(root, smoke=True)
+    release = threading.Event()
+    done = threading.Event()
+
+    def worker() -> None:
+        release.wait(2)
+        done.set()
+
+    app.worker = threading.Thread(target=worker, daemon=True)
+    app.worker.start()
+    monkeypatch.setattr("tkinter.messagebox.askyesno", lambda *_args, **_kwargs: True)
+    app.on_close()
+    assert app._closing is True
+    assert root.winfo_exists()
+    release.set()
+    done.wait(2)
+    app._finish_worker(0)
+    deadline = time.monotonic() + 2
+    exists = True
+    while exists and time.monotonic() < deadline:
+        try:
+            root.update()
+        except tk.TclError:
+            exists = False
+            break
+        try:
+            exists = bool(root.winfo_exists())
+        except tk.TclError:
+            exists = False
+        time.sleep(0.02)
+    assert exists is False
+
+
+def test_gui_duplicate_connect_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk display unavailable")
+    from event_switch_manager.lab_runner import gui as gui_module
+
+    root.withdraw()
+    app = gui_module.ConsoleLabGui(root, smoke=True)
+    release = threading.Event()
+    app.worker = threading.Thread(target=release.wait, args=(2,), daemon=True)
+    app.worker.start()
+    errors: list[bool] = []
+    monkeypatch.setattr(
+        "tkinter.messagebox.showerror",
+        lambda *_args, **_kwargs: errors.append(True),
+    )
+    app.connect()
+    assert errors == []
+    release.set()
+    app.worker.join(timeout=2)
+    app.worker = None
+    app.on_close()
+
+
+def test_packaging_launcher_routes_default_to_gui(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import importlib.util
+    import sys
+    import types
+
+    launcher_path = (
+        Path(__file__).resolve().parents[1]
+        / "packaging"
+        / "console_lab"
+        / "launcher.py"
+    )
+    spec = importlib.util.spec_from_file_location("console_lab_launcher", launcher_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    calls: list[str] = []
+
+    def gui_main(_args: list[str]) -> int:
+        calls.append("gui")
+        return 0
+
+    def cli_main(_args: list[str]) -> int:
+        calls.append("cli")
+        return 0
+
+    gui_module = types.ModuleType("event_switch_manager.lab_runner.gui")
+    gui_module.main = gui_main  # type: ignore[attr-defined]
+    cli_module = types.ModuleType("event_switch_manager.lab_runner.cli")
+    cli_module.main = cli_main  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "event_switch_manager.lab_runner.gui", gui_module)
+    monkeypatch.setitem(sys.modules, "event_switch_manager.lab_runner.cli", cli_module)
+    monkeypatch.setattr(sys, "argv", [str(launcher_path)])
+    assert module.main() == 0
+    assert calls == ["gui"]
+    monkeypatch.setattr(sys, "argv", [str(launcher_path), "--self-test"])
+    assert module.main() == 0
+    assert calls == ["gui", "cli"]
 
 
 def test_gui_window_close_without_worker_is_safe() -> None:
