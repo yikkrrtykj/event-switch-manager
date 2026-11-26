@@ -233,6 +233,10 @@ UPGRADE_9300 = (
 
 
 R2960 = (
+    "https://www.cisco.com/c/dam/en/us/td/docs/switches/lan/catalyst2960x/"
+    "software/15-2_7_e/release_notes/Release_notes_2960x_2960xr_1527E.pdf"
+)
+R2960_CONSOLE = (
     "https://www.cisco.com/c/en/us/support/switches/"
     "catalyst-2960-x-series-switches/products-release-notes-list.html"
 )

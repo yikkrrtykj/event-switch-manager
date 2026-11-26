@@ -20,6 +20,7 @@ from event_switch_manager.cisco_catalog import (
     I9200,
     I9300,
     PROFILES,
+    R2960_CONSOLE,
     RELEASES,
 )
 from event_switch_manager.domain import DeviceFamily
@@ -149,7 +150,11 @@ def _build_specs() -> dict[DeviceFamily, dict[ConsoleQuery, QuerySpec]]:
     for family in DeviceFamily:
         table = _common_specs(family)
         if family in IOS_XE_FAMILIES or family is DeviceFamily.CATALYST_2960X:
-            source = RELEASES[family].source.url
+            source = (
+                R2960_CONSOLE
+                if family is DeviceFamily.CATALYST_2960X
+                else RELEASES[family].source.url
+            )
             table.update({
                 ConsoleQuery.LICENSE: QuerySpec(
                     ConsoleQuery.LICENSE, "show license", source, "Licensing",
