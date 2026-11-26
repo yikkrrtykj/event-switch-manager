@@ -1406,6 +1406,20 @@ def test_product_serial_close_retains_handle_until_confirmed() -> None:
     assert transport.cleanup_required is False
 
 
+def test_completion_policy_preserves_candidate_across_trailing_whitespace() -> None:
+    import time
+
+    policy = LiveCompletionPolicy(quiet_seconds=0.02)
+    policy.observe_chunk("R1#")
+    policy.candidate_seen()
+    policy.observe_chunk(" ")
+    assert policy.candidate_ready() is False
+    time.sleep(0.03)
+    assert policy.candidate_ready() is True
+    policy.observe_chunk("late-junk")
+    assert policy.candidate_ready() is False
+
+
 def test_completion_policy_is_bounded_quiet_window() -> None:
     import time
 

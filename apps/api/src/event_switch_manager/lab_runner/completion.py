@@ -29,8 +29,13 @@ class LiveCompletionPolicy:
             return
         self._chunks += 1
         self._last_chunk_at = time.monotonic()
-        # Any bytes after a candidate prompt are a new observation and cannot
-        # be silently treated as completion of the previous response.
+        if self._candidate_at is not None and not chunk.strip():
+            # Terminal prompts and their trailing CR/LF/space may arrive in
+            # separate chunks.  Preserve the candidate and restart the quiet
+            # window for bounded trailing whitespace.
+            return
+        # Any non-whitespace bytes after a candidate prompt are a new
+        # observation and cannot be silently treated as completion.
         self._candidate_at = None
 
     def candidate_seen(self) -> None:
