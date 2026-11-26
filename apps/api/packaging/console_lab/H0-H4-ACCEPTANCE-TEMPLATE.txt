@@ -15,12 +15,25 @@ Target：WS-C2960X-24TS-L / 15.2(7)E10 [ ]   C1000-16T-2G-L / 15.2(7)E2 [ ]
 [ ] 不发送 BREAK，不主动切换 DTR/RTS
 [ ] 现场有人可立即断开串口/停止程序
 
-H0 — USB COM
-------------
+H0 — USB COM / Bluetooth SPP
+----------------------------
 [ ] 枚举显示 endpoint/description/manufacturer/VID:PID/USB serial/location
 [ ] 记录 identity quality 与 duplicate identity
 [ ] 拔插后重新枚举并记录 COM 编号/identity 变化
 [ ] 多适配器场景下没有自动连接错误设备
+[ ] Bluetooth SPP：GUI 显示类型、COM、方向、可靠名称（若有）与低置信度
+[ ] Bluetooth 人工绑定必须由操作者确认具体设备/COM/方向；重复 PnP 身份拒绝
+[ ] 蓝牙 COM 编号或 PnP identity 变化后重新确认，不自动重连
+[ ] 不能仅凭 BTHENUM 或 COM 编号声明稳定身份
+结果：PASS / FAIL / BLOCKED    备注：____________________________
+
+H0-GUI — 独立 GUI
+-----------------
+[ ] 双击 EXE 默认打开 GUI，不需要 PowerShell
+[ ] GUI 启动/刷新/self-test 不自动打开串口
+[ ] 连接前安全授权区域显示端口/identity/PID/release/命令/有效期
+[ ] 密码输入遮挡且不保存
+[ ] 关闭窗口/取消触发安全清理；cleanup failure 可见
 结果：PASS / FAIL / BLOCKED    备注：____________________________
 
 H1 — 独占与连接

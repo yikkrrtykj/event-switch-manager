@@ -121,8 +121,23 @@ class LabReportWriter:
             "supported": self.discovery.supported,
             "duplicate_identities": len(self.discovery.duplicate_identities),
             "com_endpoint": port.port if port else None,
+            "transport_kind": port.transport_kind.value if port else None,
             "description_token": stable_token(port.description) if port else None,
             "manufacturer_token": stable_token(port.manufacturer) if port else None,
+            "bluetooth_name_token": (
+                stable_token(port.bluetooth_name) if port else None
+            ),
+            "bluetooth_direction": (
+                port.bluetooth_direction.value if port else None
+            ),
+            "remote_bluetooth_token": (
+                stable_token(port.remote_bluetooth_identity) if port else None
+            ),
+            "pnp_instance_token": stable_token(port.pnp_instance_identity) if port else None,
+            "identity_confidence": (
+                self.authorization.identity_confidence
+            ),
+            "binding_mode": self.authorization.binding_mode,
             "vid": f"{port.vid:04x}" if port and port.vid is not None else None,
             "pid": f"{port.pid:04x}" if port and port.pid is not None else None,
             "usb_serial_token": stable_token(port.serial_number) if port else None,
@@ -424,6 +439,9 @@ def validate_lab_provenance(
         provenance.adapter_identity_sha256 == sha256_text(authorization.adapter_identity),
         provenance.artifact_sha256 == authorization.artifact_sha256,
         provenance.software_git_sha == authorization.software_git_sha,
+        provenance.binding_mode == authorization.binding_mode,
+        provenance.identity_confidence == authorization.identity_confidence,
+        provenance.bluetooth_direction == authorization.bluetooth_direction,
         provenance.hardware_evidence == "lab-readonly-unverified",
     )
     if require_success and not (

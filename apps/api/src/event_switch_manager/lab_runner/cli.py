@@ -12,9 +12,10 @@ import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from event_switch_manager.console.discovery import (
+    PortTransportKind,
     SerialDiscovery,
     SerialPortInfo,
     discover_serial_ports,
@@ -55,6 +56,31 @@ from .reporting import (
 from .targets import LAB_TARGETS, LabTarget, get_target
 from .transport import AuthorizedSerialTransport, lab_serial_safety_flags
 
+
+class LabUiCallbacks(Protocol):
+    def confirm(self, prompt: str, timeout_seconds: float = 120.0) -> bool: ...
+
+    def credential(self, kind: AuthPromptKind) -> str: ...
+
+
+_UI_CONTEXT = threading.local()
+_ACTIVE_LOCK = threading.Lock()
+_ACTIVE_SESSION: ConsoleSession | None = None
+
+
+def _ui_callbacks() -> LabUiCallbacks | None:
+    callbacks = getattr(_UI_CONTEXT, "callbacks", None)
+    return callbacks if callbacks is not None else None
+
+
+def cancel_active_experiment() -> None:
+    """GUI cancellation hook; never opens or reconnects a port."""
+    with _ACTIVE_LOCK:
+        session = _ACTIVE_SESSION
+    if session is not None:
+        session.cancel()
+
+
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_DISCOVERY = 3
@@ -69,7 +95,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="EventSwitchManager-ConsoleLab",
         description="受控 Cisco Console 只读实验工具（本地、离线、operator-assisted）",
     )
-    parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R86")
+    parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R88")
     parser.add_argument("--self-test", action="store_true", help="离线自检；不枚举也不打开串口")
     parser.add_argument(
         "--artifact-check", action="store_true",
@@ -79,6 +105,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="与 --list-ports 一起输出 JSON")
     parser.add_argument("--target", choices=sorted(LAB_TARGETS), help="实验目标 Profile")
     parser.add_argument("--com", help="明确选择的 COM endpoint，例如 COM3")
+    parser.add_argument(
+        "--manual-bluetooth-binding", action="store_true",
+        help="仅对明确选择的 Bluetooth SPP 端口使用人工绑定（单次会话）",
+    )
+    parser.add_argument(
+        "--bluetooth-direction",
+        choices=("incoming", "outgoing", "unknown"),
+        default="unknown",
+        help="Bluetooth SPP 方向；unknown 表示现场无法可靠判断",
+    )
     parser.add_argument("--output-dir", default="console-lab-output", help="本地报告目录")
     parser.add_argument("--ttl-minutes", type=float, default=20.0, help="授权有效期（1–30 分钟）")
     return parser
@@ -97,6 +133,11 @@ def _print_discovery(discovery: SerialDiscovery, *, as_json: bool) -> None:
             "identity": item.adapter_identity,
             "identity_quality": item.identity_quality.value,
             "duplicate_identity": item.duplicate_identity,
+            "transport_kind": item.transport_kind.value,
+            "bluetooth_name": item.bluetooth_name,
+            "bluetooth_direction": item.bluetooth_direction.value,
+            "pnp_instance_identity": item.pnp_instance_identity,
+            "remote_bluetooth_identity": item.remote_bluetooth_identity,
         }
         for item in discovery.ports
     ]
@@ -117,6 +158,8 @@ def _print_discovery(discovery: SerialDiscovery, *, as_json: bool) -> None:
         print(
             f"{row['endpoint']}  {row['description'] or '-'}  "
             f"VID:PID={row['vid']}:{row['pid']}  "
+            f"kind={row['transport_kind']}  "
+            f"bt={row['bluetooth_direction']}  "
             f"identity={row['identity']}  quality={row['identity_quality']}  "
             f"duplicate={row['duplicate_identity']}"
         )
@@ -124,7 +167,12 @@ def _print_discovery(discovery: SerialDiscovery, *, as_json: bool) -> None:
         print("枚举错误: " + ", ".join(discovery.errors))
 
 
-def _select_port(discovery: SerialDiscovery, requested: str | None) -> SerialPortInfo:
+def _select_port(
+    discovery: SerialDiscovery,
+    requested: str | None,
+    *,
+    manual_bluetooth_binding: bool = False,
+) -> SerialPortInfo:
     if not discovery.supported:
         raise LabAuthorizationError("当前平台不支持 Windows COM 枚举")
     matches = [
@@ -144,7 +192,17 @@ def _select_port(discovery: SerialDiscovery, requested: str | None) -> SerialPor
         return stable[0]
     if len(matches) != 1:
         raise LabAuthorizationError("指定 COM 未被唯一枚举，拒绝打开")
-    return matches[0]
+    selected = matches[0]
+    if selected.transport_kind is PortTransportKind.BLUETOOTH_SPP:
+        if not manual_bluetooth_binding:
+            raise LabAuthorizationError(
+                "Bluetooth SPP 需要显式的人工绑定授权，不能自动连接",
+            )
+        if selected.duplicate_identity:
+            raise LabAuthorizationError("Bluetooth PnP identity 重复，拒绝绑定")
+    elif selected.identity_quality.value != "stable" or selected.duplicate_identity:
+        raise LabAuthorizationError("非 Bluetooth 端口仍需唯一且稳定的 identity")
+    return selected
 
 
 def _read_prompt(prompt: str, *, timeout_seconds: float, secret: bool) -> str | None:
@@ -182,6 +240,12 @@ def _read_prompt(prompt: str, *, timeout_seconds: float, secret: bool) -> str | 
 
 
 def _confirm(prompt: str, *, timeout_seconds: float = 120.0) -> bool:
+    callbacks = _ui_callbacks()
+    if callbacks is not None:
+        try:
+            return bool(callbacks.confirm(prompt, timeout_seconds))
+        except Exception:
+            return False
     answer = _read_prompt(prompt, timeout_seconds=timeout_seconds, secret=False)
     if answer is None:
         return False
@@ -189,8 +253,15 @@ def _confirm(prompt: str, *, timeout_seconds: float = 120.0) -> bool:
 
 
 def _lab_credential(kind: AuthPromptKind) -> str:
+    callbacks = _ui_callbacks()
+    if callbacks is not None:
+        provided = callbacks.credential(kind)
+        if not provided:
+            raise SessionError("credential prompt was cancelled or empty")
+        return provided
     if not sys.stdin.isatty():
         raise SessionError("a safe interactive terminal is required for credentials")
+    value: str | None
     if kind is AuthPromptKind.USERNAME:
         value = _read_prompt(
             "Console username (不回显控制字符): ",
@@ -323,6 +394,9 @@ def _lab_provenance(
         software_git_sha=authorization.software_git_sha,
         operator_confirmed=operator_confirmed,
         cleanup_status=cleanup_status,
+        binding_mode=authorization.binding_mode,
+        identity_confidence=authorization.identity_confidence,
+        bluetooth_direction=authorization.bluetooth_direction,
     )
 
 
@@ -379,7 +453,24 @@ def run_list_ports(*, as_json: bool) -> int:
     return EXIT_OK
 
 
-def run_experiment(args: argparse.Namespace) -> int:
+def run_experiment(
+    args: argparse.Namespace,
+    *,
+    callbacks: LabUiCallbacks | None = None,
+) -> int:
+    global _ACTIVE_SESSION
+    previous = getattr(_UI_CONTEXT, "callbacks", None)
+    _UI_CONTEXT.callbacks = callbacks
+    try:
+        return _run_experiment(args)
+    finally:
+        _UI_CONTEXT.callbacks = previous
+        with _ACTIVE_LOCK:
+            _ACTIVE_SESSION = None
+
+
+def _run_experiment(args: argparse.Namespace) -> int:
+    global _ACTIVE_SESSION
     if not args.target or not args.com:
         print("实验需要 --target 和明确选择的 --com；不会自动扫描并连接其他端口。", file=sys.stderr)
         return EXIT_USAGE
@@ -389,14 +480,57 @@ def run_experiment(args: argparse.Namespace) -> int:
         print("未知实验 target。", file=sys.stderr)
         return EXIT_USAGE
     ttl_seconds = args.ttl_minutes * 60
+    manual_bluetooth_binding = bool(
+        getattr(args, "manual_bluetooth_binding", False),
+    )
+    requested_direction = str(
+        getattr(args, "bluetooth_direction", "unknown"),
+    )
     discovery = discover_serial_ports()
     _print_discovery(discovery, as_json=False)
     try:
-        port = _select_port(discovery, args.com)
+        port = _select_port(
+            discovery,
+            args.com,
+            manual_bluetooth_binding=manual_bluetooth_binding,
+        )
     except LabAuthorizationError as exc:
         print(f"授权拒绝: {exc}", file=sys.stderr)
         return EXIT_DISCOVERY
-    if port.duplicate_identity or port.identity_quality.value != "stable":
+    is_bluetooth = port.transport_kind is PortTransportKind.BLUETOOTH_SPP
+    binding_direction: str | None = None
+    if is_bluetooth:
+        if not manual_bluetooth_binding:
+            print("拒绝连接：Bluetooth SPP 必须人工绑定。", file=sys.stderr)
+            return EXIT_DISCOVERY
+        if port.duplicate_identity:
+            print("拒绝连接：Bluetooth PnP identity 重复。", file=sys.stderr)
+            return EXIT_DISCOVERY
+        actual_direction = port.bluetooth_direction.value
+        if requested_direction != "unknown" and actual_direction not in {
+            "unknown", requested_direction,
+        }:
+            print("拒绝连接：现场方向与枚举方向不一致。", file=sys.stderr)
+            return EXIT_DISCOVERY
+        binding_direction = (
+            actual_direction
+            if actual_direction != "unknown"
+            else requested_direction
+        )
+        print(
+            "\nBluetooth SPP 人工绑定："
+            f"COM={port.port} direction={actual_direction} "
+            f"pnp={sha256_text(port.pnp_instance_identity or '')[:16]}",
+        )
+        if port.bluetooth_name:
+            print(f"已配对设备名称: {port.bluetooth_name}")
+        if not _confirm(
+            "确认这是正确的蓝牙设备与端口（不是别的 Bluetooth 串口）；"
+            "输入 YES 继续: ",
+        ):
+            print("操作者未确认 Bluetooth 绑定，未打开串口。", file=sys.stderr)
+            return EXIT_AUTHORIZATION
+    elif port.duplicate_identity or port.identity_quality.value != "stable":
         print(
             "拒绝连接：adapter identity 重复或不可靠；"
             "未经现场人工身份确认不得降级连接。",
@@ -426,6 +560,15 @@ def run_experiment(args: argparse.Namespace) -> int:
             operator_confirmed=True,
             artifact_sha256=build.artifact_sha256,
             software_git_sha=build.software_git_sha,
+            binding_mode=(
+                "manual-bluetooth" if is_bluetooth else "stable-usb"
+            ),
+            identity_confidence=(
+                "manual-bound" if is_bluetooth else "stable"
+            ),
+            bluetooth_direction=(
+                binding_direction if is_bluetooth else None
+            ),
         )
     except LabAuthorizationError as exc:
         print(f"授权创建失败: {exc}", file=sys.stderr)
@@ -455,6 +598,8 @@ def run_experiment(args: argparse.Namespace) -> int:
         max_total_response_bytes=512 * 1024,
     )
     gate.session = session
+    with _ACTIVE_LOCK:
+        _ACTIVE_SESSION = session
     evidence: ConsoleEvidence | None = None
     connection_state = "NOT_ATTEMPTED"
     cleanup_status = "NOT_ATTEMPTED"

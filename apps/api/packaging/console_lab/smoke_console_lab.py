@@ -68,6 +68,7 @@ def main() -> int:
     for name, command in (
         ("artifact-check", [str(exe), "--artifact-check"]),
         ("self-test", [str(exe), "--self-test"]),
+        ("gui-smoke", [str(exe), "--gui-smoke"]),
         ("list-ports-json", [str(exe), "--list-ports", "--json"]),
     ):
         try:
@@ -89,6 +90,11 @@ def main() -> int:
                 errors.append("self-test-output")
             if "real_serial_opened=NO" in result.stdout:
                 checks.append("no-real-serial")
+        if name == "gui-smoke":
+            if "CONSOLE-LAB GUI SMOKE PASS" not in result.stdout:
+                errors.append("gui-smoke-output")
+            if "real_serial_opened=NO" in result.stdout:
+                checks.append("gui-no-real-serial")
         if name == "list-ports-json":
             try:
                 payload = json.loads(result.stdout)

@@ -11,10 +11,13 @@ from typing import Any
 import pytest
 
 from event_switch_manager.console.discovery import (
+    BluetoothDirection,
     IdentityQuality,
+    PortTransportKind,
     SerialDiscovery,
     SerialPlatformStatus,
     SerialPortInfo,
+    discover_serial_ports,
 )
 from event_switch_manager.console.models import (
     ConsoleEvidence,
@@ -381,6 +384,161 @@ def test_authorization_immutability_and_forged_target_rejection() -> None:
             "\r", operation=ConsoleSendOperation.WAKE, session_token=token,
         )
     transport.close()
+
+
+_BT_OUTGOING_HWID = (
+    "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_VID&000205AC_PID&0239"
+    "\\7&1A2B3C4D&0&001B101B9C8F_C00000000"
+)
+
+
+def _bluetooth_discovery(
+    *,
+    com: str = "COM3",
+    hwid: str = _BT_OUTGOING_HWID,
+) -> SerialDiscovery:
+    entry = type("Entry", (), {
+        "device": com,
+        "description": f"蓝牙链接上的标准串行 ({com})",
+        "hwid": hwid,
+        "vid": None,
+        "pid": None,
+        "serial_number": None,
+        "manufacturer": "Microsoft",
+        "location": None,
+        "interface": None,
+    })()
+    return discover_serial_ports(lambda: (entry,), platform_name="win32")
+
+
+def _manual_bluetooth_auth(
+    port: SerialPortInfo,
+    *,
+    direction: str | None = "outgoing",
+) -> LabAuthorization:
+    return issue_authorization(
+        get_target("2960x"),
+        com_endpoint=port.port,
+        adapter_identity=port.adapter_identity,
+        ttl_seconds=300,
+        operator_confirmed=True,
+        artifact_sha256="a" * 64,
+        software_git_sha="b" * 40,
+        binding_mode="manual-bluetooth",
+        identity_confidence="manual-bound",
+        bluetooth_direction=direction,
+    )
+
+
+def test_gui_bluetooth_manual_binding_validation() -> None:
+    from event_switch_manager.lab_runner.gui import GuiValidationError, validate_selection
+
+    port = _bluetooth_discovery().ports[0]
+    with pytest.raises(GuiValidationError, match="非生产"):
+        validate_selection(
+            port,
+            non_production_confirmed=False,
+            manual_bluetooth_binding=True,
+        )
+    with pytest.raises(GuiValidationError, match="人工绑定"):
+        validate_selection(
+            port,
+            non_production_confirmed=True,
+            manual_bluetooth_binding=False,
+        )
+    validate_selection(
+        port,
+        non_production_confirmed=True,
+        manual_bluetooth_binding=True,
+    )
+    ambiguous_usb = _port(quality=IdentityQuality.AMBIGUOUS)
+    with pytest.raises(GuiValidationError, match="稳定"):
+        validate_selection(
+            ambiguous_usb,
+            non_production_confirmed=True,
+            manual_bluetooth_binding=True,
+        )
+
+
+def test_gui_window_close_without_worker_is_safe() -> None:
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk display unavailable")
+    from event_switch_manager.lab_runner.gui import ConsoleLabGui
+
+    root.withdraw()
+    app = ConsoleLabGui(root, smoke=True)
+    app.on_close()
+    assert app.worker is None
+    assert app.worker_result is None
+
+
+def test_cli_refuses_bluetooth_without_manual_binding() -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    discovery = _bluetooth_discovery()
+    with pytest.raises(LabAuthorizationError, match="人工绑定"):
+        lab_cli._select_port(discovery, "COM3", manual_bluetooth_binding=False)
+    selected = lab_cli._select_port(
+        discovery, "COM3", manual_bluetooth_binding=True,
+    )
+    assert selected.transport_kind is PortTransportKind.BLUETOOTH_SPP
+
+
+def test_bluetooth_manual_binding_opens_with_lower_confidence() -> None:
+    discovery = _bluetooth_discovery()
+    port = discovery.ports[0]
+    assert port.transport_kind is PortTransportKind.BLUETOOTH_SPP
+    assert port.bluetooth_direction is BluetoothDirection.OUTGOING
+    auth = _manual_bluetooth_auth(port)
+    serial = FakeSerial(initial="")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: discovery,
+        serial_factory=lambda _port, _params: serial,
+    )
+    auth.authorize_open(transport)
+    transport.open()
+    assert transport.identity_quality == "manual-bound"
+    assert auth.consumed is True
+    transport.close()
+
+
+def test_bluetooth_manual_binding_rejects_strict_usb_auth_and_changes() -> None:
+    discovery = _bluetooth_discovery()
+    port = discovery.ports[0]
+    strict = _auth(port=port)  # stable-usb authorization
+    strict_transport = AuthorizedSerialTransport(
+        strict,
+        discovery=lambda: discovery,
+        serial_factory=lambda _port, _params: FakeSerial(initial=""),
+    )
+    strict.authorize_open(strict_transport)
+    with pytest.raises(LabAuthorizationError):
+        strict_transport.open()
+
+    auth = _manual_bluetooth_auth(port, direction="incoming")
+    wrong_direction = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: discovery,
+        serial_factory=lambda _port, _params: FakeSerial(initial=""),
+    )
+    auth.authorize_open(wrong_direction)
+    with pytest.raises(LabAuthorizationError):
+        wrong_direction.open()
+
+    changed_auth = _manual_bluetooth_auth(port)
+    changed_discovery = _bluetooth_discovery(com="COM7")
+    changed = AuthorizedSerialTransport(
+        changed_auth,
+        discovery=lambda: changed_discovery,
+        serial_factory=lambda _port, _params: FakeSerial(initial=""),
+    )
+    changed_auth.authorize_open(changed)
+    with pytest.raises(LabAuthorizationError):
+        changed.open()
 
 
 def test_transport_partial_write_and_cleanup_retry() -> None:

@@ -1,5 +1,17 @@
-Event Switch Manager — Windows Console Lab Runner（R86）
+Event Switch Manager — Windows Console Lab Runner（R88）
 =========================================================
+
+默认双击：
+  EventSwitchManager-ConsoleLab.exe
+
+会直接打开独立 Windows Tk GUI。所有串口/实验操作在 GUI 内完成，不依赖
+PowerShell。命令行参数继续保留用于诊断：
+
+  EventSwitchManager-ConsoleLab.exe --self-test
+  EventSwitchManager-ConsoleLab.exe --artifact-check
+  EventSwitchManager-ConsoleLab.exe --list-ports --json
+
+--- 原有 CLI 诊断说明 ---
 
 重要：本工具只用于受控、非生产、已由用户单独授权的 Cisco Console 只读实验。
 它不是生产部署工具，不读取完整运行配置，不写入设备，不执行 CON-02。
@@ -42,8 +54,8 @@ Event Switch Manager — Windows Console Lab Runner（R86）
 只枚举，不打开、不写数据。无设备时也会正常返回；驱动/枚举错误会显示状态。
 若只看到模糊/重复 identity 的 Bluetooth 或未知适配器，必须停止，不得猜测设备。
 
-3. 选择实验目标
-----------------
+3. 选择实验目标与蓝牙端口
+--------------------------
   --target 2960x    WS-C2960X-24TS-L / 15.2(7)E10
   --target c1000    C1000-16T-2G-L / 15.2(7)E2
 
@@ -51,9 +63,31 @@ Event Switch Manager — Windows Console Lab Runner（R86）
 
   EventSwitchManager-ConsoleLab.exe --target c1000 --com COM3 --output-dir .\lab-out
 
-程序不会自动连接其他 COM，也不会在适配器 identity 重复/模糊时自动降级。
-没有可靠永久 USB identity 的适配器必须由现场人员单独确认身份；本工具不明文
-声称支持未知适配器的自动识别。
+Bluetooth SPP（Windows 蓝牙标准串行）：
+- GUI 中选择具体 COM，勾选“人工绑定选中的 Bluetooth SPP 端口”，并再次确认
+  真实设备、COM、Incoming/Outgoing/Unknown 方向。
+- 命令行诊断需显式使用：
+
+  --manual-bluetooth-binding --bluetooth-direction incoming|outgoing|unknown
+
+- Bluetooth 使用 PnP instance hash 作为单次人工绑定依据，identity quality 保持
+  低置信度，不会把 BTHENUM 或 COM 号宣称为稳定身份。
+- 重复 PnP identity 一律拒绝；USB 仍要求唯一稳定 identity。
+- 蓝牙断开、重连、COM 编号或 PnP identity 变化后，本次授权失效，必须重新枚举
+  并由操作者重新绑定；不自动重连。
+- 设备名称只有可靠获得时才显示；无法可靠判断方向时显示 unknown，并要求人工确认。
+
+3.1 GUI 页面
+------------
+- Artifact 完整性、Self-test、串口列表、刷新、类型、COM、蓝牙名称/方向、
+  identity quality、目标 Profile、串口参数、连接/取消。
+- 连接前显示实际端口、adapter identity、PID/release、允许命令、有效期、
+  非生产确认；GUI 不绕过 R87 授权门禁。
+- 认证提示只在设备实际要求时弹出；密码遮挡，不保存。
+- 单次 CR 唤醒、Enable、逐条查询均需 GUI 内明确确认。
+- 设备信息、unknown fields、completeness、脱敏日志、cleanup 状态和导出目录。
+- 关闭窗口会请求取消并等待 worker；cleanup failure 不会被隐藏。
+- 禁止任意 CLI 输入或未审核命令执行入口。
 
 4. 授权与人工确认
 ------------------

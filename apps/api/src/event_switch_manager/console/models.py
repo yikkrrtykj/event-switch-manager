@@ -56,6 +56,9 @@ class LabProvenance(Record):
     operator_confirmed: bool = False
     cleanup_status: str = "UNKNOWN"
     completion_policy: str = "operator-assisted"
+    binding_mode: str = "stable-usb"
+    identity_confidence: str = "stable"
+    bluetooth_direction: str | None = None
     hardware_evidence: Literal["lab-readonly-unverified"] = "lab-readonly-unverified"
 
 

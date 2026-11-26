@@ -4,7 +4,9 @@ from types import SimpleNamespace
 import pytest
 
 from event_switch_manager.console.discovery import (
+    BluetoothDirection,
     IdentityQuality,
+    PortTransportKind,
     SerialPlatformStatus,
     discover_serial_ports,
 )
@@ -46,6 +48,76 @@ def test_windows_enumeration_is_read_only_and_preserves_adapter_identity() -> No
     assert port.adapter_identity == "usb:0403:6001:ABC123"
     assert port.identity_quality is IdentityQuality.STABLE
     assert port.usb is True
+
+
+def _bluetooth_port(
+    *, device: str = "COM3",
+    hwid: str = (
+        "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_VID&000205AC_PID&0239"
+        "\\7&1A2B3C4D&0&001B101B9C8F_C00000000"
+    ),
+    description: str = "蓝牙链接上的标准串行 (COM3)",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        device=device,
+        description=description,
+        hwid=hwid,
+        vid=None,
+        pid=None,
+        serial_number=None,
+        manufacturer="Microsoft",
+        location=None,
+        interface=None,
+        bluetooth_name=None,
+    )
+
+
+def test_bluetooth_spp_outgoing_is_manual_ambiguous_identity() -> None:
+    discovery = discover_serial_ports(
+        lambda: (_bluetooth_port(),), platform_name="win32",
+    )
+    port = discovery.ports[0]
+    assert port.transport_kind is PortTransportKind.BLUETOOTH_SPP
+    assert port.bluetooth_direction is BluetoothDirection.OUTGOING
+    assert port.remote_bluetooth_identity == "001B101B9C8F"
+    assert port.identity_quality is IdentityQuality.AMBIGUOUS
+    assert port.manual_binding_required is True
+    assert port.pnp_instance_identity is not None
+    assert "COM3" not in port.adapter_identity
+    assert port.adapter_identity.startswith("bluetooth-pnp:")
+    assert port.usb is False
+
+
+def test_bluetooth_spp_incoming_and_unknown_direction() -> None:
+    incoming = _bluetooth_port(
+        device="COM4",
+        hwid=(
+            "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0000"
+            "\\7&1A2B3C4D&0&000000000000_00000002"
+        ),
+        description="蓝牙链接上的标准串行 (COM4)",
+    )
+    unknown = _bluetooth_port(
+        device="COM5",
+        hwid="BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}",
+        description="蓝牙链接上的标准串行 (COM5)",
+    )
+    discovery = discover_serial_ports(
+        lambda: (incoming, unknown), platform_name="win32",
+    )
+    assert discovery.ports[0].bluetooth_direction is BluetoothDirection.INCOMING
+    assert discovery.ports[0].remote_bluetooth_identity is None
+    assert discovery.ports[1].bluetooth_direction is BluetoothDirection.UNKNOWN
+
+
+def test_bluetooth_duplicate_pnp_identity_is_flagged() -> None:
+    first = _bluetooth_port(device="COM3")
+    second = _bluetooth_port(device="COM6")
+    discovery = discover_serial_ports(
+        lambda: (first, second), platform_name="win32",
+    )
+    assert len(discovery.duplicate_identities) == 1
+    assert all(port.duplicate_identity for port in discovery.ports)
 
 
 def test_no_ports_is_a_supported_empty_result() -> None:

@@ -103,7 +103,7 @@ class AuthorizedSerialTransport:
 
     @property
     def identity_quality(self) -> str:
-        return "stable"
+        return self._authorization.identity_confidence
 
     @property
     def is_open(self) -> bool:

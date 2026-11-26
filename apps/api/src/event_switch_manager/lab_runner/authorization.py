@@ -11,7 +11,11 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from event_switch_manager.console.allowlist import resolve_query_for_profile
-from event_switch_manager.console.discovery import SerialPortInfo
+from event_switch_manager.console.discovery import (
+    BluetoothDirection,
+    PortTransportKind,
+    SerialPortInfo,
+)
 from event_switch_manager.console.lease import normalize_endpoint
 from event_switch_manager.console.session import ConsoleSendOperation
 from event_switch_manager.integrations import ConsoleQuery
@@ -37,6 +41,9 @@ class LabAuthorization:
     operator_confirmed: bool
     artifact_sha256: str
     software_git_sha: str
+    binding_mode: str = "stable-usb"
+    identity_confidence: str = "stable"
+    bluetooth_direction: str | None = None
     _consumed: bool = field(default=False, init=False)
     _cancelled: bool = field(default=False, init=False)
     _bound_transport: object | None = field(default=None, init=False)
@@ -46,7 +53,8 @@ class LabAuthorization:
     _IMMUTABLE = frozenset({
         "experiment_id", "target", "com_endpoint", "adapter_identity",
         "allowed_queries", "issued_at", "expires_at", "operator_confirmed",
-        "artifact_sha256", "software_git_sha",
+        "artifact_sha256", "software_git_sha", "binding_mode",
+        "identity_confidence", "bluetooth_direction",
     })
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -77,6 +85,9 @@ class LabAuthorization:
             "operator_confirmed": self.operator_confirmed,
             "artifact_sha256": self.artifact_sha256,
             "software_git_sha": self.software_git_sha,
+            "binding_mode": self.binding_mode,
+            "identity_confidence": self.identity_confidence,
+            "bluetooth_direction": self.bluetooth_direction,
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -85,6 +96,13 @@ class LabAuthorization:
         canonical = LAB_TARGETS.get(self.target.key)
         if canonical != self.target or self.allowed_queries != canonical.allowed_queries:
             raise LabAuthorizationError("lab target or query scope is not canonical")
+        if self.binding_mode not in {"stable-usb", "manual-bluetooth"}:
+            raise LabAuthorizationError("lab binding mode is not supported")
+        if self.binding_mode == "manual-bluetooth":
+            if self.identity_confidence != "manual-bound":
+                raise LabAuthorizationError("manual lab binding confidence is invalid")
+        elif self.identity_confidence != "stable":
+            raise LabAuthorizationError("strict lab binding confidence is invalid")
         if not self.operator_confirmed:
             raise LabAuthorizationError("lab authorization requires operator confirmation")
         if self._cancelled:
@@ -114,7 +132,21 @@ class LabAuthorization:
             raise LabAuthorizationError("enumerated COM endpoint changed")
         if port.adapter_identity != self.adapter_identity:
             raise LabAuthorizationError("enumeration adapter identity changed")
-        if port.duplicate_identity or port.identity_quality.value != "stable":
+        if self.binding_mode == "manual-bluetooth":
+            if port.transport_kind is not PortTransportKind.BLUETOOTH_SPP:
+                raise LabAuthorizationError("manual binding requires Bluetooth SPP")
+            if port.duplicate_identity:
+                raise LabAuthorizationError("Bluetooth PnP identity is duplicated")
+            if self.bluetooth_direction is not None:
+                expected = BluetoothDirection(self.bluetooth_direction)
+                if port.bluetooth_direction is not expected:
+                    raise LabAuthorizationError("Bluetooth direction changed")
+            return
+        if (
+            port.transport_kind is PortTransportKind.BLUETOOTH_SPP
+            or port.duplicate_identity
+            or port.identity_quality.value != "stable"
+        ):
             raise LabAuthorizationError("adapter identity is not unique and stable")
 
     def consume_for_open(self, port: SerialPortInfo) -> None:
@@ -239,6 +271,9 @@ def issue_authorization(
     artifact_sha256: str = "source-run",
     software_git_sha: str = "unknown",
     experiment_id: str | None = None,
+    binding_mode: str = "stable-usb",
+    identity_confidence: str = "stable",
+    bluetooth_direction: str | None = None,
 ) -> LabAuthorization:
     """Create a fresh in-memory authorization; nothing is persisted."""
     if not operator_confirmed:
@@ -252,6 +287,15 @@ def issue_authorization(
         raise LabAuthorizationError("forged lab target is not accepted")
     if not target.allowed_queries:
         raise LabAuthorizationError("target has no authorized queries")
+    if binding_mode not in {"stable-usb", "manual-bluetooth"}:
+        raise LabAuthorizationError("unsupported lab binding mode")
+    if binding_mode == "manual-bluetooth":
+        if identity_confidence != "manual-bound":
+            raise LabAuthorizationError("manual Bluetooth binding requires manual confidence")
+        if bluetooth_direction not in {None, "incoming", "outgoing", "unknown"}:
+            raise LabAuthorizationError("invalid Bluetooth direction")
+    elif identity_confidence != "stable":
+        raise LabAuthorizationError("strict binding requires stable confidence")
     now = datetime.now(UTC)
     return LabAuthorization(
         experiment_id=experiment_id or str(uuid4()),
@@ -264,6 +308,9 @@ def issue_authorization(
         operator_confirmed=True,
         artifact_sha256=artifact_sha256,
         software_git_sha=software_git_sha,
+        binding_mode=binding_mode,
+        identity_confidence=identity_confidence,
+        bluetooth_direction=bluetooth_direction,
     )
 
 

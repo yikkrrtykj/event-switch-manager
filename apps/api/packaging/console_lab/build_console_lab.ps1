@@ -67,6 +67,10 @@ $pyInstallerArgs = @(
     "--hidden-import", "serial.tools.list_ports",
     "--hidden-import", "serial.tools.list_ports_windows",
     "--hidden-import", "serial.tools.list_ports_linux",
+    "--hidden-import", "tkinter",
+    "--hidden-import", "tkinter.ttk",
+    "--hidden-import", "tkinter.messagebox",
+    "--hidden-import", "tkinter.scrolledtext",
     $launcher
 )
 & $pythonExe @pyInstallerArgs
