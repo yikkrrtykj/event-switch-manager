@@ -448,10 +448,18 @@ def test_gui_bluetooth_manual_binding_validation() -> None:
             non_production_confirmed=True,
             manual_bluetooth_binding=False,
         )
+    with pytest.raises(GuiValidationError, match="方向"):
+        validate_selection(
+            port,
+            non_production_confirmed=True,
+            manual_bluetooth_binding=True,
+            operator_bluetooth_direction="unknown",
+        )
     validate_selection(
         port,
         non_production_confirmed=True,
         manual_bluetooth_binding=True,
+        operator_bluetooth_direction="outgoing",
     )
     ambiguous_usb = _port(quality=IdentityQuality.AMBIGUOUS)
     with pytest.raises(GuiValidationError, match="稳定"):
@@ -500,6 +508,174 @@ def test_bluetooth_without_pnp_or_direction_cannot_bind() -> None:
             identity_confidence="manual-bound",
             bluetooth_direction=None,
         )
+
+
+def test_gui_unknown_enumeration_requires_operator_direction() -> None:
+    from event_switch_manager.lab_runner.gui import GuiValidationError, validate_selection
+
+    entry = type("Entry", (), {
+        "device": "COM5",
+        "description": "蓝牙链接上的标准串行 (COM5)",
+        "hwid": "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}",
+        "vid": None,
+        "pid": None,
+        "serial_number": None,
+        "manufacturer": "Microsoft",
+        "location": None,
+        "interface": None,
+    })()
+    port = discover_serial_ports(lambda: (entry,), platform_name="win32").ports[0]
+    with pytest.raises(GuiValidationError, match="明确选择"):
+        validate_selection(
+            port,
+            non_production_confirmed=True,
+            manual_bluetooth_binding=True,
+            operator_bluetooth_direction="unknown",
+        )
+    validate_selection(
+        port,
+        non_production_confirmed=True,
+        manual_bluetooth_binding=True,
+        operator_bluetooth_direction="incoming",
+    )
+    incoming = _bluetooth_discovery(
+        hwid=(
+            "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}_LOCALMFG&0000"
+            "\\7&1A2B3C4D&0&000000000000_00000002"
+        ),
+    ).ports[0]
+    with pytest.raises(GuiValidationError, match="不一致"):
+        validate_selection(
+            incoming,
+            non_production_confirmed=True,
+            manual_bluetooth_binding=True,
+            operator_bluetooth_direction="outgoing",
+        )
+
+
+def test_gui_cleanup_blocks_connect_and_retry_contract() -> None:
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk display unavailable")
+    from event_switch_manager.lab_runner import gui as gui_module
+
+    root.withdraw()
+    app = gui_module.ConsoleLabGui(root, smoke=True)
+    app.artifact_ok = True
+    app.self_ok = True
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        "event_switch_manager.lab_runner.gui.cleanup_required", lambda: True,
+    )
+    monkeypatch.setattr("tkinter.messagebox.showwarning", lambda *_a, **_k: None)
+    monkeypatch.setattr("tkinter.messagebox.showinfo", lambda *_a, **_k: None)
+    try:
+        app._refresh_status()
+        assert str(app.connect_button.cget("state")) == "disabled"
+        assert str(app.cleanup_button.cget("state")) == "normal"
+        app._finish_cleanup(False)
+        assert str(app.connect_button.cget("state")) == "disabled"
+        assert str(app.cleanup_button.cget("state")) == "normal"
+        app._finish_cleanup(True)
+        assert str(app.cleanup_button.cget("state")) == "disabled"
+    finally:
+        monkeypatch.undo()
+        app.on_close()
+
+
+def test_cli_cleanup_retention_blocks_new_session_and_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    class CloseFailSerial(FakeSerial):
+        def __init__(self) -> None:
+            super().__init__(initial="R1>\n", close_failures=1)
+            self.privileged = False
+
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            if data == b"enable\r":
+                self.privileged = True
+                self.buffer += "R1#\n"
+            elif data and data != b"\r":
+                prompt = "R1#\n" if self.privileged else "R1>\n"
+                self.buffer += data.decode("ascii", errors="replace") + f"\r\n{prompt}"
+            return len(data)
+
+    class FakeAdapter:
+        def observe(
+            self,
+            session: ConsoleSession,
+            *,
+            expected_pid: str,
+            expected_release: str,
+            query_hook: Any,
+            lab_provenance: LabProvenance,
+            deadline_seconds: float,
+            partial_evidence_callback: Any = None,
+        ) -> ConsoleEvidence:
+            _ = (
+                expected_pid, expected_release, query_hook, deadline_seconds,
+                partial_evidence_callback,
+            )
+            target = get_target("2960x")
+            session.set_profile(target.profile)
+            results = tuple(session.query_result(q) for q in target.allowed_queries)
+            observation = ConsoleObservation(
+                source=ConsoleSource.AUTHORIZED_LIVE_LAB,
+                session_identity="cleanup-test",
+                exact_pid=target.expected_pid,
+                software_version=target.expected_release,
+                completeness=ObservationCompleteness.COMPLETE,
+            )
+            return build_evidence(observation, results, lab_provenance=lab_provenance)
+
+    serial = CloseFailSerial()
+    port = _port()
+    discovery = _discovery(port)
+    metadata = LabBuildMetadata("a" * 40, "b" * 64, "test", True, True)
+    monkeypatch.setattr(LabBuildMetadata, "load", classmethod(lambda _cls: metadata))
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", lambda: discovery)
+    monkeypatch.setattr(lab_cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(lab_cli, "CiscoObservationAdapter", FakeAdapter)
+    monkeypatch.setattr(
+        lab_cli,
+        "AuthorizedSerialTransport",
+        lambda auth, parameters=None: AuthorizedSerialTransport(
+            auth,
+            discovery=lambda: discovery,
+            serial_factory=lambda _port, _params: serial,
+        ),
+    )
+    exit_code = lab_cli.run_experiment(argparse.Namespace(
+        target="2960x",
+        com="COM3",
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path),
+    ))
+    assert exit_code == lab_cli.EXIT_CLEANUP
+    assert lab_cli.cleanup_required() is True
+    called: list[bool] = []
+
+    def blocked_discovery() -> SerialDiscovery:
+        called.append(True)
+        return discovery
+
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", blocked_discovery)
+    blocked = lab_cli.run_experiment(argparse.Namespace(
+        target="2960x",
+        com="COM3",
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path / "blocked"),
+    ))
+    assert blocked == lab_cli.EXIT_CLEANUP
+    assert called == []
+    assert lab_cli.retry_cleanup() is True
+    assert lab_cli.cleanup_required() is False
 
 
 def test_gui_log_redacts_identity_like_values() -> None:

@@ -34,9 +34,13 @@ from .cli import (
     EXIT_CLEANUP,
     EXIT_OK,
     cancel_active_experiment,
+    cleanup_required,
     last_report_path,
     reset_active_experiment_cancel,
     run_experiment,
+)
+from .cli import (
+    retry_cleanup as retry_console_cleanup,
 )
 from .reporting import ArtifactIdentityError, LabBuildMetadata
 from .targets import LAB_TARGETS, get_target
@@ -72,6 +76,7 @@ def validate_selection(
     *,
     non_production_confirmed: bool,
     manual_bluetooth_binding: bool,
+    operator_bluetooth_direction: str = "unknown",
 ) -> None:
     """Pure preflight used by the GUI and its tests; never opens a port."""
     if not non_production_confirmed:
@@ -83,15 +88,19 @@ def validate_selection(
             raise GuiValidationError("Bluetooth SPP 需要勾选人工绑定")
         if not port.pnp_instance_identity:
             raise GuiValidationError("Bluetooth 端口缺少 PnP instance identity，拒绝绑定")
-        if port.bluetooth_direction not in {
-            BluetoothDirection.INCOMING,
-            BluetoothDirection.OUTGOING,
-            BluetoothDirection.UNKNOWN,
-        }:
-            raise GuiValidationError("Bluetooth 方向不可确认，拒绝绑定")
+        if operator_bluetooth_direction not in {"incoming", "outgoing"}:
+            raise GuiValidationError(
+                "Bluetooth 操作者必须明确选择 incoming 或 outgoing 方向",
+            )
+        if port.bluetooth_direction is BluetoothDirection.UNKNOWN:
+            pass
+        elif port.bluetooth_direction.value != operator_bluetooth_direction:
+            raise GuiValidationError("人工确认方向与枚举方向不一致")
         if port.identity_quality.value not in {"ambiguous", "stable"}:
             raise GuiValidationError("Bluetooth identity quality 不受支持")
         return
+    if operator_bluetooth_direction not in {"unknown", "incoming", "outgoing"}:
+        raise GuiValidationError("Bluetooth 方向参数无效")
     if port.identity_quality.value != "stable":
         raise GuiValidationError("该端口不是唯一稳定 identity，拒绝连接")
 
@@ -247,6 +256,16 @@ class ConsoleLabGui:
             state="readonly",
         ).pack(side="left", padx=(6, 18))
         ttk.Label(target_row, text="串口: 9600 / 8-N-1 / no flow control").pack(side="left")
+        ttk.Label(target_row, text="  Bluetooth 人工方向:").pack(side="left", padx=(18, 0))
+        self.bt_direction_var = tk.StringVar(value="unknown")
+        self.bt_direction_var.trace_add("write", lambda *_args: self._update_auth_panel())
+        ttk.Combobox(
+            target_row,
+            textvariable=self.bt_direction_var,
+            values=("incoming", "outgoing", "unknown"),
+            width=10,
+            state="readonly",
+        ).pack(side="left")
         ttk.Label(target_row, text="  授权时长(分钟):").pack(side="left", padx=(18, 0))
         self.ttl_var = tk.StringVar(value="20")
         ttk.Spinbox(
@@ -276,6 +295,11 @@ class ConsoleLabGui:
             state="disabled",
         )
         self.cancel_button.pack(side="left", padx=8)
+        self.cleanup_button = ttk.Button(
+            actions, text="重试 Cleanup", command=self.retry_cleanup,
+            state="disabled",
+        )
+        self.cleanup_button.pack(side="left", padx=8)
         ttk.Button(actions, text="打开报告目录", command=self.open_report_dir).pack(side="left")
         self.progress = ttk.Progressbar(actions, mode="indeterminate", length=180)
         self.progress.pack(side="right")
@@ -298,7 +322,11 @@ class ConsoleLabGui:
     def _refresh_status(self) -> None:
         self.artifact_label.configure(text=self.artifact_text)
         self.self_label.configure(text=self.self_text)
-        if not self.artifact_ok or not self.self_ok:
+        blocked = cleanup_required()
+        if blocked:
+            self.connect_button.configure(state="disabled")
+            self.cleanup_button.configure(state="normal")
+        elif not self.artifact_ok or not self.self_ok:
             self.connect_button.configure(state="disabled")
 
     # ---------- ports ----------
@@ -361,6 +389,8 @@ class ConsoleLabGui:
             return
         target = get_target(self.target_var.get())
         direction = port.bluetooth_direction.value
+        if port.transport_kind is PortTransportKind.BLUETOOTH_SPP and direction != "unknown":
+            self.bt_direction_var.set(direction)
         warning = ""
         if port.transport_kind is PortTransportKind.BLUETOOTH_SPP:
             warning = (
@@ -369,9 +399,13 @@ class ConsoleLabGui:
             )
             if not self.manual_bt_var.get():
                 warning += " 请勾选“人工绑定”。"
+            if direction == "unknown" and self.bt_direction_var.get() == "unknown":
+                warning += " 枚举方向 Unknown，必须人工选择 incoming/outgoing。"
         lines = [
             f"选择端口: {port.port}  类型: {port.transport_kind.value}",
-            f"Bluetooth 方向: {direction}  已配对名称: {port.bluetooth_name or '不可靠/不可用'}",
+            f"枚举 Bluetooth 方向: {direction}",
+            f"人工确认 Bluetooth 方向: {self.bt_direction_var.get()}",
+            f"已配对名称: {port.bluetooth_name or '不可靠/不可用'}",
             f"Adapter identity: {port.adapter_identity}",
             f"Identity quality: {port.identity_quality.value}  重复: {port.duplicate_identity}",
             f"预期 PID/release: {target.expected_pid} / {target.expected_release}",
@@ -487,6 +521,13 @@ class ConsoleLabGui:
     def connect(self) -> None:
         if self.worker is not None and self.worker.is_alive():
             return
+        if cleanup_required():
+            messagebox.showerror(
+                "ConsoleLab",
+                "上一会话 cleanup 未确认释放；请先“重试 Cleanup”，禁止新会话接管。",
+                parent=self.root,
+            )
+            return
         if not self.artifact_ok or not self.self_ok:
             messagebox.showerror("ConsoleLab", "Artifact 或 self-test 未通过。", parent=self.root)
             return
@@ -496,11 +537,13 @@ class ConsoleLabGui:
             return
         target = get_target(self.target_var.get())
         manual_bt = bool(self.manual_bt_var.get())
+        operator_direction = self.bt_direction_var.get()
         try:
             validate_selection(
                 port,
                 non_production_confirmed=self.non_production_var.get(),
                 manual_bluetooth_binding=manual_bt,
+                operator_bluetooth_direction=operator_direction,
             )
         except GuiValidationError as exc:
             messagebox.showerror("ConsoleLab 安全门禁", str(exc), parent=self.root)
@@ -518,7 +561,9 @@ class ConsoleLabGui:
                 "Bluetooth 人工绑定",
                 (
                     "你确认这是正确的 Bluetooth 设备与端口？\n\n"
-                    f"COM: {port.port}\n方向: {port.bluetooth_direction.value}\n"
+                    f"COM: {port.port}\n"
+                    f"枚举方向: {port.bluetooth_direction.value}\n"
+                    f"人工确认方向: {operator_direction}\n"
                     f"identity: {port.adapter_identity}\n\n"
                     "人工绑定只对本次会话有效，不作为稳定 USB 身份。"
                 ),
@@ -533,7 +578,7 @@ class ConsoleLabGui:
             output_dir=str(self.last_output_dir),
             manual_bluetooth_binding=manual_bt,
             bluetooth_direction=(
-                port.bluetooth_direction.value
+                operator_direction
                 if port.transport_kind is PortTransportKind.BLUETOOTH_SPP
                 else "unknown"
             ),
@@ -604,6 +649,8 @@ class ConsoleLabGui:
                     self._apply_discovery(payload)
                 elif kind == "done":
                     self._finish_worker(int(payload))
+                elif kind == "cleanup_result":
+                    self._finish_cleanup(bool(payload))
         except queue.Empty:
             pass
         try:
@@ -625,12 +672,16 @@ class ConsoleLabGui:
         self.progress.stop()
         self.cancel_button.configure(state="disabled")
         self._append_log(f"\n=== 实验结束 exit={code} ===\n")
-        if code == EXIT_CLEANUP:
+        blocked = code == EXIT_CLEANUP or cleanup_required()
+        if blocked:
             self._append_log("=== cleanup 未确认：CLEANUP_REQUIRED，未声明端口已释放 ===\n")
+            self._closing = False
+            self.connect_button.configure(state="disabled")
+            self.cleanup_button.configure(state="normal")
             try:
                 messagebox.showwarning(
                     "ConsoleLab cleanup",
-                    "Cleanup 未确认；报告为 CLEANUP_REQUIRED。",
+                    "Cleanup 未确认；禁止新会话。请使用“重试 Cleanup”。",
                     parent=self.root,
                 )
             except tk.TclError:
@@ -640,9 +691,52 @@ class ConsoleLabGui:
         if self._closing:
             self.root.after(50, self._destroy)
             return
-        self.connect_button.configure(
-            state="normal" if (self.artifact_ok and self.self_ok) else "disabled",
-        )
+        if not blocked:
+            self.connect_button.configure(
+                state="normal" if (self.artifact_ok and self.self_ok) else "disabled",
+            )
+
+    def retry_cleanup(self) -> None:
+        if self.worker is not None and self.worker.is_alive():
+            return
+        self.cleanup_button.configure(state="disabled")
+        self._append_log("\n=== 重试 Cleanup（不打开新串口） ===\n")
+
+        def worker() -> None:
+            ok = retry_console_cleanup()
+            self.output_queue.put(("cleanup_result", ok))
+
+        threading.Thread(
+            target=worker, name="console-lab-cleanup-retry", daemon=True,
+        ).start()
+
+    def _finish_cleanup(self, ok: bool) -> None:
+        if ok:
+            self._append_log("=== Cleanup 已确认释放；此前会话不可恢复 ===\n")
+            self.connect_button.configure(
+                state="normal" if (self.artifact_ok and self.self_ok) else "disabled",
+            )
+            self.cleanup_button.configure(state="disabled")
+            try:
+                messagebox.showinfo(
+                    "ConsoleLab cleanup",
+                    "Cleanup 已确认释放；现在可以重新选择端口。",
+                    parent=self.root,
+                )
+            except tk.TclError:
+                pass
+            return
+        self._append_log("=== Cleanup 仍失败；保持 CLEANUP_REQUIRED ===\n")
+        self.connect_button.configure(state="disabled")
+        self.cleanup_button.configure(state="normal")
+        try:
+            messagebox.showwarning(
+                "ConsoleLab cleanup",
+                "Cleanup 仍失败；端口未确认释放，禁止新会话。",
+                parent=self.root,
+            )
+        except tk.TclError:
+            pass
 
     def _load_completed_report(self, report_path: Path | None) -> None:
         if report_path is None:
@@ -721,6 +815,27 @@ class ConsoleLabGui:
             self._close_active_dialog()
             cancel_active_experiment()
             self.progress.start(12)
+            return
+        if cleanup_required():
+            if messagebox.askyesno(
+                "ConsoleLab cleanup",
+                "上一会话 cleanup 未确认释放。现在重试 Cleanup？",
+                parent=self.root,
+            ):
+                if retry_console_cleanup():
+                    self._destroy()
+                else:
+                    messagebox.showwarning(
+                        "ConsoleLab cleanup",
+                        "Cleanup 仍失败；端口未确认释放，窗口保持打开。",
+                        parent=self.root,
+                    )
+            else:
+                messagebox.showwarning(
+                    "ConsoleLab cleanup",
+                    "Cleanup 未确认；不会声明安全关闭。请先重试 Cleanup。",
+                    parent=self.root,
+                )
             return
         self._destroy()
 

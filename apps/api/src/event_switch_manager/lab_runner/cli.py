@@ -66,12 +66,31 @@ class LabUiCallbacks(Protocol):
 _UI_CONTEXT = threading.local()
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE_SESSION: ConsoleSession | None = None
+_RETAINED_CLEANUP_SESSION: ConsoleSession | None = None
 _PENDING_CANCEL = threading.Event()
 _LAST_REPORT_PATH: Path | None = None
 
 
 def last_report_path() -> Path | None:
     return _LAST_REPORT_PATH
+
+
+def cleanup_required() -> bool:
+    return _RETAINED_CLEANUP_SESSION is not None
+
+
+def retry_cleanup() -> bool:
+    """Retry the retained session close; never opens a new session."""
+    global _RETAINED_CLEANUP_SESSION
+    session = _RETAINED_CLEANUP_SESSION
+    if session is None:
+        return True
+    try:
+        session.close()
+    except SessionCleanupError:
+        return False
+    _RETAINED_CLEANUP_SESSION = None
+    return True
 
 
 def reset_active_experiment_cancel() -> None:
@@ -497,8 +516,14 @@ def run_experiment(
 
 
 def _run_experiment(args: argparse.Namespace) -> int:
-    global _ACTIVE_SESSION, _LAST_REPORT_PATH
+    global _ACTIVE_SESSION, _LAST_REPORT_PATH, _RETAINED_CLEANUP_SESSION
     _LAST_REPORT_PATH = None
+    if _RETAINED_CLEANUP_SESSION is not None:
+        print(
+            "拒绝新会话：上一会话 cleanup 未确认释放；请先重试 cleanup。",
+            file=sys.stderr,
+        )
+        return EXIT_CLEANUP
     _check_cancel()
     if not args.target or not args.com:
         print("实验需要 --target 和明确选择的 --com；不会自动扫描并连接其他端口。", file=sys.stderr)
@@ -766,17 +791,27 @@ def _run_experiment(args: argparse.Namespace) -> int:
                 session.close()
                 cleanup_status = "RELEASED"
                 connection_state = "RELEASED"
+                with _ACTIVE_LOCK:
+                    if _RETAINED_CLEANUP_SESSION is session:
+                        _RETAINED_CLEANUP_SESSION = None
             except SessionCleanupError:
                 cleanup_status = "CLEANUP_REQUIRED"
                 connection_state = "CLEANUP_REQUIRED"
                 exit_code = EXIT_CLEANUP
+                with _ACTIVE_LOCK:
+                    _RETAINED_CLEANUP_SESSION = session
         elif connection_state == "OPEN_FAILED":
             try:
                 session.close()
                 cleanup_status = "RELEASED"
+                with _ACTIVE_LOCK:
+                    if _RETAINED_CLEANUP_SESSION is session:
+                        _RETAINED_CLEANUP_SESSION = None
             except SessionCleanupError:
                 cleanup_status = "CLEANUP_REQUIRED"
                 exit_code = EXIT_CLEANUP
+                with _ACTIVE_LOCK:
+                    _RETAINED_CLEANUP_SESSION = session
         authorization.cancel()
 
     if evidence is not None:
