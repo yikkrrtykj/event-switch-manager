@@ -36,6 +36,27 @@ class ConsoleSource(StrEnum):
     SIMULATOR = "SIMULATOR"
     RECORDED_FIXTURE = "RECORDED_FIXTURE"
     LIVE_DEVICE = "LIVE_DEVICE"
+    AUTHORIZED_LIVE_LAB = "AUTHORIZED_LIVE_LAB"
+
+
+class LabProvenance(Record):
+    """Evidence provenance for a controlled, authorized read-only lab run."""
+
+    experiment_id: str
+    target: str
+    authorization_digest: str
+    expected_pid: str
+    expected_release: str
+    observed_pid: str | None = None
+    observed_release: str | None = None
+    com_endpoint: str
+    adapter_identity_sha256: str
+    artifact_sha256: str
+    software_git_sha: str
+    operator_confirmed: bool = False
+    cleanup_status: str = "UNKNOWN"
+    completion_policy: str = "operator-assisted"
+    hardware_evidence: Literal["lab-readonly-unverified"] = "lab-readonly-unverified"
 
 
 class QueryStatus(StrEnum):
@@ -145,6 +166,7 @@ class ConsoleQueryResult(Record):
     command: str
     status: QueryStatus
     output: str = ""
+    duration_seconds: float = 0.0
     unknown_fields: tuple[str, ...] = ()
 
 
@@ -216,6 +238,7 @@ class ConsoleEvidence(Record):
     observation: ConsoleObservation
     source: ConsoleSource
     fixture_id: str | None = None
+    lab_provenance: LabProvenance | None = None
     query_results: tuple[ConsoleQueryResult, ...] = ()
     unsupported_queries: tuple[ConsoleQuery, ...] = ()
     completeness: ObservationCompleteness = ObservationCompleteness.INCOMPLETE
@@ -258,14 +281,23 @@ def build_evidence(
     *,
     fixture_id: str | None = None,
     unsupported_queries: tuple[ConsoleQuery, ...] = (),
+    lab_provenance: LabProvenance | None = None,
 ) -> ConsoleEvidence:
     """Build immutable read-only evidence.
 
-    LIVE_DEVICE is modeled but rejected in CON-01.  A simulator or recorded
-    fixture never promotes hardware verification or deployment approval.
+    LIVE_DEVICE remains rejected in the product path.  AUTHORIZED_LIVE_LAB is
+    accepted only when an explicit lab provenance envelope is supplied; it is
+    still not hardware verification or deployment approval.
     """
     if observation.source is ConsoleSource.LIVE_DEVICE:
         raise ConsoleEvidenceRejected("live-device-evidence-disabled")
+    if (
+        observation.source is ConsoleSource.AUTHORIZED_LIVE_LAB
+        and lab_provenance is None
+    ):
+        raise ConsoleEvidenceRejected("authorized-live-lab-evidence-requires-provenance")
+    if lab_provenance is not None and observation.source is not ConsoleSource.AUTHORIZED_LIVE_LAB:
+        raise ConsoleEvidenceRejected("lab-provenance-requires-authorized-live-source")
     if any(not result.command.startswith("show ") for result in query_results):
         raise ConsoleEvidenceRejected("non-read-only-query-in-evidence")
     if len(set(unsupported_queries)) != len(unsupported_queries):
@@ -274,6 +306,7 @@ def build_evidence(
         observation=observation,
         source=observation.source,
         fixture_id=fixture_id,
+        lab_provenance=lab_provenance,
         query_results=query_results,
         unsupported_queries=unsupported_queries,
         completeness=observation.completeness,

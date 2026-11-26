@@ -99,6 +99,7 @@ class SerialTransport:
         self._allow_live = allow_live
         self._serial: Any = None
         self._is_open = False
+        self._cleanup_required = False
 
     @property
     def port_identity(self) -> str:
@@ -116,10 +117,16 @@ class SerialTransport:
     def is_open(self) -> bool:
         return self._is_open
 
+    @property
+    def cleanup_required(self) -> bool:
+        return self._cleanup_required
+
     def pending_data(self) -> bool:
         return bool(self._is_open and self._serial is not None and self._serial.in_waiting)
 
     def open(self) -> None:
+        if self._serial is not None or self._cleanup_required:
+            raise TransportError("serial cleanup is required before reopening")
         # Even an accidental allow_live=True cannot authorize a real port in
         # the product tree.  A future live experiment must add a separately
         # reviewed authorization boundary and OS-level exclusivity evidence.
@@ -153,16 +160,23 @@ class SerialTransport:
 
     def close(self) -> None:
         serial_port = self._serial
+        if serial_port is None:
+            self._is_open = False
+            self._cleanup_required = False
+            return
+        try:
+            serial_port.close()
+        except Exception as exc:
+            # Do not clear the handle or claim release until close succeeds.
+            self._cleanup_required = True
+            self._is_open = True
+            raise TransportError("serial-close-failed") from exc
         self._serial = None
         self._is_open = False
-        if serial_port is not None:
-            try:
-                serial_port.close()
-            except Exception as exc:
-                raise TransportError("serial-close-failed") from exc
+        self._cleanup_required = False
 
     def write(self, text: str) -> None:
-        if not self._is_open or self._serial is None:
+        if not self._is_open or self._serial is None or self._cleanup_required:
             raise TransportDisconnected("serial transport is not open")
         if not text:
             return
@@ -173,7 +187,7 @@ class SerialTransport:
             raise TransportError("serial-write-failed") from exc
 
     def read_chunk(self, timeout: float) -> str:
-        if not self._is_open or self._serial is None:
+        if not self._is_open or self._serial is None or self._cleanup_required:
             raise TransportDisconnected("serial transport is not open")
         if not 0 < timeout <= 30:
             raise ValueError("read timeout must be in (0, 30] seconds")

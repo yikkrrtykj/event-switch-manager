@@ -1,0 +1,116 @@
+Event Switch Manager — Windows Console Lab Runner（R86）
+=========================================================
+
+重要：本工具只用于受控、非生产、已由用户单独授权的 Cisco Console 只读实验。
+它不是生产部署工具，不读取完整运行配置，不写入设备，不执行 CON-02。
+
+0. 安全前提
+------------
+- 目标设备必须确认无生产业务、无关键链路，并允许本次实验。
+- 首次实验优先使用空闲单机；确认单机流程后再进行双成员 Stack。
+- 不得在 ISP、DANTE 或其他身份不明的设备上自动开始实验。
+- 不发送 BREAK，不主动修改 DTR/RTS，不自动 reset，不支持写配置。
+- 程序只允许 show 只读查询；密码不在命令行参数或环境变量传递。
+- 实验报告不包含完整 transcript，敏感 identity 字段会脱敏或哈希。
+- 真实串口完成边界、DTR/RTS 行为、OS 独占和硬件验收仍是 NOT_VERIFIED。
+
+1. 运行环境
+------------
+- Windows x64。
+- 不需要安装 Python、Node.js 或 Web 服务。
+- 不需要管理员权限；USB Console 驱动安装除外。
+- 可离线运行；不访问网络。
+- 串口候选参数：9600 baud, 8 data bits, parity None, 1 stop bit, no flow control。
+  现场仍需核对目标设备的官方 Console 参数。
+
+2. 枚举 COM（不打开串口）
+--------------------------
+在 ConsoleLab 目录运行：
+
+  EventSwitchManager-ConsoleLab.exe --list-ports
+  EventSwitchManager-ConsoleLab.exe --list-ports --json
+
+只枚举，不打开、不写数据。无设备时也会正常返回；驱动/枚举错误会显示状态。
+
+3. 选择实验目标
+----------------
+  --target 2960x    WS-C2960X-24TS-L / 15.2(7)E10
+  --target c1000    C1000-16T-2G-L / 15.2(7)E2
+
+必须同时提供明确选择的 --com，例如：
+
+  EventSwitchManager-ConsoleLab.exe --target c1000 --com COM3 --output-dir .\lab-out
+
+程序不会自动连接其他 COM，也不会在适配器 identity 重复/模糊时自动降级。
+没有可靠永久 USB identity 的适配器必须由现场人员单独确认身份；本工具不明文
+声称支持未知适配器的自动识别。
+
+4. 授权与人工确认
+------------------
+- 程序枚举并显示 COM、VID/PID、USB serial、Location、identity quality。
+- 操作者必须输入 YES，确认设备无生产业务且允许本次实验。
+- 授权只对本次进程、本次 COM、本次 adapter identity、本次目标 PID/release 有效。
+- 授权默认不存在，不持久化，不支持环境变量或普通开关绕过。
+- 授权消费后不能重复使用；过期、取消、identity 变化或已消费即拒绝。
+- 登录得到 EXEC prompt 后先执行 show version 和 show inventory。
+- 实际 PID/release 与预期不一致时立即停止扩展查询。
+- 每条查询结束后显示脱敏结果/状态，操作者输入 y 明确确认才可执行下一条；
+  人工确认不能覆盖程序发现的超时、歧义或不安全状态。
+- 不自动重连、不自动重放命令、不自动进入 configuration mode。
+
+5. 只读查询范围
+----------------
+2960X:
+  show version
+  show inventory
+  show interfaces status
+  show switch
+  show license
+  show boot
+  show file systems
+
+C1000-16T:
+  show version
+  show inventory
+  show interfaces status
+  show boot
+  show file systems
+
+C1000 不执行 show license 或 native Stack 查询。
+任意未审核命令、generic CLI、configure terminal、terminal length、copy、write、
+erase、reload、delete、format、show running-config、show startup-config 都禁止。
+
+6. 输出
+--------
+输出目录默认 console-lab-output，包含：
+
+  console-lab-report.json
+  console-lab-summary.txt
+  SHA256SUMS
+
+报告包含软件/artifact SHA、实验授权摘要、COM 连接、查询状态/耗时、脱敏观察摘要、
+缺失字段、cleanup 状态和硬件门禁；不保存真实密码、完整未脱敏 transcript 或配置备份。
+不要自动上传报告到 GitHub 或外部服务器。
+
+7. 退出码
+----------
+  0  自检/枚举/实验流程正常完成（报告仍需人工审查）
+  2  参数错误或缺少目标/COM
+  3  COM 枚举/选择/identity 问题
+  4  授权被拒绝或过期
+  5  实际 PID/release 与授权目标不一致
+  6  串口/查询/操作者中止
+  7  cleanup 未确认，必须保留 FAILED/CLEANUP_REQUIRED 状态
+
+8. 异常处理
+------------
+- 认证失败、超时、取消、拔线：停止，不自动重试，不自动发送恢复命令。
+- 关闭失败：不声明端口已释放，不开始新会话；报告为 CLEANUP_REQUIRED。
+- 程序不会自动从 ROMMON、switch:、configuration mode 或 initial setup dialog 恢复。
+- 需要额外唤醒时，由现场人员在确认设备安全状态后单独授权设计，不得盲目发送控制字符。
+
+9. 报告与硬件验收
+------------------
+真实设备验收见同目录 H0-H4-验收模板.txt。
+真实读取的观察只能作为 lab evidence，不自动成为硬件能力认证、verified_serial 或
+部署许可。所有真实硬件门禁在人工实验完成前保持 NOT_VERIFIED。

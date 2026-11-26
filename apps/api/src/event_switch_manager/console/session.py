@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Protocol
 from uuid import uuid4
 
 from event_switch_manager.domain import DeviceFamily
@@ -128,6 +129,24 @@ class DiscoveryCancelled(SessionError):
     pass
 
 
+class ConsoleOperatorAbort(SessionError):
+    """The operator refused to confirm a query or continue the lab run."""
+
+
+class LabSessionGate(Protocol):
+    def authorize_open(self, transport: object) -> None: ...
+
+    def authorize_query(self, query: ConsoleQuery) -> None: ...
+
+
+class PromptCompletionPolicy(Protocol):
+    def observe_chunk(self, chunk: str) -> None: ...
+
+    def candidate_seen(self) -> None: ...
+
+    def candidate_ready(self) -> bool: ...
+
+
 MAX_AUTH_INPUT_LENGTH = 128
 
 
@@ -180,6 +199,8 @@ class ConsoleSession:
         max_pagination_pages: int = 20,
         max_response_bytes: int = 256 * 1024,
         max_total_response_bytes: int = 512 * 1024,
+        lab_gate: LabSessionGate | None = None,
+        completion_policy: PromptCompletionPolicy | None = None,
     ) -> None:
         validate_family(family)
         if not 0 < timeout <= 30:
@@ -210,6 +231,8 @@ class ConsoleSession:
         self._redaction_secrets: tuple[str, ...] = ()
         self._discovery_deadline: float | None = None
         self._cancel_discovery_event: threading.Event | None = None
+        self._lab_gate = lab_gate
+        self._completion_policy = completion_policy
 
     @property
     def state(self) -> SessionState:
@@ -325,6 +348,10 @@ class ConsoleSession:
             )
         if self.source is ConsoleSource.LIVE_DEVICE:
             raise LiveDeviceDisabled("live device sessions are disabled in CON-01")
+        if self.source is ConsoleSource.AUTHORIZED_LIVE_LAB:
+            if self._lab_gate is None:
+                raise LiveDeviceDisabled("authorized live lab requires a lab gate")
+            self._lab_gate.authorize_open(self._transport)
         port_identity = self._transport.port_identity
         if not port_identity:
             self._state = SessionState.FAILED
@@ -433,6 +460,14 @@ class ConsoleSession:
             raise DeviceCommandError(f"read-only query failed: {result.status.value}")
         return result.output
 
+    def phase(self) -> str:
+        with self._state_lock:
+            return self._state.value
+
+    def pending_data(self) -> bool:
+        pending = getattr(self._transport, "pending_data", None)
+        return bool(pending()) if callable(pending) else False
+
     def query_result(self, query: ConsoleQuery) -> ConsoleQueryResult:
         with self._state_lock:
             return self._query_result_locked(query)
@@ -452,7 +487,10 @@ class ConsoleSession:
         previous_state = self._state
         self._state = SessionState.QUERYING
         self._parser.reset()
+        started = time.monotonic()
         try:
+            if self._lab_gate is not None:
+                self._lab_gate.authorize_query(query)
             self._check_discovery_budget()
             self._transport.write(spec.command + "\r")
             read = self._read_for_prompt(allow_pagination=True)
@@ -474,6 +512,7 @@ class ConsoleSession:
                 command=spec.command,
                 status=status,
                 output=output,
+                duration_seconds=round(time.monotonic() - started, 6),
             )
             self._last_results.append(result)
             self._state = (
@@ -532,21 +571,28 @@ class ConsoleSession:
             pending_fn = getattr(self._transport, "pending_data", None)
             pending = bool(pending_fn()) if callable(pending_fn) else False
             if candidate is not None and not pending:
-                if self._parser.has_unconsumed_non_whitespace:
-                    raise AmbiguousConsoleOutput(
-                        "terminal output remained after candidate prompt",
-                    )
-                extra = output[len(candidate.output):].strip()
-                if extra:
-                    self._parser.mark_prompt_collision()
-                    raise AmbiguousConsoleOutput(
-                        "prompt-like text occurred in command output",
-                    )
-                return candidate
+                policy_ready = (
+                    self._completion_policy is None
+                    or self._completion_policy.candidate_ready()
+                )
+                if policy_ready:
+                    if self._parser.has_unconsumed_non_whitespace:
+                        raise AmbiguousConsoleOutput(
+                            "terminal output remained after candidate prompt",
+                        )
+                    extra = output[len(candidate.output):].strip()
+                    if extra:
+                        self._parser.mark_prompt_collision()
+                        raise AmbiguousConsoleOutput(
+                            "prompt-like text occurred in command output",
+                        )
+                    return candidate
             remaining = max(0.001, deadline - time.monotonic())
             chunk = self._transport.read_chunk(remaining)
             if not chunk:
                 continue
+            if self._completion_policy is not None:
+                self._completion_policy.observe_chunk(chunk)
             for event in self._parser.feed(chunk):
                 if event.kind is ParserEventKind.OUTPUT:
                     output += event.output
@@ -573,6 +619,8 @@ class ConsoleSession:
                     candidate = _PromptRead(
                         output, event.mode, None, event.prompt,
                     )
+                    if self._completion_policy is not None:
+                        self._completion_policy.candidate_seen()
                 elif event.kind is ParserEventKind.UNSAFE_STATE:
                     raise UnsafeConsoleState(event.reason or "unsafe console state")
             if candidate is not None and self._parser.prompt_collision:
@@ -647,6 +695,7 @@ __all__ = [
     "AmbiguousAdapterIdentity",
     "AuthenticationError",
     "ConsoleCredentials",
+    "ConsoleOperatorAbort",
     "ConsoleSession",
     "ConsoleTimeout",
     "CredentialInputError",
@@ -654,8 +703,10 @@ __all__ = [
     "DiscoveryCancelled",
     "DiscoveryTimeout",
     "EnableError",
+    "LabSessionGate",
     "LiveDeviceDisabled",
     "MAX_AUTH_INPUT_LENGTH",
+    "PromptCompletionPolicy",
     "SessionCleanupError",
     "SessionClosed",
     "SessionError",
