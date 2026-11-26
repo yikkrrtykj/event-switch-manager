@@ -813,6 +813,54 @@ def test_cli_refuses_bluetooth_without_manual_binding() -> None:
     assert selected.transport_kind is PortTransportKind.BLUETOOTH_SPP
 
 
+def test_bluetooth_unknown_enumeration_can_bind_operator_direction() -> None:
+    entry = type("Entry", (), {
+        "device": "COM5",
+        "description": "蓝牙链接上的标准串行 (COM5)",
+        "hwid": "BTHENUM\\{00001101-0000-1000-8000-00805F9B34FB}",
+        "vid": None,
+        "pid": None,
+        "serial_number": None,
+        "manufacturer": "Microsoft",
+        "location": None,
+        "interface": None,
+    })()
+    discovery = discover_serial_ports(lambda: (entry,), platform_name="win32")
+    port = discovery.ports[0]
+    assert port.bluetooth_direction is BluetoothDirection.UNKNOWN
+    auth = issue_authorization(
+        get_target("2960x"),
+        com_endpoint=port.port,
+        adapter_identity=port.adapter_identity,
+        operator_confirmed=True,
+        binding_mode="manual-bluetooth",
+        identity_confidence="manual-bound",
+        bluetooth_direction="outgoing",
+        enumerated_bluetooth_direction="unknown",
+    )
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: discovery,
+        serial_factory=lambda _port, _params: FakeSerial(initial=""),
+    )
+    auth.authorize_open(transport)
+    transport.open()
+    assert auth.bluetooth_direction == "outgoing"
+    assert auth.enumerated_bluetooth_direction == "unknown"
+    transport.close()
+    with pytest.raises(LabAuthorizationError, match="conflict"):
+        issue_authorization(
+            get_target("2960x"),
+            com_endpoint=port.port,
+            adapter_identity=port.adapter_identity,
+            operator_confirmed=True,
+            binding_mode="manual-bluetooth",
+            identity_confidence="manual-bound",
+            bluetooth_direction="outgoing",
+            enumerated_bluetooth_direction="incoming",
+        )
+
+
 def test_bluetooth_manual_binding_opens_with_lower_confidence() -> None:
     discovery = _bluetooth_discovery()
     port = discovery.ports[0]

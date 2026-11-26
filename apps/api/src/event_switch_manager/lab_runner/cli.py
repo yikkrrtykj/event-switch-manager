@@ -418,6 +418,7 @@ def _lab_provenance(
         binding_mode=authorization.binding_mode,
         identity_confidence=authorization.identity_confidence,
         bluetooth_direction=authorization.bluetooth_direction,
+        enumerated_bluetooth_direction=authorization.enumerated_bluetooth_direction,
     )
 
 
@@ -542,10 +543,11 @@ def _run_experiment(args: argparse.Namespace) -> int:
             print("拒绝连接：现场方向与枚举方向不一致。", file=sys.stderr)
             return EXIT_DISCOVERY
         binding_direction = (
-            actual_direction
-            if actual_direction != "unknown"
-            else requested_direction
+            requested_direction
+            if requested_direction != "unknown"
+            else actual_direction
         )
+        enumerated_direction = actual_direction
         print(
             "\nBluetooth SPP 人工绑定："
             f"COM={port.port} direction={actual_direction} "
@@ -602,6 +604,9 @@ def _run_experiment(args: argparse.Namespace) -> int:
             ),
             bluetooth_direction=(
                 binding_direction if is_bluetooth else None
+            ),
+            enumerated_bluetooth_direction=(
+                enumerated_direction if is_bluetooth else None
             ),
         )
     except LabAuthorizationError as exc:

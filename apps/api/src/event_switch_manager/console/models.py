@@ -59,6 +59,7 @@ class LabProvenance(Record):
     binding_mode: str = "stable-usb"
     identity_confidence: str = "stable"
     bluetooth_direction: str | None = None
+    enumerated_bluetooth_direction: str | None = None
     hardware_evidence: Literal["lab-readonly-unverified"] = "lab-readonly-unverified"
 
 

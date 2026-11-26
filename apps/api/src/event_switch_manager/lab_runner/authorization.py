@@ -44,6 +44,7 @@ class LabAuthorization:
     binding_mode: str = "stable-usb"
     identity_confidence: str = "stable"
     bluetooth_direction: str | None = None
+    enumerated_bluetooth_direction: str | None = None
     _consumed: bool = field(default=False, init=False)
     _cancelled: bool = field(default=False, init=False)
     _bound_transport: object | None = field(default=None, init=False)
@@ -55,6 +56,7 @@ class LabAuthorization:
         "allowed_queries", "issued_at", "expires_at", "operator_confirmed",
         "artifact_sha256", "software_git_sha", "binding_mode",
         "identity_confidence", "bluetooth_direction",
+        "enumerated_bluetooth_direction",
     })
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -88,6 +90,7 @@ class LabAuthorization:
             "binding_mode": self.binding_mode,
             "identity_confidence": self.identity_confidence,
             "bluetooth_direction": self.bluetooth_direction,
+            "enumerated_bluetooth_direction": self.enumerated_bluetooth_direction,
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -106,6 +109,20 @@ class LabAuthorization:
             }:
                 raise LabAuthorizationError(
                     "manual Bluetooth binding must pin a direction",
+                )
+            if self.enumerated_bluetooth_direction not in {
+                "incoming", "outgoing", "unknown",
+            }:
+                raise LabAuthorizationError(
+                    "manual Bluetooth binding must record enumerated direction",
+                )
+            if (
+                self.bluetooth_direction != "unknown"
+                and self.enumerated_bluetooth_direction != "unknown"
+                and self.bluetooth_direction != self.enumerated_bluetooth_direction
+            ):
+                raise LabAuthorizationError(
+                    "operator and enumerated Bluetooth directions conflict",
                 )
         elif self.identity_confidence != "stable":
             raise LabAuthorizationError("strict lab binding confidence is invalid")
@@ -147,9 +164,9 @@ class LabAuthorization:
                 )
             if port.duplicate_identity:
                 raise LabAuthorizationError("Bluetooth PnP identity is duplicated")
-            expected = BluetoothDirection(str(self.bluetooth_direction))
+            expected = BluetoothDirection(str(self.enumerated_bluetooth_direction))
             if port.bluetooth_direction is not expected:
-                raise LabAuthorizationError("Bluetooth direction changed")
+                raise LabAuthorizationError("Bluetooth enumeration direction changed")
             return
         if (
             port.transport_kind is PortTransportKind.BLUETOOTH_SPP
@@ -283,6 +300,7 @@ def issue_authorization(
     binding_mode: str = "stable-usb",
     identity_confidence: str = "stable",
     bluetooth_direction: str | None = None,
+    enumerated_bluetooth_direction: str | None = None,
 ) -> LabAuthorization:
     """Create a fresh in-memory authorization; nothing is persisted."""
     if not operator_confirmed:
@@ -305,6 +323,20 @@ def issue_authorization(
             raise LabAuthorizationError(
                 "manual Bluetooth binding must pin a direction",
             )
+        if enumerated_bluetooth_direction is None:
+            enumerated_bluetooth_direction = bluetooth_direction
+        if enumerated_bluetooth_direction not in {"incoming", "outgoing", "unknown"}:
+            raise LabAuthorizationError(
+                "manual Bluetooth binding must record enumerated direction",
+            )
+        if (
+            bluetooth_direction != "unknown"
+            and enumerated_bluetooth_direction != "unknown"
+            and bluetooth_direction != enumerated_bluetooth_direction
+        ):
+            raise LabAuthorizationError(
+                "operator and enumerated Bluetooth directions conflict",
+            )
     elif identity_confidence != "stable":
         raise LabAuthorizationError("strict binding requires stable confidence")
     now = datetime.now(UTC)
@@ -322,6 +354,7 @@ def issue_authorization(
         binding_mode=binding_mode,
         identity_confidence=identity_confidence,
         bluetooth_direction=bluetooth_direction,
+        enumerated_bluetooth_direction=enumerated_bluetooth_direction,
     )
 
 

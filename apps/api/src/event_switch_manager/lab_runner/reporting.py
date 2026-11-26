@@ -130,6 +130,10 @@ class LabReportWriter:
             "bluetooth_direction": (
                 port.bluetooth_direction.value if port else None
             ),
+            "operator_bluetooth_direction": self.authorization.bluetooth_direction,
+            "enumerated_bluetooth_direction": (
+                self.authorization.enumerated_bluetooth_direction
+            ),
             "remote_bluetooth_token": (
                 stable_token(port.remote_bluetooth_identity) if port else None
             ),
@@ -442,6 +446,8 @@ def validate_lab_provenance(
         provenance.binding_mode == authorization.binding_mode,
         provenance.identity_confidence == authorization.identity_confidence,
         provenance.bluetooth_direction == authorization.bluetooth_direction,
+        provenance.enumerated_bluetooth_direction
+        == authorization.enumerated_bluetooth_direction,
         provenance.hardware_evidence == "lab-readonly-unverified",
     )
     if require_success and not (
