@@ -578,6 +578,69 @@ def test_operator_gate_blocks_query_before_any_send(monkeypatch: pytest.MonkeyPa
         session.close()
 
 
+def test_credential_is_not_sent_after_auth_budget_expiry() -> None:
+    port = _port()
+    auth = _auth(port=port)
+    serial = FakeSerial(initial="Username: ")
+
+    def provider(_kind: Any) -> str:
+        time.sleep(0.06)
+        return "late-user"
+
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        credential_provider=provider,
+        auth_timeout=0.01,
+        timeout=1.0,
+    )
+    with pytest.raises(SessionError):
+        session.open(None, initial_timeout=0.5)
+    assert serial.writes == []
+
+
+def test_operator_confirmation_time_is_not_query_execution_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    port = _port()
+    auth = _auth(port=port)
+    target = get_target("2960x")
+    gate = lab_cli._OperatorGate(auth, target, [0])
+    serial = FakeTerminalSerial(initial="R1>\n")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=gate,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        timeout=1.0,
+    )
+    session.open(None, initial_timeout=0.2)
+    gate.session = session
+    try:
+        def slow_confirm(*_args: Any, **_kwargs: Any) -> bool:
+            time.sleep(0.05)
+            return True
+
+        monkeypatch.setattr(lab_cli, "_confirm", slow_confirm)
+        result = session.query_result(ConsoleQuery.VERSION)
+        assert result.status is QueryStatus.OK
+        assert result.duration_seconds < 0.04
+    finally:
+        session.close()
+
+
 def test_enable_credentials_are_requested_only_at_enable_prompt() -> None:
     class EnableSerial(FakeSerial):
         def write(self, data: bytes) -> int:
@@ -999,8 +1062,12 @@ def test_run_experiment_happy_path_is_wired_without_hardware(
             query_hook: Any,
             lab_provenance: LabProvenance,
             deadline_seconds: float,
+            partial_evidence_callback: Any = None,
         ) -> ConsoleEvidence:
-            _ = (expected_pid, expected_release, query_hook, deadline_seconds)
+            _ = (
+                expected_pid, expected_release, query_hook, deadline_seconds,
+                partial_evidence_callback,
+            )
             target = get_target("2960x")
             session.set_profile(target.profile)
             results = tuple(
@@ -1052,6 +1119,79 @@ def test_run_experiment_happy_path_is_wired_without_hardware(
     assert payload["evidence"]["source"] == "AUTHORIZED_LIVE_LAB"
     assert len(payload["queries"]) == len(get_target("2960x").allowed_queries)
     assert verify_report_fingerprint(payload) is True
+
+
+def test_run_experiment_retains_identity_conflict_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.console.observation import IdentityConflict
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    class ConflictSerial(FakeSerial):
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            if data == b"enable\r":
+                self.buffer += "R1#\n"
+            return len(data)
+
+    port = _port()
+    discovery = _discovery(port)
+    serial = ConflictSerial(initial="R1>\n")
+
+    class ConflictAdapter:
+        def observe(
+            self,
+            session: ConsoleSession,
+            *,
+            expected_pid: str,
+            expected_release: str,
+            query_hook: Any,
+            lab_provenance: LabProvenance,
+            deadline_seconds: float,
+            partial_evidence_callback: Any = None,
+        ) -> ConsoleEvidence:
+            _ = (expected_pid, expected_release, query_hook, deadline_seconds)
+            observation = ConsoleObservation(
+                source=ConsoleSource.AUTHORIZED_LIVE_LAB,
+                session_identity="lab-conflict",
+                exact_pid="WS-C2960X-24TS-L",
+                software_version="15.2(7)E10",
+                serial_number="CONFLICT-SERIAL",
+                completeness=ObservationCompleteness.PARTIAL,
+                unknown_fields=("identity-conflict-expected-pid",),
+            )
+            if partial_evidence_callback is not None:
+                partial_evidence_callback(observation, ())
+            raise IdentityConflict("expected identity conflict")
+
+    metadata = LabBuildMetadata("a" * 40, "b" * 64, "test", True, True)
+    monkeypatch.setattr(LabBuildMetadata, "load", classmethod(lambda _cls: metadata))
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", lambda: discovery)
+    monkeypatch.setattr(lab_cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(lab_cli, "CiscoObservationAdapter", ConflictAdapter)
+    monkeypatch.setattr(
+        lab_cli,
+        "AuthorizedSerialTransport",
+        lambda auth, parameters=None: AuthorizedSerialTransport(
+            auth,
+            discovery=lambda: discovery,
+            serial_factory=lambda _port, _params: serial,
+        ),
+    )
+    exit_code = lab_cli.run_experiment(argparse.Namespace(
+        target="2960x",
+        com="COM3",
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path),
+    ))
+    assert exit_code != 0
+    report = next(tmp_path.glob("experiment-*/console-lab-report.json"))
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["outcome"]["experiment_verdict"] == "FAILED_OR_CANCELLED"
+    assert payload["evidence"]["source"] == "AUTHORIZED_LIVE_LAB"
+    assert payload["evidence"]["lab_provenance_digest"] is not None
+    assert "CONFLICT-SERIAL" not in report.read_text(encoding="utf-8")
 
 
 def test_run_experiment_records_open_failure_truthfully(
@@ -1128,8 +1268,12 @@ def test_late_data_during_final_review_cannot_be_success(
             query_hook: Any,
             lab_provenance: LabProvenance,
             deadline_seconds: float,
+            partial_evidence_callback: Any = None,
         ) -> ConsoleEvidence:
-            _ = (expected_pid, expected_release, query_hook, deadline_seconds)
+            _ = (
+                expected_pid, expected_release, query_hook, deadline_seconds,
+                partial_evidence_callback,
+            )
             session.set_profile(target.profile)
             results = tuple(session.query_result(q) for q in target.allowed_queries)
             observation = ConsoleObservation(
@@ -1229,11 +1373,20 @@ def test_lab_adapter_expected_identity_mismatch_stops_before_optional_queries() 
                 output="",
             )
 
+    captured: list[tuple[Any, Any]] = []
     fake = FakeLabSession()
     with pytest.raises(Exception, match="authorized target"):
         CiscoObservationAdapter().observe(
             fake,  # type: ignore[arg-type]
             expected_pid="C1000-16T-2G-L",
             expected_release="15.2(7)E2",
+            partial_evidence_callback=lambda observation, results: captured.append(
+                (observation, results),
+            ),
         )
     assert ConsoleQuery.INTERFACES not in fake.queries
+    assert len(captured) == 1
+    partial_observation, partial_results = captured[0]
+    assert partial_observation.exact_pid == "WS-C2960X-24TS-L"
+    assert partial_observation.completeness is ObservationCompleteness.PARTIAL
+    assert len(partial_results) == 2

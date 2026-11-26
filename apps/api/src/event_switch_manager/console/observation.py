@@ -612,6 +612,9 @@ class CiscoObservationAdapter:
         expected_release: str | None = None,
         query_hook: Callable[[ConsoleQuery, ConsoleQueryResult], None] | None = None,
         lab_provenance: LabProvenance | None = None,
+        partial_evidence_callback: (
+            Callable[[ConsoleObservation, tuple[ConsoleQueryResult, ...]], None] | None
+        ) = None,
     ) -> ConsoleEvidence:
         session.start_discovery(
             deadline_seconds=deadline_seconds,
@@ -624,6 +627,7 @@ class CiscoObservationAdapter:
                 expected_release=expected_release,
                 query_hook=query_hook,
                 lab_provenance=lab_provenance,
+                partial_evidence_callback=partial_evidence_callback,
             )
         finally:
             session.end_discovery()
@@ -636,6 +640,9 @@ class CiscoObservationAdapter:
         expected_release: str | None = None,
         query_hook: Callable[[ConsoleQuery, ConsoleQueryResult], None] | None = None,
         lab_provenance: LabProvenance | None = None,
+        partial_evidence_callback: (
+            Callable[[ConsoleObservation, tuple[ConsoleQueryResult, ...]], None] | None
+        ) = None,
     ) -> ConsoleEvidence:
         results: list[ConsoleQueryResult] = []
         bootstrap_commands = {
@@ -680,29 +687,54 @@ class CiscoObservationAdapter:
         inventory_pids = {
             item.pid.upper() for item in inventory_members if item.pid is not None
         }
-        if len(inventory_pids) > 1:
-            raise IdentityConflict("multiple chassis PIDs in inventory")
         inventory_pid = next(iter(inventory_pids), None)
         exact_pid = inventory_pid or version_model
-        if (
-            version_model is not None
-            and inventory_pid is not None
-            and version_model.upper() != inventory_pid.upper()
-        ):
-            raise IdentityConflict("console identity fields conflict")
         version_serial = _first(_SERIAL, version_output)
         inventory_serials = {
             item.serial_number.casefold()
             for item in inventory_members if item.serial_number is not None
         }
+        family = _family(exact_pid)
+        software_version = _first(_VERSION, version_output)
+        partial_serial = (
+            inventory_members[0].serial_number
+            if len(inventory_members) == 1 else version_serial
+        )
+
+        def retain_partial(reason: str) -> None:
+            if partial_evidence_callback is None:
+                return
+            observation = ConsoleObservation(
+                source=session.source,
+                session_identity=session.session_identity,
+                port_identity=session.port_identity,
+                family=family,
+                hardware_model=exact_pid,
+                exact_pid=exact_pid,
+                serial_number=partial_serial,
+                software_version=software_version,
+                unknown_fields=(reason,),
+                completeness=ObservationCompleteness.PARTIAL,
+            )
+            partial_evidence_callback(observation, tuple(results))
+
+        if len(inventory_pids) > 1:
+            retain_partial("identity-conflict-multiple-pids")
+            raise IdentityConflict("multiple chassis PIDs in inventory")
+        if (
+            version_model is not None
+            and inventory_pid is not None
+            and version_model.upper() != inventory_pid.upper()
+        ):
+            retain_partial("identity-conflict-fields")
+            raise IdentityConflict("console identity fields conflict")
         if (
             version_serial is not None
             and inventory_serials
             and version_serial.casefold() not in inventory_serials
         ):
+            retain_partial("identity-conflict-serials")
             raise IdentityConflict("version and inventory serials conflict")
-        family = _family(exact_pid)
-        software_version = _first(_VERSION, version_output)
         profile = None
         if exact_pid is not None and software_version is not None:
             try:
@@ -714,11 +746,13 @@ class CiscoObservationAdapter:
         if expected_pid is not None and (
             exact_pid is None or exact_pid.upper() != expected_pid.upper()
         ):
+            retain_partial("identity-conflict-expected-pid")
             raise IdentityConflict("observed PID does not match the authorized target")
         if expected_release is not None and (
             software_version is None
             or software_version.casefold() != expected_release.casefold()
         ):
+            retain_partial("identity-conflict-expected-release")
             raise IdentityConflict("observed release does not match the authorized target")
         unknown: list[str] = []
         serial = None

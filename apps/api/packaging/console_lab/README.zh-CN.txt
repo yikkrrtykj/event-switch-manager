@@ -100,6 +100,17 @@ C1000 不执行 show license 或 native Stack 查询。
 任意未审核命令、generic CLI、configure terminal、terminal length、copy、write、
 erase、reload、delete、format、show running-config、show startup-config 都禁止。
 
+5. 时间预算（R87）
+------------------
+- 初始 passive prompt：10 秒（避免把静默误认为已登录）。
+- 认证/Enable：30 秒总预算（不是每个 prompt 单独 30 秒）。
+- 普通/大页查询 IO：60 秒；分页仍受 parser 页数和累计字节上限。
+- 操作者单次确认/凭据输入：最长 120 秒；超时即中止，不会继续发送。
+- 授权总有效期：默认 20 分钟，最多 30 分钟；所有读/发送还受授权 deadline 限制。
+- 实时串口读按 50–100ms 轮询，禁止一次 blocking read 吃掉整个 query deadline。
+- 9600 baud 下这些值用于现场首次实验，并非真实协议完成性的证明。
+- 人工阅读/确认时间不计入查询执行时间；但整体仍受授权 deadline 限制。
+
 6. 输出
 --------
 输出目录默认 console-lab-output；每次实验自动创建独立子目录

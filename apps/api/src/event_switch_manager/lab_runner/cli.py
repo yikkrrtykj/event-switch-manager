@@ -9,6 +9,7 @@ import json
 import queue
 import sys
 import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from event_switch_manager.console.models import (
     ConsoleEvidence,
     LabProvenance,
     ObservationCompleteness,
+    build_evidence,
     compute_evidence_fingerprint,
 )
 from event_switch_manager.console.observation import CiscoObservationAdapter, IdentityConflict
@@ -217,6 +219,7 @@ class _OperatorGate:
         self.authorization = authorization
         self.target = target
         self.counter = counter
+        self.session: ConsoleSession | None = None
 
     def authorize_open(self, transport: object) -> None:
         self.authorization.authorize_open(transport)
@@ -224,10 +227,14 @@ class _OperatorGate:
     def authorize_query(self, query: ConsoleQuery) -> None:
         self.authorization.authorize_query(query)
         self.authorization.check_active()
+        started = time.monotonic()
         if not _confirm(
             f"确认执行授权只读查询 {query.value}？输入 y 继续: ",
         ):
             raise ConsoleOperatorAbort("operator did not confirm query start")
+        operator_elapsed = time.monotonic() - started
+        if self.session is not None:
+            self.session.extend_discovery_budget(operator_elapsed)
         self.authorization.check_active()
         self.counter[0] += 1
 
@@ -447,6 +454,7 @@ def run_experiment(args: argparse.Namespace) -> int:
         timeout=60.0,
         max_total_response_bytes=512 * 1024,
     )
+    gate.session = session
     evidence: ConsoleEvidence | None = None
     connection_state = "NOT_ATTEMPTED"
     cleanup_status = "NOT_ATTEMPTED"
@@ -494,6 +502,20 @@ def run_experiment(args: argparse.Namespace) -> int:
         )
         adapter = CiscoObservationAdapter()
         remaining = authorization.remaining_seconds() or 0.0
+        partial_evidence: list[ConsoleEvidence] = []
+
+        def retain_partial(
+            observation: Any,
+            results: tuple[Any, ...],
+        ) -> None:
+            partial_evidence.append(
+                build_evidence(
+                    observation,
+                    tuple(results),
+                    lab_provenance=base_provenance,
+                ),
+            )
+
         evidence = adapter.observe(
             session,
             expected_pid=target.expected_pid,
@@ -501,6 +523,7 @@ def run_experiment(args: argparse.Namespace) -> int:
             query_hook=_operator_query_hook(session),
             lab_provenance=base_provenance,
             deadline_seconds=min(290.0, max(10.0, remaining - 1.0)),
+            partial_evidence_callback=retain_partial,
         )
         if evidence.completeness is ObservationCompleteness.COMPLETE:
             print("程序完成解析；该结果仍不是硬件认证。")
@@ -523,6 +546,8 @@ def run_experiment(args: argparse.Namespace) -> int:
     except IdentityConflict as exc:
         error = f"identity: {exc}"
         exit_code = EXIT_IDENTITY
+        if partial_evidence:
+            evidence = partial_evidence[0]
     except ConsoleOperatorAbort as exc:
         error = f"operator: {exc}"
         cancelled = True

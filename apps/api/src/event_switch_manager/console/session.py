@@ -338,6 +338,11 @@ class ConsoleSession:
             self._discovery_deadline = time.monotonic() + deadline_seconds
             self._cancel_discovery_event = cancel_event or threading.Event()
 
+    def extend_discovery_budget(self, seconds: float) -> None:
+        """Exclude operator-only wait from the observation I/O deadline."""
+        if seconds > 0 and self._discovery_deadline is not None:
+            self._discovery_deadline += seconds
+
     def end_discovery(self) -> None:
         with self._state_lock:
             self._discovery_deadline = None
@@ -517,6 +522,8 @@ class ConsoleSession:
             self._state = SessionState.AUTHENTICATING
             if read.auth is AuthPromptKind.USERNAME:
                 value = self._credential_value(credentials, AuthPromptKind.USERNAME)
+                if time.monotonic() >= auth_deadline:
+                    raise AuthenticationError("console authentication budget expired")
                 self._send(value + "\r", ConsoleSendOperation.USERNAME)
             elif read.auth is AuthPromptKind.ENABLE_PASSWORD:
                 raise AuthenticationError("unexpected enable prompt during login")
@@ -525,6 +532,8 @@ class ConsoleSession:
                 if attempts > 2:
                     raise AuthenticationError("console authentication failed")
                 value = self._credential_value(credentials, AuthPromptKind.PASSWORD)
+                if time.monotonic() >= auth_deadline:
+                    raise AuthenticationError("console authentication budget expired")
                 self._send(value + "\r", ConsoleSendOperation.PASSWORD)
             remaining = auth_deadline - time.monotonic()
             if remaining <= 0:
@@ -586,6 +595,8 @@ class ConsoleSession:
                 None, AuthPromptKind.ENABLE_PASSWORD,
             )
             validate_console_input("enable password", value)
+            if time.monotonic() >= deadline:
+                raise EnableError("enable authentication budget expired")
             self._send(value + "\r", ConsoleSendOperation.ENABLE_PASSWORD)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -682,11 +693,13 @@ class ConsoleSession:
         self._state = SessionState.QUERYING
         self._parser.reset()
         self._active_query = query
-        started = time.monotonic()
         try:
             if self._lab_gate is not None:
                 self._lab_gate.authorize_query(query)
             self._check_discovery_budget()
+            # Operator reading/confirmation time is not part of the device
+            # command timing or the observation I/O budget.
+            started = time.monotonic()
             self._send(spec.command + "\r", ConsoleSendOperation.QUERY, query=query)
             read = self._read_for_prompt(allow_pagination=True)
             if read.auth is not None:
