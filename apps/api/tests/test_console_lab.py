@@ -1442,6 +1442,93 @@ def test_run_experiment_retains_identity_conflict_evidence(
     assert "CONFLICT-SERIAL" not in report.read_text(encoding="utf-8")
 
 
+def test_run_experiment_bluetooth_manual_binding_happy_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    class IntegrationSerial(FakeSerial):
+        def __init__(self) -> None:
+            super().__init__(initial="R1>\n")
+            self.privileged = False
+
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            if data == b"enable\r":
+                self.privileged = True
+                self.buffer += "R1#\n"
+            elif data and data != b"\r":
+                prompt = "R1#\n" if self.privileged else "R1>\n"
+                self.buffer += data.decode("ascii", errors="replace") + f"\r\n{prompt}"
+            return len(data)
+
+    discovery = _bluetooth_discovery()
+    port = discovery.ports[0]
+    serial = IntegrationSerial()
+    target = get_target("2960x")
+
+    class FakeAdapter:
+        def observe(
+            self,
+            session: ConsoleSession,
+            *,
+            expected_pid: str,
+            expected_release: str,
+            query_hook: Any,
+            lab_provenance: LabProvenance,
+            deadline_seconds: float,
+            partial_evidence_callback: Any = None,
+        ) -> ConsoleEvidence:
+            _ = (
+                expected_pid, expected_release, query_hook, deadline_seconds,
+                partial_evidence_callback,
+            )
+            session.set_profile(target.profile)
+            results = tuple(session.query_result(q) for q in target.allowed_queries)
+            observation = ConsoleObservation(
+                source=ConsoleSource.AUTHORIZED_LIVE_LAB,
+                session_identity="lab-bt",
+                exact_pid=target.expected_pid,
+                software_version=target.expected_release,
+                completeness=ObservationCompleteness.COMPLETE,
+            )
+            return build_evidence(
+                observation, results, lab_provenance=lab_provenance,
+            )
+
+    metadata = LabBuildMetadata("a" * 40, "b" * 64, "test", True, True)
+    monkeypatch.setattr(LabBuildMetadata, "load", classmethod(lambda _cls: metadata))
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", lambda: discovery)
+    monkeypatch.setattr(lab_cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(lab_cli, "CiscoObservationAdapter", FakeAdapter)
+    monkeypatch.setattr(
+        lab_cli,
+        "AuthorizedSerialTransport",
+        lambda auth, parameters=None: AuthorizedSerialTransport(
+            auth,
+            discovery=lambda: discovery,
+            serial_factory=lambda _port, _params: serial,
+        ),
+    )
+    exit_code = lab_cli.run_experiment(argparse.Namespace(
+        target="2960x",
+        com=port.port,
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path),
+        manual_bluetooth_binding=True,
+        bluetooth_direction="outgoing",
+    ))
+    assert exit_code == 0
+    report = next(tmp_path.glob("experiment-*/console-lab-report.json"))
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["discovery"]["transport_kind"] == "bluetooth-spp"
+    assert payload["discovery"]["binding_mode"] == "manual-bluetooth"
+    assert payload["discovery"]["identity_confidence"] == "manual-bound"
+    assert payload["outcome"]["experiment_verdict"] == "READONLY_QUERIES_COMPLETED"
+    assert payload["evidence"]["source"] == "AUTHORIZED_LIVE_LAB"
+
+
 def test_run_experiment_records_open_failure_truthfully(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
