@@ -59,6 +59,13 @@ CONSOLE_RELEASE_EXTRAS: dict[str, tuple[str, ...]] = {
     "WS-C2960X-24TS-L": ("15.2(7)E10",),
     "C1000-16T-2G-L": ("15.2(7)E2",),
 }
+# These exact PIDs were reviewed only at the listed release in R85.  They must
+# not inherit another release's console scope merely because the family is the
+# same; resolve_profile rejects the other releases.
+CONSOLE_EXACT_RELEASES: dict[str, tuple[str, ...]] = {
+    "WS-C2960X-24TS-L": ("15.2(7)E10",),
+    "C1000-16T-2G-L": ("15.2(7)E2",),
+}
 CONSOLE_INTERFACE_RELEASES = {
     DeviceFamily.CATALYST_2960X: ("15.2(7)E", "15.2(7)E7", "15.2(7)E10"),
     DeviceFamily.CATALYST_C1000: ("15.2(7)E1", "15.2(7)E2"),
@@ -201,8 +208,15 @@ def resolve_profile(exact_pid: str, release: str) -> ConsoleProfile:
     profile = _PROFILE_PIDS.get(canonical_pid)
     if profile is None:
         raise ProfileNotVerified("exact PID is not registered")
-    inventory = RELEASES[profile.family]
-    candidates = tuple(inventory.releases) + CONSOLE_RELEASE_EXTRAS.get(canonical_pid, ())
+    exact = CONSOLE_EXACT_RELEASES.get(canonical_pid)
+    if exact is not None:
+        candidates = exact
+    else:
+        inventory = RELEASES[profile.family]
+        candidates = (
+            tuple(inventory.releases)
+            + CONSOLE_RELEASE_EXTRAS.get(canonical_pid, ())
+        )
     wanted = release.strip().casefold()
     canonical = next(
         (version for version in candidates if version.casefold() == wanted),
@@ -240,11 +254,24 @@ def _release_in_scope(profile: ConsoleProfile, query: ConsoleQuery) -> bool:
     return False
 
 
+def validate_profile(profile: ConsoleProfile) -> ConsoleProfile:
+    """Re-resolve an externally constructed exact profile and fail closed."""
+    if not isinstance(profile, ConsoleProfile):
+        raise ProfileNotVerified("exact console profile is required")
+    canonical = resolve_profile(profile.exact_pid, profile.release)
+    if canonical.family is not profile.family:
+        raise ProfileNotVerified("console profile family does not match PID")
+    if canonical != profile:
+        raise ProfileNotVerified("console profile is not canonical")
+    return canonical
+
+
 def resolve_query_for_profile(
     profile: ConsoleProfile, query: ConsoleQuery,
 ) -> QuerySpec:
     if not isinstance(query, ConsoleQuery):
         raise QueryNotAllowed("query must be a ConsoleQuery")
+    profile = validate_profile(profile)
     spec = QUERY_SPECS[profile.family].get(query)
     if spec is None:
         raise QueryNotSupported(
@@ -310,4 +337,5 @@ __all__ = [
     "supported_queries",
     "supported_queries_for_profile",
     "validate_family",
+    "validate_profile",
 ]

@@ -140,8 +140,13 @@ def test_2960x_recorded_fixture_parses_license_boot_storage_and_interfaces() -> 
         entry for entry in observation.storage_entries
         if entry.file_type == "flash"
     )
-    assert flash_entry.prefixes == ("flash:", "flash1:", "flash2:")
-    assert observation.storage == ("flash:", "nvram:", "system:")
+    assert flash_entry.prefixes == ("flash:", "flash1:")
+    flash2 = next(
+        entry for entry in observation.storage_entries
+        if entry.prefixes == ("flash2:",)
+    )
+    assert flash2.total_bytes == 100000000
+    assert observation.storage == ("flash:", "nvram:", "system:", "flash2:")
     physical = [item for item in observation.interfaces if item.physical]
     copper = [item for item in physical if item.medium == "copper"]
     assert len(physical) == 56

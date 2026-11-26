@@ -6,6 +6,7 @@ import re
 import threading
 from dataclasses import dataclass
 
+from event_switch_manager.cisco_catalog import PROFILES
 from event_switch_manager.domain import DeviceFamily
 from event_switch_manager.integrations import ConsoleEngine, ConsoleQuery, SwitchObservation
 
@@ -24,6 +25,7 @@ from .models import (
     ConsoleInventoryMember,
     ConsoleObservation,
     ConsoleQueryResult,
+    ConsoleSource,
     ConsoleStackMember,
     ConsoleStorageEntry,
     LicenseFeature,
@@ -54,15 +56,17 @@ _LICENSE_LEVEL = re.compile(r"(?im)^License Level:\s*([^\n]+)")
 _LICENSE_BLOCK = re.compile(
     r"(?ims)^Index\s+\d+\s+Feature:\s*(\S+)(.*?)(?=^Index\s+\d+\s+Feature:|\Z)",
 )
-_LICENSE_TYPE = re.compile(r"(?im)^License Type:\s*([^\n]+)")
-_LICENSE_STATE = re.compile(r"(?im)^License State:\s*([^\n]+)")
-_LICENSE_LIFE = re.compile(r"(?im)^License (?:Life|Term)\s*:\s*([^\n]+)")
-_LICENSE_NEXT = re.compile(r"(?im)^Next reboot license level:\s*([^\n]+)")
+_LICENSE_TYPE = re.compile(r"(?im)^\s*License Type\s*:\s*([^\n]+)")
+_LICENSE_STATE = re.compile(r"(?im)^\s*License State\s*:\s*([^\n]+)")
+_LICENSE_LIFE = re.compile(r"(?im)^\s*License (?:Life|Term)\s*:\s*([^\n]+)")
+_LICENSE_PERIOD = re.compile(r"(?im)^\s*Period left\s*:\s*([^\n]+)")
+_LICENSE_NEXT = re.compile(r"(?im)^\s*Next reboot license level\s*:\s*([^\n]+)")
 _BOOT = re.compile(r"(?im)^BOOT variable\s*=\s*([^;\n]+)")
 _BOOT_MEMBER = re.compile(r"(?im)^Switch\s+(\d+)\s*$")
 _BOOT_FIELD = re.compile(
-    r"(?im)^(BOOT variable|CONFIG_FILE variable|PRIVATE_CONFIG_FILE variable|"
-    r"Manual Boot|Enable Break)\s*=\s*([^\n]*)",
+    r"(?im)^\s*(BOOT path-list|BOOT variable|Config file|CONFIG_FILE variable|"
+    r"Private Config file|PRIVATE_CONFIG_FILE variable|Manual Boot|Enable Break)"
+    r"\s*[:=]\s*([^\n]*)",
 )
 _INTERFACE = re.compile(
     r"^(?P<name>(?:Gi|Te|Twe|Fa|Et|Po|Vl|Lo|Nu)[A-Za-z0-9/.-]*)\s+(?P<rest>.*)$",
@@ -83,6 +87,7 @@ _STACK_REAL = re.compile(
 _STORAGE_PREFIX = re.compile(r"\b([A-Za-z][A-Za-z0-9_.-]*:)")
 _STORAGE_TYPES = frozenset({
     "flash", "nvram", "disk", "tftp", "ftp", "http", "https", "usbflash", "bsl",
+    "opaque", "network",
 })
 _LICENSE_NAMES = {
     "lanlite": "LAN Lite",
@@ -189,6 +194,17 @@ def _license_name(value: str | None) -> str | None:
     return value.strip()
 
 
+def _license_status_is_active(status: str | None) -> bool:
+    if not status:
+        return False
+    normalized = " ".join(status.casefold().split())
+    if "inactive" in normalized or "not in use" in normalized:
+        return False
+    if "active" in normalized:
+        return True
+    return normalized == "in use"
+
+
 def _license_info(version_output: str, license_output: str | None) -> LicenseObservation:
     declared = _license_name(_first(_LICENSE_LEVEL, version_output))
     features: list[LicenseFeature] = []
@@ -203,23 +219,16 @@ def _license_info(version_output: str, license_output: str | None) -> LicenseObs
                 license_type=_first(_LICENSE_TYPE, block),
                 status=_first(_LICENSE_STATE, block),
                 life_time=_first(_LICENSE_LIFE, block),
+                period_left=_first(_LICENSE_PERIOD, block),
                 next_boot=_license_name(_first(_LICENSE_NEXT, block)),
             ))
     active = tuple(
         feature.feature for feature in features
-        if feature.status is not None
-        and "active" in feature.status.casefold()
-        and "not in use" not in feature.status.casefold()
+        if _license_status_is_active(feature.status)
     )
-    # Some IOS transcripts mark the active entitlement with "In Use" only.
-    if not active:
-        active = tuple(
-            feature.feature for feature in features
-            if feature.status is not None and "in use" in feature.status.casefold()
-        )
-    observed = ", ".join(active) or (
-        ", ".join(feature.feature for feature in features) or None
-    )
+    # Do not treat every parsed feature as observed-active.  If no feature has
+    # an unambiguous active state, the active entitlement remains UNKNOWN.
+    observed = ", ".join(active) or None
     statuses = [
         feature.status for feature in features if feature.status is not None
     ]
@@ -232,7 +241,8 @@ def _license_info(version_output: str, license_output: str | None) -> LicenseObs
     )
     status = "; ".join(types + statuses) or None
     ambiguous = bool(
-        declared and observed and declared.casefold() not in observed.casefold()
+        (declared and observed and declared.casefold() not in observed.casefold())
+        or (declared and features and not active)
     )
     return LicenseObservation(
         declared=declared,
@@ -303,18 +313,44 @@ def _inventory_members(output: str) -> tuple[ConsoleInventoryMember, ...]:
     components = _inventory_components(output)
     modules: dict[int, _InventoryComponent] = {}
     chassis: list[tuple[int, _InventoryComponent]] = []
+    seen_members: set[int] = set()
+    seen_serials: set[str] = set()
+    seen_module_serials: set[str] = set()
     for component in components:
         lower = component.name.casefold()
         module_match = re.search(r"(?:switch|member)\s+(\d+).*module", lower)
         if module_match is None:
             module_match = re.search(r"module.*(?:switch|member)\s+(\d+)", lower)
         if module_match is not None:
-            modules[int(module_match.group(1))] = component
+            member = int(module_match.group(1))
+            if member in modules:
+                raise IdentityConflict("duplicate stack module member")
+            if (
+                component.serial is not None
+                and component.serial.casefold() in seen_module_serials
+            ):
+                raise IdentityConflict("duplicate stack module serial")
+            if component.serial is not None:
+                seen_module_serials.add(component.serial.casefold())
+            modules[member] = component
             continue
         if component.name.isdigit():
-            chassis.append((int(component.name), component))
+            member = int(component.name)
         elif lower == "chassis":
-            chassis.append((1, component))
+            member = 1
+        else:
+            continue
+        if member in seen_members:
+            raise IdentityConflict("duplicate inventory chassis member")
+        seen_members.add(member)
+        if (
+            component.serial is not None
+            and component.serial.casefold() in seen_serials
+        ):
+            raise IdentityConflict("duplicate inventory chassis serial")
+        if component.serial is not None:
+            seen_serials.add(component.serial.casefold())
+        chassis.append((member, component))
     result: list[ConsoleInventoryMember] = []
     for member, component in chassis:
         module = modules.get(member)
@@ -355,6 +391,7 @@ def _stack(
                 priority=int(real.group("priority")),
                 hardware_version=real.group("hardware"),
                 mac=real.group("mac"),
+                master_star=real.group("star") is not None,
                 module_pid=bound.module_pid if bound else None,
                 module_serial=bound.module_serial if bound else None,
             ))
@@ -368,6 +405,7 @@ def _stack(
                 role=old.group("role"),
                 state=old.group("state"),
                 software_version=old.group("version"),
+                master_star=old.group("role").casefold() in {"master", "active"},
             ))
             continue
         if re.match(r"^\*?\d+\s+", stripped):
@@ -381,6 +419,19 @@ def _stack(
         raise IdentityConflict("duplicate stack member number")
     if len(serials) != len(set(serials)):
         raise IdentityConflict("duplicate stack member serial")
+    if values:
+        masters = [
+            item for item in values
+            if (item.role or "").casefold() in {"master", "active"}
+        ]
+        if len(masters) != 1:
+            raise IdentityConflict("stack must have exactly one master")
+        numeric_inventory = {
+            item.member for item in inventory
+            if item.member is not None and item.name.isdigit()
+        }
+        if numeric_inventory and set(numbers) != numeric_inventory:
+            raise IdentityConflict("stack and inventory member sets differ")
     return tuple(values)
 
 
@@ -400,18 +451,31 @@ def _boot_info(output: str | None) -> tuple[ConsoleBootEntry, ...]:
         if field is None:
             continue
         key = field.group(1).strip()
-        values.setdefault(current_member, {})[key] = field.group(2).strip().rstrip(";")
+        value = field.group(2).strip().rstrip(";")
+        fields = values.setdefault(current_member, {})
+        if key in {"BOOT path-list", "BOOT variable"}:
+            fields["boot_path_list"] = value
+            fields["boot_variable"] = value
+        elif key in {"Config file", "CONFIG_FILE variable"}:
+            fields["config_file"] = value
+        elif key in {"Private Config file", "PRIVATE_CONFIG_FILE variable"}:
+            fields["private_config_file"] = value
+        elif key == "Manual Boot":
+            fields["manual_boot"] = value
+        elif key == "Enable Break":
+            fields["enable_break"] = value
     result: list[ConsoleBootEntry] = []
     for member, fields in values.items():
         if not fields:
             continue
         result.append(ConsoleBootEntry(
             member=member,
-            boot_variable=fields.get("BOOT variable"),
-            config_file=fields.get("CONFIG_FILE variable"),
-            private_config_file=fields.get("PRIVATE_CONFIG_FILE variable"),
-            manual_boot=fields.get("Manual Boot"),
-            enable_break=fields.get("Enable Break"),
+            boot_path_list=fields.get("boot_path_list"),
+            boot_variable=fields.get("boot_variable"),
+            config_file=fields.get("config_file"),
+            private_config_file=fields.get("private_config_file"),
+            manual_boot=fields.get("manual_boot"),
+            enable_break=fields.get("enable_break"),
         ))
     return tuple(result)
 
@@ -439,7 +503,7 @@ def _storage_entries(output: str | None) -> tuple[ConsoleStorageEntry, ...]:
             (token for token in tokens if token in _STORAGE_TYPES), None,
         )
         flags = next(
-            (token for token in tokens if token in {"rw", "ro"}), None,
+            (token for token in tokens if token in {"rw", "ro", "wo"}), None,
         )
         result.append(ConsoleStorageEntry(
             total_bytes=int(numbers[0]) if numbers else None,
@@ -448,6 +512,22 @@ def _storage_entries(output: str | None) -> tuple[ConsoleStorageEntry, ...]:
             flags=flags,
             prefixes=prefixes,
         ))
+    owners: dict[str, int] = {}
+    conflicts: set[int] = set()
+    for index, entry in enumerate(result):
+        for prefix in entry.prefixes:
+            previous = owners.get(prefix)
+            if previous is not None and previous != index:
+                conflicts.add(previous)
+                conflicts.add(index)
+            else:
+                owners[prefix] = index
+    if conflicts:
+        result = [
+            entry.model_copy(update={"alias_conflict": True})
+            if index in conflicts else entry
+            for index, entry in enumerate(result)
+        ]
     return tuple(result)
 
 
@@ -572,15 +652,14 @@ class CiscoObservationAdapter:
         ):
             raise IdentityConflict("console identity fields conflict")
         version_serial = _first(_SERIAL, version_output)
-        primary_member = next(
-            (item for item in inventory_members if item.member == 1),
-            inventory_members[0] if inventory_members else None,
-        )
-        inventory_serial = primary_member.serial_number if primary_member else None
+        inventory_serials = {
+            item.serial_number.casefold()
+            for item in inventory_members if item.serial_number is not None
+        }
         if (
             version_serial is not None
-            and inventory_serial is not None
-            and version_serial.casefold() != inventory_serial.casefold()
+            and inventory_serials
+            and version_serial.casefold() not in inventory_serials
         ):
             raise IdentityConflict("version and inventory serials conflict")
         family = _family(exact_pid)
@@ -594,7 +673,11 @@ class CiscoObservationAdapter:
         if profile is not None:
             session.set_profile(profile)
         unknown: list[str] = []
-        serial = inventory_serial or version_serial
+        serial = None
+        if len(inventory_members) == 1:
+            serial = inventory_members[0].serial_number
+        if len(inventory_members) == 1 and serial is None:
+            serial = version_serial
         if not inventory_members:
             unknown.append("inventory-chassis-missing")
         if version_model is None:
@@ -603,8 +686,6 @@ class CiscoObservationAdapter:
             unknown.append("version-model-missing")
         if exact_pid is None:
             unknown.append("exact-pid")
-        if serial is None:
-            unknown.append("serial")
         if software_version is None:
             unknown.append("software-version")
         if family is None:
@@ -662,17 +743,48 @@ class CiscoObservationAdapter:
             unknown.append("license-declared-observed-mismatch")
         interfaces = _interfaces(interfaces_output)
         stack = _stack(stack_output, inventory_members)
+        if stack:
+            master = next(
+                (member for member in stack
+                 if (member.role or "").casefold() in {"master", "active"}),
+                None,
+            )
+            serial = master.serial_number if master else None
+            if serial is None:
+                unknown.append("master-serial")
+        if serial is None:
+            unknown.append("serial")
         boot_entries = _boot_info(boot_output)
         boot_state = next(
-            (entry.boot_variable for entry in boot_entries if entry.boot_variable),
+            (
+                entry.boot_path_list or entry.boot_variable
+                for entry in boot_entries
+                if entry.boot_path_list or entry.boot_variable
+            ),
             _first(_BOOT, boot_output or ""),
         )
         storage_entries = _storage_entries(storage_output)
         storage = _storage_from_entries(storage_entries)
+        if any(entry.alias_conflict for entry in storage_entries):
+            unknown.append("storage-alias-conflict")
         if profile is not None:
             supported = set(supported_queries_for_profile(profile))
             if ConsoleQuery.INTERFACES in supported and not interfaces:
                 unknown.append("interfaces")
+            if (
+                session.source is ConsoleSource.RECORDED_FIXTURE
+                and profile.exact_pid in PROFILES
+                and interfaces
+            ):
+                physical_observed = sum(1 for item in interfaces if item.physical)
+                expected = sum(
+                    group.count for group in PROFILES[profile.exact_pid].ports
+                ) * (len(stack) if stack else 1)
+                if 0 < physical_observed < expected:
+                    # Observed rows are real observations; the hardware profile
+                    # describes expected capacity, which must not be fabricated
+                    # into observed interfaces.
+                    unknown.append("interfaces-partial")
             if ConsoleQuery.STACK in supported and not stack:
                 unknown.append("stack")
             if ConsoleQuery.BOOT in supported and not boot_entries:
@@ -685,6 +797,11 @@ class CiscoObservationAdapter:
                 (member.state or "").casefold() != "ready" for member in stack
             ):
                 unknown.append("stack-member-not-ready")
+            if stack and any(
+                member.exact_pid is None or member.serial_number is None
+                for member in stack
+            ):
+                unknown.append("stack-member-identity-missing")
             if (
                 len(inventory_members) > 1
                 and all(item.name.isdigit() for item in inventory_members)

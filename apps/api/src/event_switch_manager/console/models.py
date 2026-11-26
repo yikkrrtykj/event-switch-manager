@@ -58,6 +58,7 @@ class LicenseFeature(Record):
     license_type: str | None = None
     status: str | None = None
     life_time: str | None = None
+    period_left: str | None = None
     next_boot: str | None = None
 
 
@@ -111,12 +112,14 @@ class ConsoleStackMember(Record):
     priority: int | None = None
     hardware_version: str | None = None
     mac: str | None = None
+    master_star: bool = False
     module_pid: str | None = None
     module_serial: str | None = None
 
 
 class ConsoleBootEntry(Record):
     member: int | None = None
+    boot_path_list: str | None = None
     boot_variable: str | None = None
     config_file: str | None = None
     private_config_file: str | None = None
@@ -130,6 +133,7 @@ class ConsoleStorageEntry(Record):
     file_type: str | None = None
     flags: str | None = None
     prefixes: tuple[str, ...] = ()
+    alias_conflict: bool = False
 
     @property
     def primary_prefix(self) -> str | None:

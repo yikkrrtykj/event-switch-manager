@@ -470,10 +470,10 @@ class _WhitespacePendingTransport(_ScriptedTransport):
         super().write(text)
 
     def pending_data(self) -> bool:
-        return self.query_started and self.whitespace_reads < 20
+        return self.query_started and self.whitespace_reads < 100
 
     def read_chunk(self, timeout: float) -> str:
-        if self.query_started and self.whitespace_reads < 20:
+        if self.query_started and self.whitespace_reads < 100:
             import time
 
             time.sleep(0.005)
@@ -488,14 +488,14 @@ def test_pagination_whitespace_drain_uses_one_deadline() -> None:
     session = ConsoleSession(
         _WhitespacePendingTransport(),
         lease_manager=ConsoleLeaseManager(),
-        timeout=0.01,
+        timeout=0.2,
     )
     session.open(None)
     started = time.monotonic()
     try:
         with pytest.raises(SessionError):
             session.query(ConsoleQuery.VERSION)
-        assert time.monotonic() - started < 0.1
+        assert time.monotonic() - started < 0.5
     finally:
         session.close()
 

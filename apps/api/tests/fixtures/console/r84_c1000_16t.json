@@ -2,6 +2,8 @@
   "fixture_id": "r84-c1000-16t-e2",
   "source": "RECORDED_FIXTURE",
   "sanitization": "Synthetic hostnames, MAC addresses, serial numbers and file names. No production VLAN or credential data retained.",
+  "provenance": "SYNTHETIC_RECONSTRUCTED",
+  "provenance_note": "Not a raw device transcript; preserved synthetic coverage only.",
   "profile": {
     "hostname": "sanitized-c1000",
     "model": "C1000-16T-2G-L",

@@ -1,0 +1,49 @@
+{
+  "fixture_id": "r85-2960x-manual-sanitized-excerpt",
+  "source": "RECORDED_FIXTURE",
+  "provenance": {
+    "kind": "MANUAL_TRANSCRIPT_SANITIZED",
+    "not_single_live_session": true,
+    "actual_fields": [
+      "VERSION release/image/bootldr/running-image excerpt",
+      "INVENTORY member and FlexStackPlus module rows",
+      "STACK Master/Member rows with MAC, priority, H/W version and state",
+      "LICENSE lanlite/lanbase feature blocks",
+      "BOOT first unlabelled section and Switch 2 section",
+      "STORAGE flash/flash1 and separate flash2 rows",
+      "INTERFACES first eleven observed Gi1/0 entries"
+    ],
+    "synthetic_fields": [
+      "interface status words and spacing for the eleven Gi1/0 rows; the supplied transcript describes the observed partial list but not the raw status values",
+      "sanitized hostname"
+    ],
+    "sanitized_fields": [
+      "hostname", "MAC addresses", "chassis/module serial numbers", "physical interface labels are retained as reported"
+    ],
+    "missing_fields": [
+      "complete Version model line",
+      "Processor board ID",
+      "License Level",
+      "Configuration register",
+      "full stack interface enumeration"
+    ],
+    "different_collection_times": true,
+    "note": "This is a sanitized excerpt assembled from separate manual observations, not one complete live console session."
+  },
+  "profile": {
+    "hostname": "sanitized-2960x",
+    "model": "WS-C2960X-24TS-L",
+    "serial_number": "R84STACK01",
+    "software_version": "15.2(7)E10",
+    "family": "catalyst-2960x"
+  },
+  "responses": {
+    "VERSION": "Cisco IOS Software, C2960X Software (C2960X-UNIVERSALK9-M), Version 15.2(7)E10, RELEASE SOFTWARE (fc3)\nTechnical Support: http://www.cisco.com/techsupport\nCopyright (c) 1986-2024 by Cisco Systems, Inc.\nCompiled Tue 12-Mar-24 08:54 by mcpre\n\nROM: Bootstrap program is C2960X boot loader\nBOOTLDR: C2960X Boot Loader (C2960X-HBOOT-M) Version 15.2(6r)E, RELEASE SOFTWARE (fc1)\n\nSystem image file is \"flash:c2960x-universalk9-mz.152-7.E10.bin\"\nLast reload reason: power-on\n\nThis product contains cryptographic features and is subject to United\nStates and local country laws governing import, export, transfer and\nuse. Delivery of Cisco cryptographic products does not imply\nthird-party authority to import, export, distribute or use encryption.\nImporters, exporters, distributors and users are responsible for\n",
+    "INVENTORY": "NAME: \"1\", DESCR: \"WS-C2960X-24TS-L\"\nPID: WS-C2960X-24TS-L  , VID: V05  , SN: R84STACK01\n\nNAME: \"Switch 1 - FlexStackPlus Module\", DESCR: \"Stacking Module\"\nPID: C2960X-STACK      , VID: V02  , SN: R84MOD01\n\nNAME: \"2\", DESCR: \"WS-C2960X-24TS-L\"\nPID: WS-C2960X-24TS-L  , VID: V05  , SN: R84STACK02\n\nNAME: \"Switch 2 - FlexStackPlus Module\", DESCR: \"Stacking Module\"\nPID: C2960X-STACK      , VID: V02  , SN: R84MOD02\n",
+    "STACK": "Switch/Stack Mac Address : 0011.2233.4401\n                                           H/W   Current\nSwitch#  Role   Mac Address     Priority Version  State\n----------------------------------------------------------\n*1       Master 0011.2233.4401     15     4       Ready\n 2       Member 0011.2233.4402     11     4       Ready\n",
+    "LICENSE": "Index 1 Feature: lanlite\n        Period left: 0  minute  0  second\nIndex 2 Feature: lanbase\n        Period left: Life time\n        License Type: Permanent\n        License State: Active, In Use\n        License Priority: Medium\n        License Count: Non-Counted\n",
+    "BOOT": "BOOT path-list      : flash:c2960x-universalk9-mz.152-7.E10.bin\nConfig file         : flash:/config.text\nPrivate Config file : flash:/private-config.text\nEnable Break        : yes\nManual Boot         : no\nAllow Dev Key         : yes\nHELPER path-list    :\nAuto upgrade        : yes\nAuto upgrade path   :\nBoot optimization   : disabled\nNVRAM/Config file\n     buffer size:   524288\nTimeout for Config\n         Download:    0 seconds\nConfig Download\n      via DHCP:       disabled (next boot: disabled)\n\n-------------------\nSwitch 2\n-------------------\nBOOT path-list      : flash:c2960x-universalk9-mz.152-7.E10.bin\nConfig file         : flash:/config.text\nPrivate Config file : flash:/private-config.text\n",
+    "STORAGE": "File Systems:\n\n      Size(b)        Free(b)         Type  Flags  Prefixes\n            -             -        opaque     ro  bs:\n*    122185728      63155712         flash     rw  flash: flash1:\n            -             -        opaque     rw  system:\n            -             -        opaque     rw  tmpsys:\n            -             -        opaque     rw  null:\n            -             -        opaque     ro  tar:\n            -             -       network     rw  tftp:\n            -             -        opaque     ro  xmodem:\n            -             -        opaque     ro  ymodem:\n       524288        509420         nvram     rw  nvram:\n            -             -        opaque     wo  syslog:\n            -             -       network     rw  rcp:\n            -             -       network     rw  ftp:\n            -             -       network     rw  http:\n            -             -       network     rw  scp:\n            -             -       network     rw  sftp:\n            -             -       network     rw  https:\n            -             -        opaque     ro  cns:\n    122185728      53388800         flash     rw  flash2:\n",
+    "INTERFACES": "Port      Name               Status       Vlan       Duplex  Speed Type\nGi1/0/1                      connected    20         a-full  a-1000 10/100/1000BaseTX\nGi1/0/2                      notconnect   20         auto    auto   10/100/1000BaseTX\nGi1/0/3                      connected    20         a-full  a-1000 10/100/1000BaseTX\nGi1/0/4                      notconnect   20         auto    auto   10/100/1000BaseTX\nGi1/0/5                      connected    20         a-full  a-1000 10/100/1000BaseTX\nGi1/0/6                      notconnect   20         auto    auto   10/100/1000BaseTX\nGi1/0/7                      connected    20         a-full  a-1000 10/100/1000BaseTX\nGi1/0/8                      notconnect   20         auto    auto   10/100/1000BaseTX\nGi1/0/9                      connected    20         a-full  a-1000 10/100/1000BaseTX\nGi1/0/10                     notconnect   20         auto    auto   10/100/1000BaseTX\nGi1/0/11                     connected    20         a-full  a-1000 10/100/1000BaseTX\n"
+  }
+}
