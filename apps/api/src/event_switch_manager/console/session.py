@@ -20,6 +20,7 @@ from .allowlist import (
     resolve_query,
     resolve_query_for_profile,
     validate_family,
+    validate_profile,
 )
 from .lease import (
     OS_EXCLUSIVITY_STATUS,
@@ -293,6 +294,7 @@ class ConsoleSession:
     def set_profile(self, profile: ConsoleProfile) -> None:
         if not isinstance(profile, ConsoleProfile):
             raise ProfileNotVerified("exact console profile is required")
+        profile = validate_profile(profile)
         with self._state_lock:
             if self._profile is not None and self._profile != profile:
                 raise SessionStateError("console profile is already established")

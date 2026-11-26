@@ -577,3 +577,25 @@ def test_builder_rejects_blocked_candidate_text_injection(
         "review-bundle-l3-document-fingerprint-mismatch",
         "review-bundle-l3-blocked-text-present",
     }
+
+def test_r85_console_only_pid_review_bundle_is_blocked(
+    client: TestClient,
+) -> None:
+    event_id = _event(client, "R85 console-only review bundle")
+    plan = make_l3_plan(
+        event_id,
+        core_pid="C1000-16T-2G-L",
+        core_family="catalyst-c1000",
+        core_image="15.2(7)E2",
+        core_license=None,
+        static_route_count=1,
+    )
+    core = next(item for item in plan["assignments"] if item["hostname"] == "L3-Core")
+    revision = _save(client, event_id, plan)
+    response = client.get(
+        _base(event_id, revision["id"], core["id"]) + "/cisco-review-bundle",
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason_code"] == (
+        "review-bundle-platform-not-supported"
+    )

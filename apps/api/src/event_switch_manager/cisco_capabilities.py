@@ -12,6 +12,7 @@ from .cisco_catalog import (
     FEATURES,
     GUIDE_SCOPES,
     PROFILES,
+    R84_CONSOLE_ONLY_PIDS,
     RELEASES,
     CapabilityId,
     CiscoCapability,
@@ -398,6 +399,21 @@ def _resolve(
 
     hardware = cite(profile.hardware, "Documented chassis characteristics for the exact PID.")
     guides = GUIDE_SCOPES[profile.family]
+    if pid in R84_CONSOLE_ONLY_PIDS:
+        # R84 adds only a console read-only identity/query profile.  Production
+        # capability evidence, including production identity, is not reviewed.
+        return decide(
+            (
+                Support.UNKNOWN,
+                # Use the existing production reason code that the frozen L2
+                # identity gate already maps to an incomplete gate.  The
+                # console-only condition is recorded in the human reason.
+                "pid-unlisted",
+                "R84 reviewed a console read-only profile only; "
+                "production capability evidence is not reviewed.",
+            ),
+            (hardware,),
+        )
     if capability == CiscoCapability.IDENTITY:
         return decide((Support.SUPPORTED, "pid-documented", "The PID is listed."), (hardware,))
     if capability == CiscoCapability.STACK:

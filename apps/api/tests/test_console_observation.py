@@ -248,8 +248,9 @@ def test_multiple_license_features_preserve_declared_observed_and_next_boot() ->
     )
     assert info.declared == "Network Advantage"
     assert len(info.features) == 2
-    assert info.next_boot == "network-advantage"
-    assert info.observed == "Network Advantage, Dna Essentials"
+    assert info.next_boot == "Network Advantage"
+    assert info.observed == "Network Advantage, DNA Essentials"
+    assert info.active_features == ("Network Advantage", "DNA Essentials")
     assert info.ambiguous is False
     assert info.active_verified is False
 

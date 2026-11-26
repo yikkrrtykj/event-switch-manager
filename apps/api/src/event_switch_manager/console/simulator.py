@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from event_switch_manager.domain import DeviceFamily
@@ -255,6 +256,7 @@ class SimulatedConsoleTransport:
     disconnect_commands: frozenset[ConsoleQuery] = frozenset()
     error_commands: frozenset[ConsoleQuery] = frozenset()
     echo: bool = True
+    responses: Mapping[ConsoleQuery, str] | None = None
     _closed: bool = field(init=False, default=False)
     _queue: deque[str] = field(init=False, default_factory=deque)
     _data_available: threading.Event = field(init=False, default_factory=threading.Event)
@@ -399,7 +401,11 @@ class SimulatedConsoleTransport:
         if query in self.error_commands:
             self._enqueue("% Invalid input detected at '^' marker.\n" + prompt)
             return
-        output = self.profile.query_output(query)
+        output = (
+            self.responses[query]
+            if self.responses is not None and query in self.responses
+            else self.profile.query_output(query)
+        )
         if not self.pagination:
             output = output.replace("--More--\n", "").replace("--More--", "")
         if self.pagination and "--More--" in output:

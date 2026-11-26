@@ -29,7 +29,7 @@ from event_switch_manager.integrations import (
 from ..planning.types import Record
 
 CONSOLE_EVIDENCE_SCHEMA_VERSION: Literal[1] = 1
-CONSOLE_PARSER_VERSION: Literal["con-01-prompt-v1"] = "con-01-prompt-v1"
+CONSOLE_PARSER_VERSION: Literal["con-01-transcript-v2"] = "con-01-transcript-v2"
 
 
 class ConsoleSource(StrEnum):
@@ -57,6 +57,8 @@ class LicenseFeature(Record):
     feature: str
     license_type: str | None = None
     status: str | None = None
+    life_time: str | None = None
+    period_left: str | None = None
     next_boot: str | None = None
 
 
@@ -68,13 +70,36 @@ class LicenseObservation(Record):
     next_boot: str | None = None
     status: str | None = None
     features: tuple[LicenseFeature, ...] = ()
-    active_verified: Literal[False] = False
+    active_features: tuple[str, ...] = ()
     ambiguous: bool = False
+    active_verified: Literal[False] = False
 
 
 class ConsoleInterface(Record):
     name: str
     status: str | None = None
+    physical: bool = True
+    present: bool = True
+    member: int | None = None
+    port_index: int | None = None
+    medium: str | None = None
+
+
+class ConsoleInventoryMember(Record):
+    """One chassis or module row from ``show inventory``.
+
+    ``name`` preserves the device-provided label.  Numeric chassis names map
+    directly to stack member numbers; module rows stay distinct and must never
+    be treated as a chassis identity.
+    """
+
+    name: str
+    pid: str | None = None
+    serial_number: str | None = None
+    member: int | None = None
+    component: str = "chassis"
+    module_pid: str | None = None
+    module_serial: str | None = None
 
 
 class ConsoleStackMember(Record):
@@ -84,6 +109,35 @@ class ConsoleStackMember(Record):
     role: str | None = None
     state: str | None = None
     software_version: str | None = None
+    priority: int | None = None
+    hardware_version: str | None = None
+    mac: str | None = None
+    master_star: bool = False
+    module_pid: str | None = None
+    module_serial: str | None = None
+
+
+class ConsoleBootEntry(Record):
+    member: int | None = None
+    boot_path_list: str | None = None
+    boot_variable: str | None = None
+    config_file: str | None = None
+    private_config_file: str | None = None
+    manual_boot: str | None = None
+    enable_break: str | None = None
+
+
+class ConsoleStorageEntry(Record):
+    total_bytes: int | None = None
+    free_bytes: int | None = None
+    file_type: str | None = None
+    flags: str | None = None
+    prefixes: tuple[str, ...] = ()
+    alias_conflict: bool = False
+
+    @property
+    def primary_prefix(self) -> str | None:
+        return self.prefixes[0] if self.prefixes else None
 
 
 class ConsoleQueryResult(Record):
@@ -110,12 +164,15 @@ class ConsoleObservation(Record):
     license: LicenseObservation = LicenseObservation()
     interfaces: tuple[ConsoleInterface, ...] = ()
     stack: tuple[ConsoleStackMember, ...] = ()
+    inventory: tuple[ConsoleInventoryMember, ...] = ()
+    boot_entries: tuple[ConsoleBootEntry, ...] = ()
     boot_state: str | None = None
+    storage_entries: tuple[ConsoleStorageEntry, ...] = ()
     storage: tuple[str, ...] = ()
     capabilities: tuple[tuple[Capability, Support], ...] = ()
     unknown_fields: tuple[str, ...] = ()
     completeness: ObservationCompleteness = ObservationCompleteness.INCOMPLETE
-    parser_version: Literal["con-01-prompt-v1"] = CONSOLE_PARSER_VERSION
+    parser_version: Literal["con-01-transcript-v2"] = CONSOLE_PARSER_VERSION
     hardware_verified: Literal[False] = False
     deployment_approved: Literal[False] = False
 
