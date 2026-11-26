@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -46,6 +47,16 @@ from .redaction import redact_console_output
 from .transport import ConsoleTransport, TransportDisconnected
 
 DEFAULT_SESSION_TIMEOUT = 2.0
+
+
+class ConsoleSendOperation(StrEnum):
+    WAKE = "wake"
+    USERNAME = "username"
+    PASSWORD = "password"
+    ENABLE = "enable"
+    ENABLE_PASSWORD = "enable-password"
+    QUERY = "query"
+    PAGINATION = "pagination"
 
 
 class SessionState(StrEnum):
@@ -138,6 +149,17 @@ class LabSessionGate(Protocol):
 
     def authorize_query(self, query: ConsoleQuery) -> None: ...
 
+    def authorize_send(
+        self,
+        operation: ConsoleSendOperation,
+        text: str,
+        query: ConsoleQuery | None = None,
+    ) -> None: ...
+
+    def check_active(self) -> None: ...
+
+    def remaining_seconds(self) -> float | None: ...
+
 
 class PromptCompletionPolicy(Protocol):
     def observe_chunk(self, chunk: str) -> None: ...
@@ -145,6 +167,8 @@ class PromptCompletionPolicy(Protocol):
     def candidate_seen(self) -> None: ...
 
     def candidate_ready(self) -> bool: ...
+
+    def next_check_seconds(self) -> float: ...
 
 
 MAX_AUTH_INPUT_LENGTH = 128
@@ -201,6 +225,8 @@ class ConsoleSession:
         max_total_response_bytes: int = 512 * 1024,
         lab_gate: LabSessionGate | None = None,
         completion_policy: PromptCompletionPolicy | None = None,
+        credential_provider: Callable[[AuthPromptKind], str] | None = None,
+        auth_timeout: float = 30.0,
     ) -> None:
         validate_family(family)
         if not 0 < timeout <= 30:
@@ -233,11 +259,29 @@ class ConsoleSession:
         self._cancel_discovery_event: threading.Event | None = None
         self._lab_gate = lab_gate
         self._completion_policy = completion_policy
+        self._credential_provider = credential_provider
+        self._auth_timeout = auth_timeout
+        self._active_query: ConsoleQuery | None = None
+        self._wake_sent = False
+        self._cancel_event = threading.Event()
 
     @property
     def state(self) -> SessionState:
         with self._state_lock:
             return self._state
+
+    @property
+    def last_results(self) -> tuple[ConsoleQueryResult, ...]:
+        with self._state_lock:
+            return tuple(self._last_results)
+
+    @property
+    def is_attached(self) -> bool:
+        with self._state_lock:
+            return self._state in {
+                SessionState.USER_EXEC,
+                SessionState.PRIVILEGED_EXEC,
+            }
 
     @property
     def family(self) -> DeviceFamily | None:
@@ -294,6 +338,10 @@ class ConsoleSession:
             self._discovery_deadline = None
             self._cancel_discovery_event = None
 
+    def cancel(self) -> None:
+        """Request bounded cancellation of an in-flight read/session."""
+        self._cancel_event.set()
+
     def cancel_discovery(self) -> None:
         # Cancellation must not queue behind a query holding the state lock.
         # Reading the immutable event reference is sufficient; setting an Event
@@ -303,6 +351,8 @@ class ConsoleSession:
             event.set()
 
     def _check_discovery_budget(self) -> None:
+        if self._cancel_event.is_set():
+            raise SessionError("console session was cancelled")
         if (
             self._cancel_discovery_event is not None
             and self._cancel_discovery_event.is_set()
@@ -327,11 +377,27 @@ class ConsoleSession:
                 self._family = profile.family
             self._profile = profile
 
-    def open(self, credentials: ConsoleCredentials | None = None) -> None:
+    def open(
+        self,
+        credentials: ConsoleCredentials | None = None,
+        *,
+        initial_timeout: float | None = None,
+        allow_silent: bool = False,
+    ) -> None:
         with self._state_lock:
-            self._open_locked(credentials)
+            self._open_locked(
+                credentials,
+                initial_timeout=initial_timeout,
+                allow_silent=allow_silent,
+            )
 
-    def _open_locked(self, credentials: ConsoleCredentials | None) -> None:
+    def _open_locked(
+        self,
+        credentials: ConsoleCredentials | None,
+        *,
+        initial_timeout: float | None = None,
+        allow_silent: bool = False,
+    ) -> None:
         if self._state is not SessionState.DISCONNECTED:
             raise SessionStateError("console session is not disconnected")
         if credentials is not None:
@@ -351,6 +417,13 @@ class ConsoleSession:
         if self.source is ConsoleSource.AUTHORIZED_LIVE_LAB:
             if self._lab_gate is None:
                 raise LiveDeviceDisabled("authorized live lab requires a lab gate")
+            transport_authorization = getattr(self._transport, "authorization", None)
+            gate_authorization = getattr(self._lab_gate, "authorization", self._lab_gate)
+            if (
+                transport_authorization is None
+                or gate_authorization is not transport_authorization
+            ):
+                raise LiveDeviceDisabled("lab gate and transport authorization are not bound")
             self._lab_gate.authorize_open(self._transport)
         port_identity = self._transport.port_identity
         if not port_identity:
@@ -365,51 +438,134 @@ class ConsoleSession:
         )
         try:
             self._total_response_bytes = 0
+            self._wake_sent = False
             self._state = SessionState.CONNECTING
             self._transport.open()
             self._state = SessionState.AWAITING_PROMPT
-            read = self._read_for_prompt()
-            attempts = 0
-            auth_events = 0
-            while read.auth is not None:
-                auth_events += 1
-                if auth_events > 6:
-                    raise AuthenticationError("console authentication failed")
-                if credentials is None:
-                    raise AuthenticationError("console credentials are required")
-                self._state = SessionState.AUTHENTICATING
-                if read.auth is AuthPromptKind.USERNAME:
-                    self._transport.write(credentials.username + "\r")
-                elif read.auth is AuthPromptKind.ENABLE_PASSWORD:
-                    raise AuthenticationError("unexpected enable prompt during login")
-                else:
-                    attempts += 1
-                    if attempts > 2:
-                        raise AuthenticationError("console authentication failed")
-                    self._transport.write(credentials.password + "\r")
-                read = self._read_for_prompt()
-            self._bind_initial_prompt(read)
-            if (
-                credentials is not None
-                and credentials.enable_password is not None
-                and self._state is SessionState.USER_EXEC
-            ):
-                self._enable(credentials.enable_password)
+            try:
+                read = self._read_for_prompt(timeout=initial_timeout)
+            except ConsoleTimeout:
+                if allow_silent:
+                    # Keep the transport and lease open for an explicit,
+                    # operator-confirmed single wake; do not assume EXEC.
+                    self._state = SessionState.AWAITING_PROMPT
+                    return
+                raise
+            self._complete_attach(read, credentials)
         except Exception as exc:
             self._fail()
             if isinstance(exc, SessionError):
                 raise
             raise SessionError("console session failed") from exc
 
+    def _credential_value(
+        self,
+        credentials: ConsoleCredentials | None,
+        kind: AuthPromptKind,
+    ) -> str:
+        if credentials is not None:
+            if kind is AuthPromptKind.USERNAME:
+                return credentials.username
+            if kind is AuthPromptKind.PASSWORD:
+                return credentials.password
+        if self._credential_provider is not None:
+            value = self._credential_provider(kind)
+            validate_console_input(kind.value, value)
+            self._redaction_secrets = (*self._redaction_secrets, value)
+            return value
+        raise AuthenticationError("console credentials are required")
+
+    def _send(
+        self,
+        text: str,
+        operation: ConsoleSendOperation,
+        *,
+        query: ConsoleQuery | None = None,
+    ) -> None:
+        if self._cancel_event.is_set():
+            raise SessionError("console session was cancelled")
+        if self._lab_gate is not None:
+            self._lab_gate.check_active()
+        write_authorized = getattr(self._transport, "write_authorized", None)
+        if callable(write_authorized):
+            # The real transport is the final per-write authorization boundary.
+            write_authorized(text, operation=operation, query=query)
+        else:
+            self._transport.write(text)
+
+    def _complete_attach(
+        self,
+        read: _PromptRead,
+        credentials: ConsoleCredentials | None,
+    ) -> None:
+        attempts = 0
+        auth_events = 0
+        while read.auth is not None:
+            auth_events += 1
+            if auth_events > 6:
+                raise AuthenticationError("console authentication failed")
+            self._state = SessionState.AUTHENTICATING
+            if read.auth is AuthPromptKind.USERNAME:
+                value = self._credential_value(credentials, AuthPromptKind.USERNAME)
+                self._send(value + "\r", ConsoleSendOperation.USERNAME)
+            elif read.auth is AuthPromptKind.ENABLE_PASSWORD:
+                raise AuthenticationError("unexpected enable prompt during login")
+            else:
+                attempts += 1
+                if attempts > 2:
+                    raise AuthenticationError("console authentication failed")
+                value = self._credential_value(credentials, AuthPromptKind.PASSWORD)
+                self._send(value + "\r", ConsoleSendOperation.PASSWORD)
+            read = self._read_for_prompt(timeout=self._auth_timeout)
+        self._bind_initial_prompt(read)
+        if (
+            credentials is not None
+            and credentials.enable_password is not None
+            and self._state is SessionState.USER_EXEC
+        ):
+            self._enable(credentials.enable_password)
+
+    def finish_attach(
+        self,
+        credentials: ConsoleCredentials | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """Complete a passive attach after an explicit wake/resume decision."""
+        with self._state_lock:
+            if self._state is not SessionState.AWAITING_PROMPT:
+                raise SessionStateError("console session is not awaiting a prompt")
+            try:
+                read = self._read_for_prompt(timeout=timeout)
+                self._complete_attach(read, credentials)
+            except Exception as exc:
+                self._fail()
+                if isinstance(exc, SessionError):
+                    raise
+                raise SessionError("console attach failed") from exc
+
+    def wake_once(self) -> None:
+        """Send at most one operator-authorized CR to a silent device."""
+        with self._state_lock:
+            if self._state is not SessionState.AWAITING_PROMPT:
+                raise SessionStateError("console session is not awaiting a prompt")
+            if self._lab_gate is None:
+                raise LiveDeviceDisabled("wake is only available to the lab runner")
+            if self._wake_sent:
+                raise UnsafeConsoleState("a wake CR was already sent")
+            self._send("\r", ConsoleSendOperation.WAKE)
+            self._wake_sent = True
+            self._state = SessionState.AWAITING_PROMPT
+
     def _enable(self, enable_password: str) -> None:
         validate_console_input("enable password", enable_password)
         self._state = SessionState.AUTHENTICATING
         self._parser.reset()
-        self._transport.write("enable\r")
-        read = self._read_for_prompt()
+        self._send("enable\r", ConsoleSendOperation.ENABLE)
+        read = self._read_for_prompt(timeout=self._auth_timeout)
         if read.auth is AuthPromptKind.PASSWORD:
-            self._transport.write(enable_password + "\r")
-            read = self._read_for_prompt()
+            self._send(enable_password + "\r", ConsoleSendOperation.ENABLE_PASSWORD)
+            read = self._read_for_prompt(timeout=self._auth_timeout)
         if read.auth is not None or read.mode is not PromptMode.PRIVILEGED_EXEC:
             raise EnableError("enable authentication failed")
         self._check_bound_prompt(read, allow_privilege_upgrade=True)
@@ -487,12 +643,13 @@ class ConsoleSession:
         previous_state = self._state
         self._state = SessionState.QUERYING
         self._parser.reset()
+        self._active_query = query
         started = time.monotonic()
         try:
             if self._lab_gate is not None:
                 self._lab_gate.authorize_query(query)
             self._check_discovery_budget()
-            self._transport.write(spec.command + "\r")
+            self._send(spec.command + "\r", ConsoleSendOperation.QUERY, query=query)
             read = self._read_for_prompt(allow_pagination=True)
             if read.auth is not None:
                 raise UnexpectedAuthPrompt("authentication prompt during query")
@@ -513,6 +670,14 @@ class ConsoleSession:
                 status=status,
                 output=output,
                 duration_seconds=round(time.monotonic() - started, 6),
+                output_bytes=len(output.encode("utf-8", errors="replace")),
+                output_lines=len(output.splitlines()),
+                pagination_events=self._parser.pages,
+                completion_status=(
+                    "candidate-quiet-window"
+                    if self._completion_policy is not None
+                    else "legacy-parser-timing"
+                ),
             )
             self._last_results.append(result)
             self._state = (
@@ -545,7 +710,9 @@ class ConsoleSession:
         pending_fn = getattr(self._transport, "pending_data", None)
         while callable(pending_fn) and pending_fn():
             self._check_discovery_budget()
-            remaining = deadline - time.monotonic()
+            if self._lab_gate is not None:
+                self._lab_gate.check_active()
+            remaining = min(deadline - time.monotonic(), 0.1)
             if remaining <= 0:
                 self._check_discovery_budget()
                 return False
@@ -556,14 +723,26 @@ class ConsoleSession:
                 return False
         return True
 
-    def _read_deadline(self) -> float:
-        prompt_deadline = time.monotonic() + self._timeout
+    def _read_deadline(self, *, timeout: float | None = None) -> float:
+        prompt_deadline = time.monotonic() + (
+            self._timeout if timeout is None else timeout
+        )
+        deadlines = [prompt_deadline]
         if self._discovery_deadline is not None:
-            return min(prompt_deadline, self._discovery_deadline)
-        return prompt_deadline
+            deadlines.append(self._discovery_deadline)
+        if self._lab_gate is not None:
+            remaining = self._lab_gate.remaining_seconds()
+            if remaining is not None:
+                deadlines.append(time.monotonic() + max(0.0, remaining))
+        return min(deadlines)
 
-    def _read_for_prompt(self, *, allow_pagination: bool = False) -> _PromptRead:
-        deadline = self._read_deadline()
+    def _read_for_prompt(
+        self,
+        *,
+        allow_pagination: bool = False,
+        timeout: float | None = None,
+    ) -> _PromptRead:
+        deadline = self._read_deadline(timeout=timeout)
         output = ""
         candidate: _PromptRead | None = None
         while time.monotonic() < deadline:
@@ -587,8 +766,17 @@ class ConsoleSession:
                             "prompt-like text occurred in command output",
                         )
                     return candidate
-            remaining = max(0.001, deadline - time.monotonic())
-            chunk = self._transport.read_chunk(remaining)
+            read_limit = max(0.001, deadline - time.monotonic())
+            if self._lab_gate is not None:
+                # Poll cancellation/expiry without ever using the full command
+                # deadline for one blocking pySerial read.
+                read_limit = min(read_limit, 0.1)
+                if candidate is not None and self._completion_policy is not None:
+                    read_limit = min(
+                        read_limit,
+                        max(0.001, self._completion_policy.next_check_seconds()),
+                    )
+            chunk = self._transport.read_chunk(read_limit)
             if not chunk:
                 continue
             if self._completion_policy is not None:
@@ -612,7 +800,11 @@ class ConsoleSession:
                         raise AmbiguousConsoleOutput(
                             "pagination marker occurred with pending terminal data",
                         )
-                    self._transport.write(" ")
+                    self._send(
+                        " ",
+                        ConsoleSendOperation.PAGINATION,
+                        query=self._active_query,
+                    )
                 elif event.kind is ParserEventKind.PROMPT:
                     if candidate is not None and output[len(candidate.output):].strip():
                         self._parser.mark_prompt_collision()
@@ -627,7 +819,19 @@ class ConsoleSession:
                 raise AmbiguousConsoleOutput(
                     "prompt-like text occurred in command output",
                 )
+        # A blocking read can consume the last slice of the deadline.  Check a
+        # candidate that became ready during that read before declaring timeout.
+        if candidate is not None and (
+            self._completion_policy is None
+            or self._completion_policy.candidate_ready()
+        ):
+            pending_fn = getattr(self._transport, "pending_data", None)
+            pending = bool(pending_fn()) if callable(pending_fn) else False
+            if not pending and not self._parser.has_unconsumed_non_whitespace:
+                return candidate
         self._check_discovery_budget()
+        if self._lab_gate is not None:
+            self._lab_gate.check_active()
         raise ConsoleTimeout("console prompt timeout")
 
     def close(self) -> None:
@@ -696,6 +900,7 @@ __all__ = [
     "AuthenticationError",
     "ConsoleCredentials",
     "ConsoleOperatorAbort",
+    "ConsoleSendOperation",
     "ConsoleSession",
     "ConsoleTimeout",
     "CredentialInputError",

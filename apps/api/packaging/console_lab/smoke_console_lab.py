@@ -38,6 +38,21 @@ def main() -> int:
         errors.append("missing-acceptance-template")
     else:
         checks.append("acceptance-template-present")
+    manifest = package / "DEPENDENCIES-SHA256SUMS.txt"
+    if not manifest.exists():
+        errors.append("missing-dependency-manifest")
+    else:
+        checks.append("dependency-manifest-present")
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            digest, _, relative = line.partition("  ")
+            target = package / relative
+            if not target.is_file() or _sha256(target) != digest:
+                errors.append(f"dependency-manifest-mismatch:{relative}")
+                break
+        else:
+            checks.append("dependency-manifest-integrity")
     if list(package.rglob("*.sqlite3")):
         errors.append("product-database-present")
     else:
@@ -46,7 +61,12 @@ def main() -> int:
         errors.append("product-runtime-mixed")
     else:
         checks.append("product-runtime-separate")
+    if list(package.rglob("python.exe")) or list(package.rglob("node_modules")):
+        errors.append("host-runtime-dependency-present")
+    else:
+        checks.append("no-host-python-node")
     for name, command in (
+        ("artifact-check", [str(exe), "--artifact-check"]),
         ("self-test", [str(exe), "--self-test"]),
         ("list-ports-json", [str(exe), "--list-ports", "--json"]),
     ):
@@ -61,6 +81,9 @@ def main() -> int:
             errors.append(f"{name}-exit-{result.returncode}")
         else:
             checks.append(name)
+        if name == "artifact-check":
+            if "CONSOLE-LAB ARTIFACT CHECK PASS" not in result.stdout:
+                errors.append("artifact-check-output")
         if name == "self-test":
             if "CONSOLE-LAB SELF-TEST PASS" not in result.stdout:
                 errors.append("self-test-output")

@@ -10,11 +10,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from event_switch_manager.console.allowlist import resolve_query_for_profile
 from event_switch_manager.console.discovery import SerialPortInfo
 from event_switch_manager.console.lease import normalize_endpoint
+from event_switch_manager.console.session import ConsoleSendOperation
 from event_switch_manager.integrations import ConsoleQuery
 
-from .targets import LabTarget
+from .targets import LAB_TARGETS, LabTarget
 
 LAB_AUTHORIZATION_TTL_LIMIT_SECONDS = 30 * 60
 
@@ -38,7 +40,19 @@ class LabAuthorization:
     _consumed: bool = field(default=False, init=False)
     _cancelled: bool = field(default=False, init=False)
     _bound_transport: object | None = field(default=None, init=False)
+    _wake_count: int = field(default=0, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    _IMMUTABLE = frozenset({
+        "experiment_id", "target", "com_endpoint", "adapter_identity",
+        "allowed_queries", "issued_at", "expires_at", "operator_confirmed",
+        "artifact_sha256", "software_git_sha",
+    })
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in self._IMMUTABLE and hasattr(self, name):
+            raise AttributeError(f"lab authorization field {name} is immutable")
+        object.__setattr__(self, name, value)
 
     @property
     def consumed(self) -> bool:
@@ -68,6 +82,9 @@ class LabAuthorization:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _ensure_valid(self) -> None:
+        canonical = LAB_TARGETS.get(self.target.key)
+        if canonical != self.target or self.allowed_queries != canonical.allowed_queries:
+            raise LabAuthorizationError("lab target or query scope is not canonical")
         if not self.operator_confirmed:
             raise LabAuthorizationError("lab authorization requires operator confirmation")
         if self._cancelled:
@@ -115,6 +132,70 @@ class LabAuthorization:
     def bind_transport(self, transport: object) -> None:
         self._bound_transport = transport
 
+    def check_active(self) -> None:
+        self._ensure_valid()
+
+    def remaining_seconds(self) -> float | None:
+        return max(0.0, (self.expires_at - datetime.now(UTC)).total_seconds())
+
+    def _check_send(
+        self,
+        operation: ConsoleSendOperation,
+        text: str,
+        query: ConsoleQuery | None,
+        *,
+        consume_wake: bool,
+    ) -> None:
+        self._ensure_valid()
+        if not self._consumed:
+            raise LabAuthorizationError("live connection was not opened under authorization")
+        if len(text.encode("utf-8", errors="replace")) > 512:
+            raise LabAuthorizationError("lab send exceeds the authorized bound")
+        if operation in {
+            ConsoleSendOperation.USERNAME,
+            ConsoleSendOperation.PASSWORD,
+            ConsoleSendOperation.ENABLE,
+            ConsoleSendOperation.ENABLE_PASSWORD,
+        }:
+            # Credential sends are only legitimate while the session is in an
+            # authentication state; the Session itself enforces that state.
+            return
+        if self._bound_transport is None:
+            raise LabAuthorizationError("lab transport is not bound")
+        pending = getattr(self._bound_transport, "pending_data", None)
+        if callable(pending) and pending():
+            raise LabAuthorizationError("late terminal data is pending")
+        if getattr(self._bound_transport, "cleanup_required", False):
+            raise LabAuthorizationError("serial cleanup is required")
+        if operation is ConsoleSendOperation.WAKE:
+            if text != "\r" or self._wake_count >= 1:
+                raise LabAuthorizationError("only one authorized wake CR is allowed")
+            if consume_wake:
+                self._wake_count += 1
+            return
+        if query is None:
+            raise LabAuthorizationError("query identity is required for this send")
+        if query not in self.allowed_queries:
+            raise LabAuthorizationError("query is outside the authorized scope")
+        spec = resolve_query_for_profile(self.target.profile, query)
+        if operation is ConsoleSendOperation.QUERY:
+            if text != spec.command + "\r":
+                raise LabAuthorizationError("send text does not match the typed query")
+            return
+        if operation is ConsoleSendOperation.PAGINATION:
+            if text != " ":
+                raise LabAuthorizationError("pagination text is not permitted")
+            return
+        raise LabAuthorizationError("unrecognized lab send operation")
+
+    def authorize_send(
+        self,
+        operation: ConsoleSendOperation,
+        text: str,
+        query: ConsoleQuery | None = None,
+    ) -> None:
+        self._check_send(operation, text, query, consume_wake=True)
+
     def authorize_query(self, query: ConsoleQuery) -> None:
         self._ensure_valid()
         if not self._consumed:
@@ -135,9 +216,6 @@ class LabAuthorization:
         with self._lock:
             self._cancelled = True
 
-    def remaining_seconds(self) -> float:
-        return max(0.0, (self.expires_at - datetime.now(UTC)).total_seconds())
-
 
 def issue_authorization(
     target: LabTarget,
@@ -157,6 +235,9 @@ def issue_authorization(
         raise LabAuthorizationError("COM endpoint and adapter identity are required")
     if not 0 < ttl_seconds <= LAB_AUTHORIZATION_TTL_LIMIT_SECONDS:
         raise LabAuthorizationError("authorization TTL is outside the allowed range")
+    canonical = LAB_TARGETS.get(target.key)
+    if canonical is None or canonical != target:
+        raise LabAuthorizationError("forged lab target is not accepted")
     if not target.allowed_queries:
         raise LabAuthorizationError("target has no authorized queries")
     now = datetime.now(UTC)
@@ -177,7 +258,7 @@ def issue_authorization(
 def wait_for_authorization_expiry(authorization: LabAuthorization) -> None:
     """Test/helper hook; never used by product runtime."""
     remaining = authorization.remaining_seconds()
-    if remaining > 0:
+    if remaining is not None and remaining > 0:
         time.sleep(remaining)
 
 

@@ -42,6 +42,12 @@ class LiveCompletionPolicy:
         reference = self._last_chunk_at or self._candidate_at
         return time.monotonic() - reference >= self.quiet_seconds
 
+    def next_check_seconds(self) -> float:
+        if self._candidate_at is None:
+            return self.quiet_seconds
+        reference = self._last_chunk_at or self._candidate_at
+        return max(0.001, self.quiet_seconds - (time.monotonic() - reference))
+
     @property
     def chunk_count(self) -> int:
         return self._chunks

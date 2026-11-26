@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,8 +28,12 @@ from event_switch_manager.console.models import (
 from event_switch_manager.console.observation import CiscoObservationAdapter
 from event_switch_manager.console.session import (
     ConsoleOperatorAbort,
+    ConsoleSendOperation,
     ConsoleSession,
     LiveDeviceDisabled,
+    SessionError,
+    SessionState,
+    SessionStateError,
 )
 from event_switch_manager.console.transport import (
     SerialTransport,
@@ -41,7 +47,14 @@ from event_switch_manager.lab_runner.authorization import (
 )
 from event_switch_manager.lab_runner.cli import run_list_ports, run_self_test
 from event_switch_manager.lab_runner.completion import LiveCompletionPolicy
-from event_switch_manager.lab_runner.reporting import LabBuildMetadata, LabReportWriter
+from event_switch_manager.lab_runner.reporting import (
+    ArtifactIdentityError,
+    LabBuildMetadata,
+    LabReportWriter,
+    sha256_file,
+    sha256_text,
+    verify_report_fingerprint,
+)
 from event_switch_manager.lab_runner.targets import get_target
 from event_switch_manager.lab_runner.transport import AuthorizedSerialTransport
 
@@ -237,11 +250,61 @@ def test_authorization_rejects_out_of_scope_query_and_pending_data() -> None:
     pending.close()
 
 
+def test_lab_transport_rejects_raw_and_forged_sends() -> None:
+    transport = _open_transport(serial=FakeSerial(initial=""), target_key="c1000")
+    with pytest.raises(TransportError, match="raw lab write"):
+        transport.write("show version\r")
+    with pytest.raises(LabAuthorizationError, match="not match|outside"):
+        transport.write_authorized(
+            "show version\r",
+            operation=ConsoleSendOperation.QUERY,
+            query=ConsoleQuery.LICENSE,
+        )
+    with pytest.raises(LabAuthorizationError, match="not match"):
+        transport.write_authorized(
+            "show inventory\r",
+            operation=ConsoleSendOperation.QUERY,
+            query=ConsoleQuery.VERSION,
+        )
+    transport.close()
+
+
+def test_authorization_immutability_and_forged_target_rejection() -> None:
+    auth = _auth()
+    with pytest.raises(AttributeError):
+        auth.target = get_target("c1000")
+    with pytest.raises(AttributeError):
+        auth.expires_at = datetime.now(UTC)
+    forged = type(auth.target)(
+        key="2960x",
+        label="forged",
+        expected_pid=auth.target.expected_pid,
+        expected_release=auth.target.expected_release,
+        allowed_queries=auth.target.allowed_queries,
+    )
+    with pytest.raises(LabAuthorizationError, match="forged"):
+        issue_authorization(
+            forged,
+            com_endpoint="COM3",
+            adapter_identity="usb:test",
+            operator_confirmed=True,
+        )
+    transport = _open_transport(serial=FakeSerial(initial=""))
+    transport.write_authorized("\r", operation=ConsoleSendOperation.WAKE)
+    with pytest.raises(LabAuthorizationError, match="one authorized wake"):
+        transport.write_authorized("\r", operation=ConsoleSendOperation.WAKE)
+    transport.close()
+
+
 def test_transport_partial_write_and_cleanup_retry() -> None:
-    serial = FakeSerial(close_failures=1)
+    serial = FakeSerial(initial="", close_failures=1)
     serial.partial_write = True
     transport = _open_transport(serial=serial)
-    transport.write("show version\r")
+    transport.write_authorized(
+        "show version\r",
+        operation=ConsoleSendOperation.QUERY,
+        query=ConsoleQuery.VERSION,
+    )
     assert b"".join(serial.writes) == b"show version\r"
     with pytest.raises(TransportError, match="close"):
         transport.close()
@@ -271,7 +334,20 @@ class FakeTerminalSerial(FakeSerial):
                 "Version 15.2(7)E10, RELEASE SOFTWARE (fc3)\r\n"
                 "R1>\n"
             )
+        elif data == b"\r":
+            self.buffer += "R1>\n"
         return len(data)
+
+
+class BlockingTerminalSerial(FakeTerminalSerial):
+    """Realistic silent pySerial semantics: empty read consumes its timeout."""
+
+    def read(self, count: int) -> bytes:
+        data = super().read(count)
+        if data:
+            return data
+        time.sleep(min(self.timeout, 0.2))
+        return b""
 
 
 def test_authorized_lab_session_opens_and_runs_typed_query() -> None:
@@ -300,6 +376,217 @@ def test_authorized_lab_session_opens_and_runs_typed_query() -> None:
     finally:
         session.close()
     assert serial.closed is True
+
+
+def test_blocking_empty_read_does_not_consume_full_prompt_deadline() -> None:
+    import time
+
+    port = _port()
+    auth = _auth(port=port)
+    serial = BlockingTerminalSerial(initial="R1>\n")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.05),
+        timeout=1.0,
+    )
+    session.open(None)
+    try:
+        started = time.monotonic()
+        result = session.query_result(ConsoleQuery.VERSION)
+        elapsed = time.monotonic() - started
+        assert result.status is QueryStatus.OK
+        assert elapsed < 0.8, "blocking read consumed the full command deadline"
+    finally:
+        session.close()
+
+
+def test_passive_attach_requires_one_operator_confirmed_wake() -> None:
+    port = _port()
+    auth = _auth(port=port)
+    serial = FakeTerminalSerial(initial="")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        timeout=0.1,
+    )
+    session.open(None, initial_timeout=0.02, allow_silent=True)
+    try:
+        assert session.state is SessionState.AWAITING_PROMPT
+        session.wake_once()
+        assert serial.writes[-1] == b"\r"
+        session.finish_attach(None, timeout=0.5)
+        assert session.is_attached is True
+        with pytest.raises(SessionStateError):
+            session.wake_once()
+    finally:
+        session.close()
+
+
+def test_unsafe_initial_state_never_wakes_and_has_no_send() -> None:
+    port = _port()
+    auth = _auth(port=port)
+    serial = FakeSerial(initial="switch: \n")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        timeout=0.2,
+    )
+    with pytest.raises(SessionError):
+        session.open(None, initial_timeout=0.2, allow_silent=True)
+    assert serial.writes == []
+
+
+def test_expired_authorization_blocks_next_send() -> None:
+    port = _port()
+    target = get_target("2960x")
+    auth = issue_authorization(
+        target,
+        com_endpoint=port.port,
+        adapter_identity=port.adapter_identity,
+        ttl_seconds=0.05,
+        operator_confirmed=True,
+        artifact_sha256="a" * 64,
+        software_git_sha="b" * 40,
+    )
+    serial = FakeSerial(initial="R1>\n")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.005),
+        timeout=0.2,
+    )
+    session.open(None, initial_timeout=0.2)
+    try:
+        time.sleep(0.07)
+        with pytest.raises(SessionError):
+            session.query_result(ConsoleQuery.VERSION)
+    finally:
+        session.close()
+
+
+def test_cancellation_interrupts_blocking_read_without_waiting_full_timeout() -> None:
+    import threading
+
+    class SilentQuerySerial(BlockingTerminalSerial):
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            return len(data)
+
+    port = _port()
+    auth = _auth(port=port)
+    serial = SilentQuerySerial(initial="R1>\n")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        timeout=1.0,
+    )
+    session.open(None)
+    try:
+        timer = threading.Timer(0.05, session.cancel)
+        timer.start()
+        started = time.monotonic()
+        with pytest.raises(SessionError):
+            session.query_result(ConsoleQuery.VERSION)
+        timer.cancel()
+        assert time.monotonic() - started < 0.8
+    finally:
+        session.close()
+
+
+def test_operator_gate_blocks_query_before_any_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    port = _port()
+    auth = _auth(port=port)
+    target = get_target("2960x")
+    count = [0]
+    gate = lab_cli._OperatorGate(auth, target, count)
+    serial = FakeSerial(initial="R1>\n")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=gate,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        timeout=1.0,
+    )
+    session.open(None, initial_timeout=0.2)
+    try:
+        monkeypatch.setattr(lab_cli, "_confirm", lambda *_args, **_kwargs: False)
+        with pytest.raises(ConsoleOperatorAbort):
+            session.query_result(ConsoleQuery.VERSION)
+        assert b"show version\r" not in serial.writes
+        assert count[0] == 0
+    finally:
+        session.close()
+
+
+def test_credentials_only_requested_at_real_auth_prompt() -> None:
+    port = _port()
+    auth = _auth(port=port)
+    serial = FakeSerial(initial="Username: ")
+    prompts: list[str] = []
+
+    def provider(kind: Any) -> str:
+        prompts.append(kind.name)
+        if kind.name == "USERNAME":
+            serial.buffer += "Password: "
+            return "lab-user"
+        serial.buffer += "R1>\n"
+        return "lab-pass"
+
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        credential_provider=provider,
+        timeout=1.0,
+    )
+    session.open(None, initial_timeout=0.5)
+    try:
+        assert prompts == ["USERNAME", "PASSWORD"]
+        assert session.state is SessionState.USER_EXEC
+        assert b"lab-user" in b"".join(serial.writes)
+        assert b"lab-pass" in b"".join(serial.writes)
+    finally:
+        session.close()
 
 
 def test_lab_adapter_operator_abort_stops_before_optional_queries() -> None:
@@ -433,26 +720,26 @@ def test_report_redacts_serials_and_has_stable_fingerprint(tmp_path: Path) -> No
         serial_number="CHASSIS-SECRET-01",
         completeness=ObservationCompleteness.PARTIAL,
     )
+    auth = _auth()
     provenance = LabProvenance(
-        experiment_id="r86-report",
+        experiment_id=auth.experiment_id,
         target="2960x",
-        authorization_digest="a" * 64,
+        authorization_digest=auth.digest,
         expected_pid="WS-C2960X-24TS-L",
         expected_release="15.2(7)E10",
         observed_pid="WS-C2960X-24TS-L",
         observed_release="15.2(7)E10",
         com_endpoint="COM3",
-        adapter_identity_sha256="b" * 64,
-        artifact_sha256="c" * 64,
-        software_git_sha="d" * 40,
+        adapter_identity_sha256=sha256_text(_port().adapter_identity),
+        artifact_sha256=auth.artifact_sha256,
+        software_git_sha=auth.software_git_sha,
         operator_confirmed=True,
         cleanup_status="RELEASED",
     )
     evidence = build_evidence(observation, (), lab_provenance=provenance)
-    auth = _auth()
     writer = LabReportWriter(
         tmp_path,
-        build=LabBuildMetadata("d" * 40, "c" * 64, "test"),
+        build=LabBuildMetadata("b" * 40, "a" * 64, "test"),
         authorization=auth,
         target=get_target("2960x"),
         discovery=_discovery(_port()),
@@ -476,9 +763,77 @@ def test_report_redacts_serials_and_has_stable_fingerprint(tmp_path: Path) -> No
     assert "CHASSIS-SECRET-01" not in report
     assert "R86ADAPTER" not in report
     assert first["report_fingerprint"] == second["report_fingerprint"]
+    assert verify_report_fingerprint(first) is True
+    tampered = dict(first)
+    tampered["error"] = "changed"
+    assert verify_report_fingerprint(tampered) is False
     assert (tmp_path / "console-lab-summary.txt").exists()
     assert (tmp_path / "SHA256SUMS").exists()
     assert "console-lab-report.json" in (tmp_path / "SHA256SUMS").read_text(encoding="utf-8")
+    fingerprint_input = tmp_path / "console-lab-report-fingerprint-input.json"
+    assert sha256_file(fingerprint_input) == first["report_fingerprint"]
+
+
+def test_artifact_identity_recomputes_exe_sha_and_rejects_forgery(
+    tmp_path: Path,
+) -> None:
+    exe = tmp_path / "EventSwitchManager-ConsoleLab.exe"
+    exe.write_bytes(b"fake frozen lab executable")
+    actual = sha256_text("fake frozen lab executable")
+    record = tmp_path / "EventSwitchManager-ConsoleLab-build-record.json"
+    record.write_text(
+        json.dumps({
+            "package": "EventSwitchManager-ConsoleLab",
+            "git_sha": "a" * 40,
+            "executable_sha256": actual,
+        }),
+        encoding="utf-8",
+    )
+    metadata = LabBuildMetadata.load(exe)
+    assert metadata.is_frozen is True
+    assert metadata.identity_verified is True
+    assert metadata.artifact_sha256 == actual
+    record.write_text(
+        json.dumps({
+            "package": "EventSwitchManager-ConsoleLab",
+            "git_sha": "a" * 40,
+            "executable_sha256": "0" * 64,
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(ArtifactIdentityError):
+        LabBuildMetadata.load(exe)
+    record.unlink()
+    with pytest.raises(ArtifactIdentityError):
+        LabBuildMetadata.load(exe).require_frozen()
+
+
+def test_report_does_not_claim_success_for_never_opened_failure(tmp_path: Path) -> None:
+    auth = _auth()
+    writer = LabReportWriter(
+        tmp_path,
+        build=LabBuildMetadata("b" * 40, "a" * 64, "test"),
+        authorization=auth,
+        target=get_target("2960x"),
+        discovery=_discovery(_port()),
+        port=_port(),
+    )
+    payload = writer.write(
+        evidence=None,
+        connection={
+            "status": "OPEN_FAILED",
+            "opened": False,
+            "readonly_queries_completed": False,
+            "experiment_verdict": "FAILED_OR_CANCELLED",
+        },
+        cleanup_status="RELEASED",
+        operator_confirmations=0,
+        error="session: open failed",
+    )
+    assert payload["connection"]["opened"] is False
+    assert payload["outcome"]["experiment_verdict"] == "FAILED_OR_CANCELLED"
+    assert payload["outcome"]["hardware_verdict"] == "NOT_VERIFIED"
+    assert payload["evidence"]["hardware_verified"] is False
 
 
 def test_cli_self_test_and_listing_do_not_open_serial(monkeypatch: pytest.MonkeyPatch) -> None:

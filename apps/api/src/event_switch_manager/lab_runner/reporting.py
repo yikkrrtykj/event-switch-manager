@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from event_switch_manager.console.discovery import SerialDiscovery, SerialPortInfo
-from event_switch_manager.console.models import ConsoleEvidence
+from event_switch_manager.console.models import ConsoleEvidence, ConsoleSource
 
 from .authorization import LabAuthorization
 from .targets import LabTarget
@@ -41,31 +41,58 @@ def stable_token(value: str | None) -> str | None:
     return f"<id:{hashlib.sha256(value.casefold().encode('utf-8')).hexdigest()[:12]}>"
 
 
+class ArtifactIdentityError(RuntimeError):
+    """The running executable does not match its frozen build record."""
+
+
 @dataclass(frozen=True, slots=True)
 class LabBuildMetadata:
     software_git_sha: str
     artifact_sha256: str
     artifact_name: str
+    is_frozen: bool = False
+    identity_verified: bool = False
 
     @classmethod
     def load(cls, executable: Path | None = None) -> LabBuildMetadata:
         exe = executable or Path(sys.executable)
+        try:
+            actual_exe_sha = sha256_file(exe)
+        except OSError:
+            actual_exe_sha = "unknown"
         record = exe.parent / "EventSwitchManager-ConsoleLab-build-record.json"
         if record.exists():
             try:
                 data = json.loads(record.read_text(encoding="utf-8"))
+                recorded = str(data.get("executable_sha256", ""))
+                if recorded != actual_exe_sha:
+                    raise ArtifactIdentityError(
+                        "running executable SHA-256 does not match the build record",
+                    )
+                git_sha = str(data.get("git_sha", ""))
+                if not git_sha or git_sha == "unknown":
+                    raise ArtifactIdentityError("build record has no Git identity")
                 return cls(
-                    software_git_sha=str(data.get("git_sha", "unknown")),
-                    artifact_sha256=str(data.get("executable_sha256", "unknown")),
-                    artifact_name=str(data.get("package", "EventSwitchManager-ConsoleLab")),
+                    software_git_sha=git_sha,
+                    artifact_sha256=actual_exe_sha,
+                    artifact_name=str(
+                        data.get("package", "EventSwitchManager-ConsoleLab"),
+                    ),
+                    is_frozen=True,
+                    identity_verified=True,
                 )
-            except (OSError, ValueError):
-                pass
-        try:
-            digest = sha256_file(exe)
-        except OSError:
-            digest = "unknown"
-        return cls("unknown", digest, "source-run")
+            except (OSError, ValueError) as exc:
+                raise ArtifactIdentityError("build record is unreadable") from exc
+        return cls(
+            "unknown", actual_exe_sha, "source-run",
+            is_frozen=False, identity_verified=False,
+        )
+
+    def require_frozen(self) -> None:
+        if not self.is_frozen or not self.identity_verified:
+            raise ArtifactIdentityError(
+                "real ConsoleLab experiments require a verified frozen artifact",
+            )
 
 
 class LabReportWriter:
@@ -131,6 +158,8 @@ class LabReportWriter:
                     for item in observation.license.features
                 ],
             },
+            "interfaces_observed": len(observation.interfaces),
+            "expected_layout_verified": False,
             "interfaces": [
                 {
                     "name": item.name,
@@ -169,9 +198,9 @@ class LabReportWriter:
             "boot": [
                 {
                     "member": item.member,
-                    "boot_path_list": item.boot_path_list,
-                    "config_file": item.config_file,
-                    "private_config_file": item.private_config_file,
+                    "boot_path_token": stable_token(item.boot_path_list),
+                    "config_file_token": stable_token(item.config_file),
+                    "private_config_file_token": stable_token(item.private_config_file),
                 }
                 for item in observation.boot_entries
             ],
@@ -179,7 +208,9 @@ class LabReportWriter:
                 {
                     "file_type": item.file_type,
                     "flags": item.flags,
-                    "prefixes": list(item.prefixes),
+                    "prefix_tokens": [
+                        stable_token(prefix) for prefix in item.prefixes
+                    ],
                     "total_bytes": item.total_bytes,
                     "free_bytes": item.free_bytes,
                     "alias_conflict": item.alias_conflict,
@@ -202,21 +233,30 @@ class LabReportWriter:
         operator_confirmations: int,
         error: str | None,
         cancelled: bool = False,
+        query_results: tuple[Any, ...] = (),
     ) -> dict[str, Any]:
-        queries = (
-            [
-                {
-                    "query": item.query.value,
-                    "command": item.command,
-                    "status": item.status.value,
-                    "duration_seconds": item.duration_seconds,
-                    "unknown_fields": list(item.unknown_fields),
-                }
-                for item in evidence.query_results
-            ]
-            if evidence
-            else []
-        )
+        if evidence is not None and evidence.source is ConsoleSource.AUTHORIZED_LIVE_LAB:
+            validate_lab_provenance(
+                evidence.lab_provenance,
+                self.authorization,
+                self.target,
+                evidence.observation,
+            )
+        source_results = evidence.query_results if evidence else query_results
+        queries = [
+            {
+                "query": item.query.value,
+                "command": item.command,
+                "status": item.status.value,
+                "duration_seconds": item.duration_seconds,
+                "output_bytes": item.output_bytes,
+                "output_lines": item.output_lines,
+                "pagination_events": item.pagination_events,
+                "completion_status": item.completion_status,
+                "unknown_fields": list(item.unknown_fields),
+            }
+            for item in source_results
+        ]
         payload: dict[str, Any] = {
             "schema_version": 1,
             "report_type": "controlled-live-console-lab",
@@ -241,6 +281,20 @@ class LabReportWriter:
             },
             "discovery": self._discovery_summary(),
             "connection": connection,
+            "outcome": {
+                "connection_status": connection.get("status"),
+                "opened": connection.get("opened"),
+                "readonly_queries_completed": connection.get(
+                    "readonly_queries_completed", False,
+                ),
+                "observation_completeness": connection.get(
+                    "observation_completeness",
+                ),
+                "experiment_verdict": connection.get("experiment_verdict"),
+                "hardware_verdict": "NOT_VERIFIED",
+                "cleanup_status": cleanup_status,
+                "cancelled": cancelled,
+            },
             "queries": queries,
             "observation": self._observation_summary(evidence),
             "evidence": {
@@ -272,7 +326,9 @@ class LabReportWriter:
             key: value for key, value in payload.items()
             if key not in {"generated_at", "report_fingerprint"}
         }
-        payload["report_fingerprint"] = sha256_text(canonical_json(fingerprint_payload))
+        fingerprint_input = canonical_json(fingerprint_payload)
+        payload["report_fingerprint"] = sha256_text(fingerprint_input)
+        payload["_fingerprint_input"] = fingerprint_input
         return payload
 
     def write(
@@ -284,6 +340,7 @@ class LabReportWriter:
         operator_confirmations: int,
         error: str | None,
         cancelled: bool = False,
+        query_results: tuple[Any, ...] = (),
     ) -> dict[str, Any]:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         payload = self.build_payload(
@@ -293,16 +350,21 @@ class LabReportWriter:
             operator_confirmations=operator_confirmations,
             error=error,
             cancelled=cancelled,
+            query_results=query_results,
         )
         report_path = self.output_dir / "console-lab-report.json"
+        fingerprint_input_path = self.output_dir / "console-lab-report-fingerprint-input.json"
         summary_path = self.output_dir / "console-lab-summary.txt"
         sums_path = self.output_dir / "SHA256SUMS"
+        fingerprint_input = str(payload.pop("_fingerprint_input"))
+        fingerprint_input_path.write_text(fingerprint_input, encoding="utf-8")
         report_text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
         report_path.write_text(report_text + "\n", encoding="utf-8")
         summary = self._summary_text(payload)
         summary_path.write_text(summary, encoding="utf-8")
         sums = (
             f"{sha256_file(report_path)}  console-lab-report.json\n"
+            f"{sha256_file(fingerprint_input_path)}  console-lab-report-fingerprint-input.json\n"
             f"{sha256_file(summary_path)}  console-lab-summary.txt\n"
         )
         sums_path.write_text(sums, encoding="utf-8")
@@ -326,8 +388,11 @@ class LabReportWriter:
             f"硬件认证: {payload['evidence']['hardware_verified']}",
             f"部署许可: {payload['evidence']['deployment_approved']}",
             f"报告指纹: {payload['report_fingerprint']}",
+            f"实验 verdict: {payload['outcome']['experiment_verdict']}",
+            f"连接状态: {payload['outcome']['connection_status']}",
             "",
             "报告仅包含脱敏摘要，不包含完整未脱敏 transcript。",
+            "report fingerprint 只作内容完整性检查，不是真实性签名。",
             "真实串口完成性和硬件验收仍为 NOT_VERIFIED。",
         ]
         if payload.get("error"):
@@ -335,11 +400,61 @@ class LabReportWriter:
         return "\n".join(lines) + "\n"
 
 
+class LabEvidenceError(RuntimeError):
+    """A caller-supplied lab provenance does not match the real experiment."""
+
+
+def validate_lab_provenance(
+    provenance: Any,
+    authorization: LabAuthorization,
+    target: LabTarget,
+    observation: Any,
+) -> None:
+    if provenance is None:
+        raise LabEvidenceError("lab evidence requires provenance")
+    checks = (
+        provenance.experiment_id == authorization.experiment_id,
+        provenance.authorization_digest == authorization.digest,
+        provenance.target == target.key,
+        provenance.expected_pid == target.expected_pid,
+        provenance.expected_release == target.expected_release,
+        provenance.com_endpoint.casefold() == authorization.com_endpoint.casefold(),
+        provenance.artifact_sha256 == authorization.artifact_sha256,
+        provenance.software_git_sha == authorization.software_git_sha,
+        provenance.operator_confirmed is True,
+        provenance.cleanup_status == "RELEASED",
+        provenance.hardware_evidence == "lab-readonly-unverified",
+    )
+    if not all(checks):
+        raise LabEvidenceError("lab provenance does not match the authorization/run")
+    if observation is not None:
+        if provenance.observed_pid != observation.exact_pid:
+            raise LabEvidenceError("lab provenance observed PID mismatch")
+        if provenance.observed_release != observation.software_version:
+            raise LabEvidenceError("lab provenance observed release mismatch")
+
+
+def verify_report_fingerprint(payload: dict[str, Any]) -> bool:
+    """Independently recompute the content-integrity fingerprint of a report."""
+    supplied = payload.get("report_fingerprint")
+    if not isinstance(supplied, str):
+        return False
+    fingerprint_payload = {
+        key: value for key, value in payload.items()
+        if key not in {"generated_at", "report_fingerprint"}
+    }
+    return supplied == sha256_text(canonical_json(fingerprint_payload))
+
+
 __all__ = [
+    "ArtifactIdentityError",
     "LabBuildMetadata",
+    "LabEvidenceError",
     "LabReportWriter",
     "canonical_json",
     "sha256_file",
     "sha256_text",
     "stable_token",
+    "validate_lab_provenance",
+    "verify_report_fingerprint",
 ]

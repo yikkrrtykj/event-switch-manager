@@ -167,6 +167,10 @@ class ConsoleQueryResult(Record):
     status: QueryStatus
     output: str = ""
     duration_seconds: float = 0.0
+    output_bytes: int = 0
+    output_lines: int = 0
+    pagination_events: int = 0
+    completion_status: str = "candidate-quiet-window"
     unknown_fields: tuple[str, ...] = ()
 
 
@@ -276,6 +280,10 @@ def compute_evidence_fingerprint(evidence: ConsoleEvidence) -> str:
     for result in payload.get("query_results", []):
         if isinstance(result, dict):
             result.pop("duration_seconds", None)
+            result.pop("output_bytes", None)
+            result.pop("output_lines", None)
+            result.pop("pagination_events", None)
+            result.pop("completion_status", None)
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 

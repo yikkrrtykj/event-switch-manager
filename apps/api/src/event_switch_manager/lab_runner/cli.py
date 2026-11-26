@@ -7,6 +7,7 @@ import getpass
 import hashlib
 import json
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -19,16 +20,18 @@ from event_switch_manager.console.discovery import (
 from event_switch_manager.console.models import (
     ConsoleEvidence,
     LabProvenance,
+    ObservationCompleteness,
     compute_evidence_fingerprint,
 )
 from event_switch_manager.console.observation import CiscoObservationAdapter, IdentityConflict
+from event_switch_manager.console.parser import AuthPromptKind
 from event_switch_manager.console.session import (
-    ConsoleCredentials,
     ConsoleOperatorAbort,
     ConsoleSession,
     ConsoleTimeout,
     SessionCleanupError,
     SessionError,
+    SessionState,
 )
 from event_switch_manager.console.transport import SerialParameters
 from event_switch_manager.integrations import ConsoleQuery
@@ -38,7 +41,14 @@ from .authorization import (
     issue_authorization,
 )
 from .completion import LiveCompletionPolicy
-from .reporting import LabBuildMetadata, LabReportWriter, sha256_text
+from .reporting import (
+    ArtifactIdentityError,
+    LabBuildMetadata,
+    LabEvidenceError,
+    LabReportWriter,
+    sha256_text,
+    validate_lab_provenance,
+)
 from .targets import LAB_TARGETS, LabTarget, get_target
 from .transport import AuthorizedSerialTransport, lab_serial_safety_flags
 
@@ -58,6 +68,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R86")
     parser.add_argument("--self-test", action="store_true", help="离线自检；不枚举也不打开串口")
+    parser.add_argument(
+        "--artifact-check", action="store_true",
+        help="核对运行 EXE SHA-256 与 Build Record；不枚举也不打开串口",
+    )
     parser.add_argument("--list-ports", action="store_true", help="只枚举串口，不打开串口")
     parser.add_argument("--json", action="store_true", help="与 --list-ports 一起输出 JSON")
     parser.add_argument("--target", choices=sorted(LAB_TARGETS), help="实验目标 Profile")
@@ -130,19 +144,61 @@ def _select_port(discovery: SerialDiscovery, requested: str | None) -> SerialPor
     return matches[0]
 
 
-def _confirm(prompt: str) -> bool:
+def _confirm(prompt: str, *, timeout_seconds: float = 120.0) -> bool:
+    start = time.monotonic()
     try:
         answer = input(prompt)
     except EOFError:
         return False
+    if time.monotonic() - start > timeout_seconds:
+        return False
     return answer.strip() == "YES" or answer.strip().casefold() == "y"
 
 
-def _credentials() -> ConsoleCredentials:
-    username = input("Console username: ").strip()
-    password = getpass.getpass("Console password (不回显): ")
-    enable = getpass.getpass("Enable password (可留空, 不回显): ")
-    return ConsoleCredentials(username, password, enable or None)
+def _lab_credential(kind: AuthPromptKind) -> str:
+    if not sys.stdin.isatty():
+        raise SessionError("a safe interactive terminal is required for credentials")
+    if kind is AuthPromptKind.USERNAME:
+        value = input("Console username (不回显控制字符): ").strip()
+    elif kind is AuthPromptKind.PASSWORD:
+        value = getpass.getpass("Console password (不回显): ")
+    else:
+        value = getpass.getpass("Enable password (不回显): ")
+    if not value:
+        raise SessionError("credential prompt was cancelled or empty")
+    return value
+
+
+class _OperatorGate:
+    def __init__(self, authorization: Any, target: LabTarget, counter: list[int]) -> None:
+        self.authorization = authorization
+        self.target = target
+        self.counter = counter
+
+    def authorize_open(self, transport: object) -> None:
+        self.authorization.authorize_open(transport)
+
+    def authorize_query(self, query: ConsoleQuery) -> None:
+        self.authorization.authorize_query(query)
+        self.authorization.check_active()
+        if not _confirm(
+            f"确认执行授权只读查询 {query.value}？输入 y 继续: ",
+        ):
+            raise ConsoleOperatorAbort("operator did not confirm query start")
+        self.authorization.check_active()
+        self.counter[0] += 1
+
+    def authorize_send(
+        self, operation: object, text: str, query: ConsoleQuery | None = None,
+    ) -> None:
+        self.authorization.authorize_send(operation, text, query)
+
+    def check_active(self) -> None:
+        self.authorization.check_active()
+
+    def remaining_seconds(self) -> float | None:
+        remaining = self.authorization.remaining_seconds()
+        return None if remaining is None else float(remaining)
 
 
 def _redacted_output(output: str) -> str:
@@ -155,6 +211,8 @@ def _redacted_output(output: str) -> str:
         (r"(?im)(Processor board ID\s+)(\S+)", r"\1<id>"),
         (r"(?im)(\bSN:\s*)(\S+)", r"\1<id>"),
         (r"(?i)\b(?:[0-9a-f]{4}\.){2}[0-9a-f]{4}\b", "<mac>"),
+        (r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "<ip>"),
+        (r"(?im)^(\s*(?:VLAN|vlan)\s+)(\d+)\b", r"\1<vlan>"),
         (r"(?m)^([A-Za-z0-9_-]+)([>#])$", r"<host>\2"),
     )
     import re
@@ -168,23 +226,25 @@ def _redacted_output(output: str) -> str:
     return excerpt
 
 
-def _operator_query_hook(
-    session: ConsoleSession,
-    *,
-    confirmations: list[int],
-) -> Any:
+def _operator_query_hook(session: ConsoleSession) -> Any:
     def hook(query: ConsoleQuery, result: Any) -> None:
         if session.pending_data():
             raise ConsoleOperatorAbort("operator aborted: late terminal data")
+        output = result.output
         print(
-            f"\n查询: {query.value}  状态: {result.status.value}  "
-            f"耗时: {result.duration_seconds:.3f}s",
+            f"\n查询: {query.value}  命令: {result.command}  "
+            f"状态: {result.status.value}  耗时: {result.duration_seconds:.3f}s",
         )
+        print(
+            f"响应: bytes={len(output.encode('ascii', errors='replace'))} "
+            f"lines={len(output.splitlines())} "
+            f"pagination={result.pagination_events} "
+            f"completion={result.completion_status}",
+        )
+        if result.unknown_fields:
+            print("unknown_fields=" + ", ".join(result.unknown_fields))
         print("脱敏结果摘要:")
-        print(_redacted_output(result.output) or "(无可见输出)")
-        if not _confirm("输入 y 确认该查询结果完整并允许继续；其他输入中止: "):
-            raise ConsoleOperatorAbort("operator did not confirm query completion")
-        confirmations[0] += 1
+        print(_redacted_output(output) or "(无可见输出)")
 
     return hook
 
@@ -247,6 +307,20 @@ def run_self_test() -> int:
     return EXIT_OK
 
 
+def run_artifact_check() -> int:
+    try:
+        build = LabBuildMetadata.load()
+        build.require_frozen()
+    except ArtifactIdentityError as exc:
+        print(f"CONSOLE-LAB ARTIFACT CHECK FAIL: {exc}", file=sys.stderr)
+        return EXIT_AUTHORIZATION
+    print("CONSOLE-LAB ARTIFACT CHECK PASS")
+    print(f"exe_sha256={build.artifact_sha256}")
+    print(f"git_sha={build.software_git_sha}")
+    print("real_serial_opened=NO")
+    return EXIT_OK
+
+
 def run_list_ports(*, as_json: bool) -> int:
     discovery = discover_serial_ports()
     _print_discovery(discovery, as_json=as_json)
@@ -289,6 +363,11 @@ def run_experiment(args: argparse.Namespace) -> int:
         return EXIT_AUTHORIZATION
     build = LabBuildMetadata.load()
     try:
+        build.require_frozen()
+    except ArtifactIdentityError as exc:
+        print(f"拒绝真实实验：{exc}", file=sys.stderr)
+        return EXIT_AUTHORIZATION
+    try:
         authorization = issue_authorization(
             target,
             com_endpoint=port.port,
@@ -306,15 +385,9 @@ def run_experiment(args: argparse.Namespace) -> int:
         parameters=SerialParameters(),
     )
     policy = LiveCompletionPolicy()
-    session = ConsoleSession(
-        transport,
-        lab_gate=authorization,
-        completion_policy=policy,
-        timeout=2.0,
-        max_total_response_bytes=512 * 1024,
-    )
+    output_dir = Path(args.output_dir) / f"experiment-{authorization.experiment_id[:12]}"
     writer = LabReportWriter(
-        Path(args.output_dir),
+        output_dir,
         build=build,
         authorization=authorization,
         target=target,
@@ -322,37 +395,76 @@ def run_experiment(args: argparse.Namespace) -> int:
         port=port,
     )
     confirmations = [0]
+    gate = _OperatorGate(authorization, target, confirmations)
+    session = ConsoleSession(
+        transport,
+        lab_gate=gate,
+        completion_policy=policy,
+        credential_provider=_lab_credential,
+        timeout=60.0,
+        max_total_response_bytes=512 * 1024,
+    )
     evidence: ConsoleEvidence | None = None
-    cleanup_status = "NOT_OPENED"
+    connection_state = "NOT_ATTEMPTED"
+    cleanup_status = "NOT_ATTEMPTED"
     error: str | None = None
     cancelled = False
+    wake_sent = False
+    wake_confirmed = False
+    final_review_confirmed = False
     exit_code = EXIT_OK
     try:
-        print("\n请输入本地凭据；密码不会写入参数、环境变量、日志或报告。")
-        credentials = _credentials()
-        session.open(credentials)
-        cleanup_status = "OPEN"
-        print("登录成功；开始 operator-assisted 只读查询。每条查询均需人工确认。")
-        adapter = CiscoObservationAdapter()
+        connection_state = "OPEN_FAILED"
+        print(
+            "\n被动 attach：不预先索取凭据；仅在设备实际出现认证提示时安全读取。",
+        )
+        session.open(None, initial_timeout=10.0, allow_silent=True)
+        connection_state = "OPENED"
+        if session.state is SessionState.AWAITING_PROMPT:
+            print("设备当前静默，未返回任何已确认的 EXEC prompt。")
+            if not _confirm(
+                "确认该设备处于安全、非生产实验状态且无未提交命令；"
+                "输入 YES 后最多发送一次 CR 唤醒: ",
+            ):
+                raise ConsoleOperatorAbort("operator declined the silent-device wake")
+            if not _confirm("再次确认发送唯一一次 CR 唤醒？输入 y 继续: "):
+                raise ConsoleOperatorAbort("operator did not confirm wake")
+            session.wake_once()
+            wake_sent = True
+            wake_confirmed = True
+            session.finish_attach(None, timeout=30.0)
+        if not session.is_attached:
+            raise SessionError("no reliable EXEC prompt after passive attach/wake")
+        print("已获得可靠 EXEC/auth prompt；开始 operator-assisted 只读查询。")
         base_provenance = _lab_provenance(
             authorization,
             target,
             port,
             None,
             operator_confirmed=False,
-            cleanup_status="OPEN",
+            cleanup_status="OPENED",
         )
+        adapter = CiscoObservationAdapter()
+        remaining = authorization.remaining_seconds() or 0.0
         evidence = adapter.observe(
             session,
             expected_pid=target.expected_pid,
             expected_release=target.expected_release,
-            query_hook=_operator_query_hook(session, confirmations=confirmations),
+            query_hook=_operator_query_hook(session),
             lab_provenance=base_provenance,
+            deadline_seconds=min(900.0, max(1.0, remaining - 1.0)),
         )
-        if evidence.completeness.value == "COMPLETE":
+        if evidence.completeness is ObservationCompleteness.COMPLETE:
             print("程序完成解析；该结果仍不是硬件认证。")
         else:
             print("观察结果为 PARTIAL/INCOMPLETE；报告记录未知字段，禁止标记 COMPLETE。")
+        final_review_confirmed = _confirm(
+            "请核对以上全部脱敏查询结果；确认本次只读流程结束时输入 YES: ",
+        )
+        if not final_review_confirmed:
+            cancelled = True
+            error = "operator: final result review not confirmed"
+            exit_code = EXIT_TRANSPORT
     except LabAuthorizationError as exc:
         error = f"authorization: {exc}"
         exit_code = EXIT_AUTHORIZATION
@@ -364,6 +476,7 @@ def run_experiment(args: argparse.Namespace) -> int:
         cancelled = True
         exit_code = EXIT_TRANSPORT
     except KeyboardInterrupt:
+        session.cancel()
         error = "operator-interrupt"
         cancelled = True
         exit_code = EXIT_TRANSPORT
@@ -381,32 +494,74 @@ def run_experiment(args: argparse.Namespace) -> int:
         error = f"unexpected: {type(exc).__name__}"
         exit_code = EXIT_TRANSPORT
     finally:
-        try:
-            session.close()
-            if cleanup_status != "CLEANUP_REQUIRED":
+        if connection_state == "OPENED":
+            try:
+                session.close()
                 cleanup_status = "RELEASED"
-        except SessionCleanupError:
-            cleanup_status = "CLEANUP_REQUIRED"
-            exit_code = EXIT_CLEANUP
+                connection_state = "RELEASED"
+            except SessionCleanupError:
+                cleanup_status = "CLEANUP_REQUIRED"
+                connection_state = "CLEANUP_REQUIRED"
+                exit_code = EXIT_CLEANUP
+        elif connection_state == "OPEN_FAILED":
+            try:
+                session.close()
+                cleanup_status = "RELEASED"
+            except SessionCleanupError:
+                cleanup_status = "CLEANUP_REQUIRED"
+                exit_code = EXIT_CLEANUP
         authorization.cancel()
 
     if evidence is not None:
+        completed_queries = {
+            result.query for result in evidence.query_results
+            if result.status.value == "ok"
+        }
+        queries_complete = completed_queries == set(target.allowed_queries)
+        operator_confirmed = (
+            confirmations[0] == len(target.allowed_queries)
+            and final_review_confirmed
+            and cleanup_status == "RELEASED"
+            and not cancelled
+        )
         provenance = _lab_provenance(
             authorization,
             target,
             port,
             evidence,
-            operator_confirmed=(
-                confirmations[0] > 0 and cleanup_status == "RELEASED" and not cancelled
-            ),
+            operator_confirmed=operator_confirmed,
             cleanup_status=cleanup_status,
         )
-        evidence = _attach_provenance(evidence, provenance)
+        try:
+            validate_lab_provenance(provenance, authorization, target, evidence.observation)
+            evidence = _attach_provenance(evidence, provenance)
+        except LabEvidenceError as exc:
+            error = f"evidence: {exc}"
+            exit_code = EXIT_AUTHORIZATION
+            evidence = None
+            queries_complete = False
+    else:
+        queries_complete = False
+        operator_confirmed = False
+    experiment_verdict = (
+        "READONLY_QUERIES_COMPLETED"
+        if queries_complete and cleanup_status == "RELEASED" and not error
+        else "FAILED_OR_CANCELLED"
+    )
     connection = {
-        "status": "RELEASED" if cleanup_status == "RELEASED" else cleanup_status,
+        "status": connection_state,
         "com_endpoint": port.port,
-        "opened": cleanup_status != "NOT_OPENED",
-        "operator_confirmed": confirmations[0],
+        "opened": connection_state in {"OPENED", "RELEASED", "CLEANUP_REQUIRED"},
+        "wake_sent": wake_sent,
+        "wake_confirmed": wake_confirmed,
+        "operator_confirmations": confirmations[0],
+        "operator_final_review": final_review_confirmed,
+        "readonly_queries_completed": queries_complete,
+        "observation_completeness": (
+            evidence.completeness.value if evidence is not None else None
+        ),
+        "experiment_verdict": experiment_verdict,
+        "hardware_verdict": "NOT_VERIFIED",
         "real_serial_completion": "NOT_VERIFIED",
     }
     try:
@@ -417,16 +572,23 @@ def run_experiment(args: argparse.Namespace) -> int:
             operator_confirmations=confirmations[0],
             error=error,
             cancelled=cancelled,
+            query_results=session.last_results,
         )
     except Exception as exc:
         print(f"报告写入失败: {type(exc).__name__}", file=sys.stderr)
         return EXIT_TRANSPORT
-    print(f"\n报告: {Path(args.output_dir) / 'console-lab-report.json'}")
-    print(f"摘要: {Path(args.output_dir) / 'console-lab-summary.txt'}")
+    print(f"\n报告: {output_dir / 'console-lab-report.json'}")
+    print(f"摘要: {output_dir / 'console-lab-summary.txt'}")
     print(f"报告指纹: {payload['report_fingerprint']}")
-    print(f"FINAL: {cleanup_status} REAL-SERIAL-COMPLETION=NOT_VERIFIED DEVICE-WRITES=DISABLED")
+    print(
+        f"FINAL: connection={connection_state} cleanup={cleanup_status} "
+        f"verdict={experiment_verdict} REAL-SERIAL-COMPLETION=NOT_VERIFIED "
+        "DEVICE-WRITES=DISABLED",
+    )
     if exit_code == EXIT_OK and cleanup_status != "RELEASED":
         exit_code = EXIT_CLEANUP
+    if exit_code == EXIT_OK and not queries_complete:
+        exit_code = EXIT_TRANSPORT
     return exit_code
 
 
@@ -438,6 +600,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception as exc:
             print(f"CONSOLE-LAB SELF-TEST FAIL: {type(exc).__name__}", file=sys.stderr)
             return EXIT_TRANSPORT
+    if args.artifact_check:
+        return run_artifact_check()
     if args.list_ports:
         return run_list_ports(as_json=args.json)
     if not args.target:
@@ -455,6 +619,7 @@ __all__ = [
     "EXIT_TRANSPORT",
     "EXIT_USAGE",
     "main",
+    "run_artifact_check",
     "run_experiment",
     "run_list_ports",
     "run_self_test",

@@ -76,6 +76,17 @@ $packageInstructions = Join-Path $packageDir "instructions"
 New-Item -ItemType Directory -Force -Path $packageInstructions | Out-Null
 Copy-Item -LiteralPath $instructions -Destination (Join-Path $packageInstructions "README.zh-CN.txt") -Force
 Copy-Item -LiteralPath $acceptance -Destination (Join-Path $packageInstructions "H0-H4-ACCEPTANCE-TEMPLATE.txt") -Force
+$manifestPath = Join-Path $packageDir "DEPENDENCIES-SHA256SUMS.txt"
+$manifestLines = Get-ChildItem -LiteralPath $packageDir -Recurse -File |
+    Where-Object { $_.FullName -ne $manifestPath } |
+    Sort-Object FullName |
+    ForEach-Object {
+        $relative = $_.FullName.Substring($packageDir.Length + 1).Replace("\", "/")
+        $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$hash  $relative"
+    }
+[IO.File]::WriteAllLines($manifestPath, $manifestLines, (New-Object System.Text.UTF8Encoding($false)))
+$manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
 $exeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $record = [ordered]@{
@@ -96,6 +107,8 @@ $record = [ordered]@{
     offline = $true
     instructions = "instructions/README.zh-CN.txt"
     acceptance_template = "instructions/H0-H4-ACCEPTANCE-TEMPLATE.txt"
+    dependencies_manifest = "DEPENDENCIES-SHA256SUMS.txt"
+    dependencies_manifest_sha256 = $manifestHash
     lab_source = "AUTHORIZED_LIVE_LAB"
     product_live_serial = "DISABLED"
     real_serial_completion = "NOT_VERIFIED"

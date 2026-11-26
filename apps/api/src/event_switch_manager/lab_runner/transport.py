@@ -13,11 +13,13 @@ from event_switch_manager.console.discovery import (
     discover_serial_ports,
 )
 from event_switch_manager.console.lease import OS_EXCLUSIVITY_STATUS
+from event_switch_manager.console.session import ConsoleSendOperation
 from event_switch_manager.console.transport import (
     SerialParameters,
     TransportDisconnected,
     TransportError,
 )
+from event_switch_manager.integrations import ConsoleQuery
 
 from .authorization import LabAuthorization, LabAuthorizationError
 from .targets import LAB_SOURCE
@@ -162,8 +164,21 @@ class AuthorizedSerialTransport:
         self._authorization.cancel()
 
     def write(self, text: str) -> None:
+        _ = text
+        raise TransportError(
+            "raw lab write is disabled; use an authorized send operation",
+        )
+
+    def write_authorized(
+        self,
+        text: str,
+        *,
+        operation: ConsoleSendOperation,
+        query: ConsoleQuery | None = None,
+    ) -> None:
         if not self._is_open or self._serial is None or self._cleanup_required:
             raise TransportDisconnected("lab serial transport is not open")
+        self._authorization.authorize_send(operation, text, query)
         if not text:
             return
         try:

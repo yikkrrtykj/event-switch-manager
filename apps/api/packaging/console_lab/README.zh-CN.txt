@@ -23,14 +23,24 @@ Event Switch Manager — Windows Console Lab Runner（R86）
 - 串口候选参数：9600 baud, 8 data bits, parity None, 1 stop bit, no flow control。
   现场仍需核对目标设备的官方 Console 参数。
 
-2. 枚举 COM（不打开串口）
---------------------------
+2. Artifact 身份与 COM 枚举（均不打开串口）
+-------------------------------------------
+先从独立下载的 ZIP 解压，核对外层 ZIP 和 EXE：
+
+  Get-FileHash .\EventSwitchManager-ConsoleLab-windows-x64.zip -Algorithm SHA256
+  Get-FileHash .\EventSwitchManager-ConsoleLab\EventSwitchManager-ConsoleLab.exe -Algorithm SHA256
+
+与 `SHA256SUMS.console-lab` 及 `EventSwitchManager-ConsoleLab-build-record.json`
+比较。程序启动真实实验时也会重新计算运行 EXE 的 SHA-256，与 Build Record
+不一致即拒绝实验。source-run、unknown Git SHA 或缺失 Build Record 不能用于正式验收。
+
 在 ConsoleLab 目录运行：
 
   EventSwitchManager-ConsoleLab.exe --list-ports
   EventSwitchManager-ConsoleLab.exe --list-ports --json
 
 只枚举，不打开、不写数据。无设备时也会正常返回；驱动/枚举错误会显示状态。
+若只看到模糊/重复 identity 的 Bluetooth 或未知适配器，必须停止，不得猜测设备。
 
 3. 选择实验目标
 ----------------
@@ -52,11 +62,21 @@ Event Switch Manager — Windows Console Lab Runner（R86）
 - 授权只对本次进程、本次 COM、本次 adapter identity、本次目标 PID/release 有效。
 - 授权默认不存在，不持久化，不支持环境变量或普通开关绕过。
 - 授权消费后不能重复使用；过期、取消、identity 变化或已消费即拒绝。
+- 初始 attach 采用被动监听；设备静默时不会自动认定其是安全 EXEC。
+- 只有操作者明确确认“设备安全、非生产、无未提交命令”后，才允许发送一次 CR 唤醒；
+  程序不会自动重复发送 CR、Ctrl+C、BREAK、ESC 或恢复命令。
+- 唤醒后必须重新得到可靠 EXEC/auth prompt，否则停止。
+- 如果出现 configuration、ROMMON、setup dialog、认证异常或其他不安全状态，禁止唤醒。
+- 已经处于 EXEC 时不要求预先输入用户名/密码；只有实际出现认证提示时才读取对应凭据。
+  没有安全交互终端时 fail-closed，不允许 getpass 退化为明文回显。
 - 登录得到 EXEC prompt 后先执行 show version 和 show inventory。
 - 实际 PID/release 与预期不一致时立即停止扩展查询。
-- 每条查询结束后显示脱敏结果/状态，操作者输入 y 明确确认才可执行下一条；
-  人工确认不能覆盖程序发现的超时、歧义或不安全状态。
+- 每条查询开始前必须由操作者明确确认；结果会显示命令、耗时、字节/行数、分页数、
+  completion 状态、unknown_fields 和脱敏摘要。人工确认不能覆盖程序发现的超时、
+  歧义或不安全状态。
+- 最终结果还需操作者复核确认；未确认不会记录成功。
 - 不自动重连、不自动重放命令、不自动进入 configuration mode。
+- Ctrl+C 会进入取消/清理流程；关闭失败时报告 CLEANUP_REQUIRED，不声明端口已释放。
 
 5. 只读查询范围
 ----------------
@@ -82,15 +102,27 @@ erase、reload、delete、format、show running-config、show startup-config 都
 
 6. 输出
 --------
-输出目录默认 console-lab-output，包含：
+输出目录默认 console-lab-output；每次实验自动创建独立子目录
+`experiment-<id>`，避免覆盖前次报告。包含：
 
   console-lab-report.json
+  console-lab-report-fingerprint-input.json
   console-lab-summary.txt
   SHA256SUMS
 
 报告包含软件/artifact SHA、实验授权摘要、COM 连接、查询状态/耗时、脱敏观察摘要、
-缺失字段、cleanup 状态和硬件门禁；不保存真实密码、完整未脱敏 transcript 或配置备份。
+缺失字段、connection/cleanup 状态、experiment verdict 和硬件门禁；不保存真实密码、
+完整未脱敏 transcript 或配置备份。失败报告同样脱敏。
 不要自动上传报告到 GitHub 或外部服务器。
+
+独立校验报告内容完整性（不需要 Python）：
+
+  (Get-FileHash .\console-lab-report-fingerprint-input.json -Algorithm SHA256).Hash.ToLower()
+  # 应与 console-lab-report.json 中的 report_fingerprint 完全一致
+  Get-FileHash .\console-lab-report.json -Algorithm SHA256
+  # 应与 SHA256SUMS 中的 console-lab-report.json 行一致
+
+fingerprint 只是内容完整性检查，不是密码学签名，也不证明真实性或硬件验收。
 
 7. 退出码
 ----------
@@ -107,7 +139,12 @@ erase、reload、delete、format、show running-config、show startup-config 都
 - 认证失败、超时、取消、拔线：停止，不自动重试，不自动发送恢复命令。
 - 关闭失败：不声明端口已释放，不开始新会话；报告为 CLEANUP_REQUIRED。
 - 程序不会自动从 ROMMON、switch:、configuration mode 或 initial setup dialog 恢复。
-- 需要额外唤醒时，由现场人员在确认设备安全状态后单独授权设计，不得盲目发送控制字符。
+- 需要额外唤醒时，只允许经过现场人员独立确认的一次 CR；不得盲目发送控制字符。
+- 连接状态与实验结论分别记录：NOT_ATTEMPTED / OPEN_FAILED / OPENED / RELEASED /
+  CLEANUP_REQUIRED；只有实际成功打开才可 opened=true。
+- Bootstrap 失败、PID/release 不符、必需查询失败、prompt 未可靠完成、操作者取消、
+  部分查询未执行或 cleanup 未确认，都不会记录为实验成功。
+- 硬件验收 verdict 始终独立于程序退出码和报告写入成功。
 
 9. 报告与硬件验收
 ------------------

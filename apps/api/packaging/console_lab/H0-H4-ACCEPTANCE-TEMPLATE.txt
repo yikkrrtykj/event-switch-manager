@@ -27,6 +27,11 @@ H1 — 独占与连接
 ---------------
 [ ] 程序打开指定 COM 前重新枚举并匹配 adapter identity
 [ ] 独立进程/工具尝试占用同一 COM，验证第二个进程不能获得
+    方法：先让 ConsoleLab 空闲等待 passive attach，再运行第二个 PowerShell：
+      $p = New-Object System.IO.Ports.SerialPort("COMx")
+      $p.Open()
+    第二进程只验证独占打开，不写任何字节；若意外获得 handle，立即 Close()
+    并停止本次 H1，不得进一步操作。
 [ ] 正常关闭后同 COM 可重新打开
 [ ] 已占用端口被安全拒绝
 [ ] 关闭失败时报告 CLEANUP_REQUIRED，且不开始新会话
