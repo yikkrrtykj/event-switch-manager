@@ -151,15 +151,6 @@ class LabAuthorization:
             raise LabAuthorizationError("live connection was not opened under authorization")
         if len(text.encode("utf-8", errors="replace")) > 512:
             raise LabAuthorizationError("lab send exceeds the authorized bound")
-        if operation in {
-            ConsoleSendOperation.USERNAME,
-            ConsoleSendOperation.PASSWORD,
-            ConsoleSendOperation.ENABLE,
-            ConsoleSendOperation.ENABLE_PASSWORD,
-        }:
-            # Credential sends are only legitimate while the session is in an
-            # authentication state; the Session itself enforces that state.
-            return
         if self._bound_transport is None:
             raise LabAuthorizationError("lab transport is not bound")
         pending = getattr(self._bound_transport, "pending_data", None)
@@ -167,6 +158,27 @@ class LabAuthorization:
             raise LabAuthorizationError("late terminal data is pending")
         if getattr(self._bound_transport, "cleanup_required", False):
             raise LabAuthorizationError("serial cleanup is required")
+        if operation in {
+            ConsoleSendOperation.USERNAME,
+            ConsoleSendOperation.PASSWORD,
+            ConsoleSendOperation.ENABLE,
+            ConsoleSendOperation.ENABLE_PASSWORD,
+        }:
+            if not text.endswith("\r"):
+                raise LabAuthorizationError("credential send must end with one CR")
+            body = text[:-1]
+            if (
+                not body
+                or "\r" in body
+                or "\n" in body
+                or any(ord(char) < 32 or ord(char) > 126 for char in body)
+            ):
+                raise LabAuthorizationError("credential send contains control characters")
+            if operation is ConsoleSendOperation.ENABLE and body != "enable":
+                raise LabAuthorizationError("enable command text is fixed")
+            if len(body) > 256:
+                raise LabAuthorizationError("credential send exceeds the authorized bound")
+            return
         if operation is ConsoleSendOperation.WAKE:
             if text != "\r" or self._wake_count >= 1:
                 raise LabAuthorizationError("only one authorized wake CR is allowed")

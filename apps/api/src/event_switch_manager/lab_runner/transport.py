@@ -13,7 +13,7 @@ from event_switch_manager.console.discovery import (
     discover_serial_ports,
 )
 from event_switch_manager.console.lease import OS_EXCLUSIVITY_STATUS
-from event_switch_manager.console.session import ConsoleSendOperation
+from event_switch_manager.console.session import ConsoleSendOperation, SessionState
 from event_switch_manager.console.transport import (
     SerialParameters,
     TransportDisconnected,
@@ -82,6 +82,8 @@ class AuthorizedSerialTransport:
         self._is_open = False
         self._cleanup_required = False
         self._ever_opened = False
+        self._write_token: object | None = None
+        self._write_state_provider: object | None = None
 
     @property
     def authorization(self) -> LabAuthorization:
@@ -110,6 +112,10 @@ class AuthorizedSerialTransport:
     @property
     def ever_opened(self) -> bool:
         return self._ever_opened
+
+    def bind_write_token(self, token: object, state_provider: object | None = None) -> None:
+        self._write_token = token
+        self._write_state_provider = state_provider
 
     @property
     def cleanup_required(self) -> bool:
@@ -181,9 +187,22 @@ class AuthorizedSerialTransport:
         *,
         operation: ConsoleSendOperation,
         query: ConsoleQuery | None = None,
+        session_token: object | None = None,
     ) -> None:
         if not self._is_open or self._serial is None or self._cleanup_required:
             raise TransportDisconnected("lab serial transport is not open")
+        if self._write_token is None or session_token is not self._write_token:
+            raise TransportError("lab send requires a bound session capability")
+        if operation in {
+            ConsoleSendOperation.USERNAME,
+            ConsoleSendOperation.PASSWORD,
+            ConsoleSendOperation.ENABLE,
+            ConsoleSendOperation.ENABLE_PASSWORD,
+        }:
+            provider = self._write_state_provider
+            state = provider() if callable(provider) else None
+            if state is not SessionState.AUTHENTICATING:
+                raise TransportError("credential send outside authenticated state")
         self._authorization.authorize_send(operation, text, query)
         if not text:
             return
@@ -196,6 +215,9 @@ class AuthorizedSerialTransport:
         deadline = time.monotonic() + self._parameters.write_timeout_seconds
         sent = 0
         while sent < len(payload):
+            # Expiry/cancellation is re-checked before every partial chunk so
+            # no remaining bytes are written after authorization is revoked.
+            self._authorization.check_active()
             if time.monotonic() >= deadline:
                 raise TransportError("lab-serial-write-timeout")
             try:

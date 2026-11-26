@@ -265,6 +265,7 @@ class ConsoleSession:
         self._wake_sent = False
         self._cancel_event = threading.Event()
         self._last_prompt_read_saw_data = False
+        self._write_token = object()
 
     @property
     def state(self) -> SessionState:
@@ -451,6 +452,9 @@ class ConsoleSession:
             self._wake_sent = False
             self._state = SessionState.CONNECTING
             self._transport.open()
+            bind_token = getattr(self._transport, "bind_write_token", None)
+            if callable(bind_token):
+                bind_token(self._write_token, lambda: self._state)
             self._state = SessionState.AWAITING_PROMPT
             try:
                 read = self._read_for_prompt(timeout=initial_timeout)
@@ -499,8 +503,14 @@ class ConsoleSession:
             self._lab_gate.check_active()
         write_authorized = getattr(self._transport, "write_authorized", None)
         if callable(write_authorized):
-            # The real transport is the final per-write authorization boundary.
-            write_authorized(text, operation=operation, query=query)
+            # The real transport is the final per-write authorization boundary;
+            # the session capability token prevents direct callers bypassing it.
+            write_authorized(
+                text,
+                operation=operation,
+                query=query,
+                session_token=self._write_token,
+            )
         else:
             self._transport.write(text)
 

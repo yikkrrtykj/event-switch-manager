@@ -254,22 +254,100 @@ def test_authorization_rejects_out_of_scope_query_and_pending_data() -> None:
     pending.close()
 
 
+def _bind_write_token(transport: AuthorizedSerialTransport) -> object:
+    token = object()
+    transport.bind_write_token(token, lambda: SessionState.AUTHENTICATING)
+    return token
+
+
 def test_lab_transport_rejects_raw_and_forged_sends() -> None:
     transport = _open_transport(serial=FakeSerial(initial=""), target_key="c1000")
     with pytest.raises(TransportError, match="raw lab write"):
         transport.write("show version\r")
+    with pytest.raises(TransportError, match="bound session"):
+        transport.write_authorized(
+            "show version\r",
+            operation=ConsoleSendOperation.QUERY,
+            query=ConsoleQuery.VERSION,
+        )
+    token = _bind_write_token(transport)
     with pytest.raises(LabAuthorizationError, match="not match|outside"):
         transport.write_authorized(
             "show version\r",
             operation=ConsoleSendOperation.QUERY,
             query=ConsoleQuery.LICENSE,
+            session_token=token,
         )
     with pytest.raises(LabAuthorizationError, match="not match"):
         transport.write_authorized(
             "show inventory\r",
             operation=ConsoleSendOperation.QUERY,
             query=ConsoleQuery.VERSION,
+            session_token=token,
         )
+    transport.close()
+
+
+def test_direct_write_authorized_cannot_bypass_credential_state_or_text() -> None:
+    transport = _open_transport(serial=FakeSerial(initial=""))
+    with pytest.raises(TransportError, match="bound session"):
+        transport.write_authorized(
+            "lab-user\r",
+            operation=ConsoleSendOperation.USERNAME,
+        )
+    token = object()
+    transport.bind_write_token(token, lambda: SessionState.USER_EXEC)
+    with pytest.raises(TransportError, match="authenticated state"):
+        transport.write_authorized(
+            "lab-user\r",
+            operation=ConsoleSendOperation.USERNAME,
+            session_token=token,
+        )
+    token = _bind_write_token(transport)
+    with pytest.raises(LabAuthorizationError, match="fixed"):
+        transport.write_authorized(
+            "configure terminal\r",
+            operation=ConsoleSendOperation.ENABLE,
+            session_token=token,
+        )
+    with pytest.raises(LabAuthorizationError, match="control"):
+        transport.write_authorized(
+            "lab\ruser\r",
+            operation=ConsoleSendOperation.USERNAME,
+            session_token=token,
+        )
+    assert transport._serial is not None
+    assert transport._serial.writes == []
+    transport.close()
+
+
+def test_partial_write_stops_when_authorization_is_cancelled() -> None:
+    port = _port()
+    auth = _auth(port=port)
+
+    class CancelOnFirstWriteSerial(FakeSerial):
+        def write(self, data: bytes) -> int:
+            self.writes.append(data[:1])
+            auth.cancel()
+            return 1
+
+    serial = CancelOnFirstWriteSerial(initial="")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    auth.authorize_open(transport)
+    transport.open()
+    token = _bind_write_token(transport)
+    with pytest.raises(LabAuthorizationError, match="cancelled"):
+        transport.write_authorized(
+            "show version\r",
+            operation=ConsoleSendOperation.QUERY,
+            query=ConsoleQuery.VERSION,
+            session_token=token,
+        )
+    assert b"".join(serial.writes) == b"s"
     transport.close()
 
 
@@ -294,9 +372,14 @@ def test_authorization_immutability_and_forged_target_rejection() -> None:
             operator_confirmed=True,
         )
     transport = _open_transport(serial=FakeSerial(initial=""))
-    transport.write_authorized("\r", operation=ConsoleSendOperation.WAKE)
+    token = _bind_write_token(transport)
+    transport.write_authorized(
+        "\r", operation=ConsoleSendOperation.WAKE, session_token=token,
+    )
     with pytest.raises(LabAuthorizationError, match="one authorized wake"):
-        transport.write_authorized("\r", operation=ConsoleSendOperation.WAKE)
+        transport.write_authorized(
+            "\r", operation=ConsoleSendOperation.WAKE, session_token=token,
+        )
     transport.close()
 
 
@@ -304,10 +387,12 @@ def test_transport_partial_write_and_cleanup_retry() -> None:
     serial = FakeSerial(initial="", close_failures=1)
     serial.partial_write = True
     transport = _open_transport(serial=serial)
+    token = _bind_write_token(transport)
     transport.write_authorized(
         "show version\r",
         operation=ConsoleSendOperation.QUERY,
         query=ConsoleQuery.VERSION,
+        session_token=token,
     )
     assert b"".join(serial.writes) == b"show version\r"
     with pytest.raises(TransportError, match="close"):
@@ -683,18 +768,23 @@ def test_enable_credentials_are_requested_only_at_enable_prompt() -> None:
 
 
 def test_credentials_only_requested_at_real_auth_prompt() -> None:
+    class AuthSerial(FakeSerial):
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            if b"lab-user" in data:
+                self.buffer += "Password: "
+            elif b"lab-pass" in data:
+                self.buffer += "R1>\n"
+            return len(data)
+
     port = _port()
     auth = _auth(port=port)
-    serial = FakeSerial(initial="Username: ")
+    serial = AuthSerial(initial="Username: ")
     prompts: list[str] = []
 
     def provider(kind: Any) -> str:
         prompts.append(kind.name)
-        if kind.name == "USERNAME":
-            serial.buffer += "Password: "
-            return "lab-user"
-        serial.buffer += "R1>\n"
-        return "lab-pass"
+        return "lab-user" if kind.name == "USERNAME" else "lab-pass"
 
     transport = AuthorizedSerialTransport(
         auth,
