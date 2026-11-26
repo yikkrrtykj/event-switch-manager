@@ -4,12 +4,19 @@ Event Switch Manager — Windows Console Lab Runner（R88）
 默认双击：
   EventSwitchManager-ConsoleLab.exe
 
-会直接打开独立 Windows Tk GUI。所有串口/实验操作在 GUI 内完成，不依赖
-PowerShell。命令行参数继续保留用于诊断：
+会直接打开独立 Windows Tk GUI，不显示额外黑色控制台窗口（Windows GUI
+subsystem）。所有串口/实验操作在 GUI 内完成，不依赖 PowerShell。
 
-  EventSwitchManager-ConsoleLab.exe --self-test
-  EventSwitchManager-ConsoleLab.exe --artifact-check
-  EventSwitchManager-ConsoleLab.exe --list-ports --json
+CLI 诊断使用独立 console 入口：
+
+  EventSwitchManager-ConsoleLab-CLI.exe --self-test
+  EventSwitchManager-ConsoleLab-CLI.exe --artifact-check
+  EventSwitchManager-ConsoleLab-CLI.exe --list-ports --json
+
+两个 EXE 共享同一 onedir/依赖 manifest，但入口和 Windows subsystem 独立：
+
+  EventSwitchManager-ConsoleLab.exe      windowed GUI
+  EventSwitchManager-ConsoleLab-CLI.exe  console diagnostics
 
 --- 原有 CLI 诊断说明 ---
 
@@ -46,10 +53,10 @@ PowerShell。命令行参数继续保留用于诊断：
 比较。程序启动真实实验时也会重新计算运行 EXE 的 SHA-256，与 Build Record
 不一致即拒绝实验。source-run、unknown Git SHA 或缺失 Build Record 不能用于正式验收。
 
-在 ConsoleLab 目录运行：
+在 ConsoleLab 目录运行（console 诊断入口）：
 
-  EventSwitchManager-ConsoleLab.exe --list-ports
-  EventSwitchManager-ConsoleLab.exe --list-ports --json
+  EventSwitchManager-ConsoleLab-CLI.exe --list-ports
+  EventSwitchManager-ConsoleLab-CLI.exe --list-ports --json
 
 只枚举，不打开、不写数据。无设备时也会正常返回；驱动/枚举错误会显示状态。
 若只看到模糊/重复 identity 的 Bluetooth 或未知适配器，必须停止，不得猜测设备。
@@ -61,7 +68,7 @@ PowerShell。命令行参数继续保留用于诊断：
 
 必须同时提供明确选择的 --com，例如：
 
-  EventSwitchManager-ConsoleLab.exe --target c1000 --com COM3 --output-dir .\lab-out
+  EventSwitchManager-ConsoleLab-CLI.exe --target c1000 --com COM3 --output-dir .\lab-out
 
 Bluetooth SPP（Windows 蓝牙标准串行）：
 - GUI 中选择具体 COM，勾选“人工绑定选中的 Bluetooth SPP 端口”，并再次确认

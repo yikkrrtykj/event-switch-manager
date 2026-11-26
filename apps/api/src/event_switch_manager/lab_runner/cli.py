@@ -461,6 +461,7 @@ def run_artifact_check() -> int:
         print(f"CONSOLE-LAB ARTIFACT CHECK FAIL: {exc}", file=sys.stderr)
         return EXIT_AUTHORIZATION
     print("CONSOLE-LAB ARTIFACT CHECK PASS")
+    print(f"entrypoint={build.entrypoint}")
     print(f"exe_sha256={build.artifact_sha256}")
     print(f"git_sha={build.software_git_sha}")
     print("real_serial_opened=NO")

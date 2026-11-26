@@ -1,7 +1,8 @@
-"""PyInstaller entry point for the isolated ConsoleLab artifact.
+"""Source-tree compatibility launcher.
 
-No arguments (double-click) opens the standalone Tk GUI.  Diagnostic CLI
-arguments keep using the existing command-line entry point.
+The packaged artifact uses two dedicated entry points:
+  * EventSwitchManager-ConsoleLab.exe      (windowed GUI)
+  * EventSwitchManager-ConsoleLab-CLI.exe  (console diagnostics)
 """
 
 from __future__ import annotations

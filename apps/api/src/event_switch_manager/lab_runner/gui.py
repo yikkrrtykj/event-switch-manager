@@ -671,11 +671,23 @@ class ConsoleLabGui:
         ]
         self._append_info("\n".join(lines))
 
-    def smoke_close(self) -> None:
-        if self.artifact_ok and self.self_ok:
-            print("CONSOLE-LAB GUI SMOKE PASS")
-            print("real_serial_opened=NO")
-            print("com_enumeration=SKIPPED_IN_SMOKE")
+    def smoke_close(self, report_path: Path | None = None) -> None:
+        payload = {
+            "status": "passed" if (self.artifact_ok and self.self_ok) else "failed",
+            "artifact_check": self.artifact_ok,
+            "self_test": self.self_ok,
+            "real_serial_opened": "NO",
+            "com_enumeration": "SKIPPED_IN_SMOKE",
+        }
+        if report_path is not None:
+            try:
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                payload["status"] = "failed"
         self.root.destroy()
 
     def _destroy(self) -> None:
@@ -713,20 +725,41 @@ class ConsoleLabGui:
         self._destroy()
 
 
+def _ensure_windowed_streams() -> None:
+    """Windowed PyInstaller has no stdin/stdout/stderr; never let those break."""
+    for name in ("stdin", "stdout", "stderr"):
+        if getattr(sys, name) is None:
+            setattr(sys, name, open(os.devnull, "r+" if name == "stdin" else "w"))
+
+
 def main(argv: list[str] | None = None) -> int:
+    _ensure_windowed_streams()
     args = list(sys.argv[1:] if argv is None else argv)
     smoke = "--gui-smoke" in args
+    report_path: Path | None = None
+    if "--gui-smoke-report" in args:
+        index = args.index("--gui-smoke-report")
+        if index + 1 < len(args):
+            report_path = Path(args[index + 1])
     try:
         root = tk.Tk()
-    except tk.TclError as exc:
-        print(f"CONSOLE-LAB GUI FAIL: {type(exc).__name__}", file=sys.stderr)
+    except tk.TclError:
+        if report_path is not None:
+            try:
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text(
+                    json.dumps({"status": "failed", "reason": "tk-startup"}) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
         return 6
     app = ConsoleLabGui(root, smoke=smoke)
     if smoke:
         if app.artifact_ok and app.self_ok:
-            root.after(500, app.smoke_close)
+            root.after(500, lambda: app.smoke_close(report_path))
         else:
-            root.after(100, root.destroy)
+            root.after(100, lambda: app.smoke_close(report_path))
     root.mainloop()
     if smoke and not (app.artifact_ok and app.self_ok):
         return 6

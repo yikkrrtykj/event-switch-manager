@@ -52,6 +52,7 @@ class LabBuildMetadata:
     artifact_name: str
     is_frozen: bool = False
     identity_verified: bool = False
+    entrypoint: str = "unknown"
 
     @classmethod
     def load(cls, executable: Path | None = None) -> LabBuildMetadata:
@@ -64,8 +65,13 @@ class LabBuildMetadata:
         if record.exists():
             try:
                 data = json.loads(record.read_text(encoding="utf-8"))
-                recorded = str(data.get("executable_sha256", ""))
-                if recorded != actual_exe_sha:
+                gui_sha = str(data.get("executable_sha256", ""))
+                cli_sha = str(data.get("cli_executable_sha256", ""))
+                if actual_exe_sha == gui_sha:
+                    entrypoint = "gui"
+                elif cli_sha and actual_exe_sha == cli_sha:
+                    entrypoint = "cli"
+                else:
                     raise ArtifactIdentityError(
                         "running executable SHA-256 does not match the build record",
                     )
@@ -80,6 +86,7 @@ class LabBuildMetadata:
                     ),
                     is_frozen=True,
                     identity_verified=True,
+                    entrypoint=entrypoint,
                 )
             except (OSError, ValueError) as exc:
                 raise ArtifactIdentityError("build record is unreadable") from exc

@@ -2041,6 +2041,30 @@ def test_late_data_during_final_review_cannot_be_success(
     assert payload["evidence"]["lab_provenance_digest"] is not None
 
 
+def test_build_record_supports_gui_and_cli_entrypoint_hashes(tmp_path: Path) -> None:
+    gui = tmp_path / "EventSwitchManager-ConsoleLab.exe"
+    cli = tmp_path / "EventSwitchManager-ConsoleLab-CLI.exe"
+    gui.write_bytes(b"gui executable")
+    cli.write_bytes(b"cli executable")
+    gui_hash = sha256_text("gui executable")
+    cli_hash = sha256_text("cli executable")
+    (tmp_path / "EventSwitchManager-ConsoleLab-build-record.json").write_text(
+        json.dumps({
+            "package": "EventSwitchManager-ConsoleLab",
+            "git_sha": "a" * 40,
+            "executable_sha256": gui_hash,
+            "cli_executable_sha256": cli_hash,
+        }),
+        encoding="utf-8",
+    )
+    gui_meta = LabBuildMetadata.load(gui)
+    cli_meta = LabBuildMetadata.load(cli)
+    assert gui_meta.entrypoint == "gui"
+    assert gui_meta.artifact_sha256 == gui_hash
+    assert cli_meta.entrypoint == "cli"
+    assert cli_meta.artifact_sha256 == cli_hash
+
+
 def test_cli_self_test_and_listing_do_not_open_serial(monkeypatch: pytest.MonkeyPatch) -> None:
     assert run_self_test() == 0
     called: list[bool] = []
