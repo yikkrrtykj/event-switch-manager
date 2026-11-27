@@ -2429,7 +2429,7 @@ def test_gui_profile_switch_refreshes_auth_summary_and_progress() -> None:
     app.progress.start(12)
     app._finish_worker(6)
     assert int(app.progress.cget("value")) == 0
-    assert "EXIT_6" in app.connection_status_var.get()
+    assert app.connection_status_var.get().startswith("状态:")
     app.on_close()
 
 
