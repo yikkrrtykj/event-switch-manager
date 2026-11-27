@@ -25,9 +25,11 @@ GUI 中的“被动终端诊断（只收不发）”入口与正常只读采集�
 - 复用现有串口 identity 绑定、人工 Bluetooth 方向确认、独占 open 和 cleanup 门禁。
 - 只调用串口 open/read/close，不发送 CR、认证信息、分页字符或查询命令。
 - 显示实时、有界、脱敏的 RX/parser 事件；控制字符显示为 `<CR>`/`<LF>`/
-  `<BS>`/`<TAB>`/`<ESC>` 等结构化表示。
+  `<BS>`/`<TAB>`/`<ESC>` 等结构化表示。导出的诊断报告只保存结构化 preview
+  （字母数字替换为 x），不保存实时内容；实时窗口内容同样经过脱敏。
 - 记录 prompt 候选匿名 identity、mode、candidate index、相对时间和 collision 原因。
 - 未知敏感 token 默认遮挡；不保存完整原始 transcript、密码或凭据。
+  报告中的 chunk/event preview 均为结构化，不包含终端字母数字内容。
 - 15 秒有界；同时受最大字节/事件/chunk 数限制，超限安全结束。
 - 结束后可一键“导出诊断 ZIP”，包含报告、摘要、事件 JSONL 和 SHA256SUMS。
   该诊断 ZIP 是用户主动导出文件，不属于软件运行 Artifact。

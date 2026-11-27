@@ -69,7 +69,7 @@ def _mask_preview(text: str, secrets: tuple[str, ...] = ()) -> str:
     redacted = _ANSI.sub(" <ANSI> ", text)
     for secret in secrets:
         if secret:
-            redacted = redacted.replace(secret, "<redacted-identity>")
+            redacted = redacted.replace(secret, "<identity>")
     redacted = _SECRETISH.sub("<REDACTED>", redacted)
     redacted = _IP.sub("<ip>", redacted)
     redacted = _MAC.sub("<mac>", redacted)
@@ -85,6 +85,58 @@ def _mask_preview(text: str, secrets: tuple[str, ...] = ()) -> str:
     )
     return redacted[:_PREVIEW_CHARS] + (
         "<truncated>" if len(redacted) > _PREVIEW_CHARS else ""
+    )
+
+
+class _RollingRedactor:
+    """Redact known identities across read-chunk boundaries."""
+
+    def __init__(self, secrets: tuple[str, ...]) -> None:
+        self._secrets = tuple(
+            secret for secret in secrets if secret
+        )
+        self._max_secret = max((len(secret) for secret in self._secrets), default=0)
+        self._raw_tail = ""
+
+    def feed(self, chunk: str) -> str:
+        combined = self._raw_tail + chunk
+        for secret in self._secrets:
+            combined = re.sub(
+                re.escape(secret),
+                "<identity>",
+                combined,
+                flags=re.IGNORECASE,
+            )
+        if self._max_secret > 1:
+            self._raw_tail = (self._raw_tail + chunk)[-(self._max_secret - 1):]
+        else:
+            self._raw_tail = ""
+        return _mask_preview(combined)
+
+
+def _structure_preview(text: str) -> str:
+    """Prompt-context preview with no alphanumeric content at all."""
+    rendered: list[str] = []
+    for character in text:
+        if character == "\r":
+            rendered.append("<CR>")
+        elif character == "\n":
+            rendered.append("<LF>")
+        elif character == "\t":
+            rendered.append("<TAB>")
+        elif character == "\b":
+            rendered.append("<BS>")
+        elif character == "\x1b":
+            rendered.append("<ESC>")
+        elif character.isalnum():
+            rendered.append("x")
+        elif 0x20 <= ord(character) <= 0x7E:
+            rendered.append(character)
+        else:
+            rendered.append(f"<U+{ord(character):04X}>")
+    preview = "".join(rendered)
+    return preview[:_PREVIEW_CHARS] + (
+        "<truncated>" if len(preview) > _PREVIEW_CHARS else ""
     )
 
 
@@ -227,6 +279,7 @@ def run_passive_diagnostics(
     )
     primary_failure: dict[str, Any] | None = None
     error: str | None = None
+    redactor = _RollingRedactor(sensitive_values)
     status = "COMPLETED"
     stream_offset = 0
     stream_bytes = 0
@@ -270,21 +323,23 @@ def run_passive_diagnostics(
             length = len(chunk.encode("utf-8"))
             stream_offset += length
             stream_bytes += length
+            live_preview = redactor.feed(chunk)
             chunk_record = {
                 "chunk": len(chunks),
                 "length": length,
                 "offset_bytes": stream_offset,
                 "relative_seconds": round(now - opened_at, 6),
-                "preview": _mask_preview(chunk, sensitive_values),
+                # Persisted previews are structural-only; live content is
+                # redacted in memory and never written to the diagnostic ZIP.
+                "preview": _structure_preview(chunk),
+                "preview_kind": "structural",
             }
             chunks.append(chunk_record)
             last_chunk_preview = str(chunk_record["preview"])
             if callbacks and callbacks.on_chunk:
                 callbacks.on_chunk(chunk_record)
             if callbacks and callbacks.on_event:
-                callbacks.on_event(
-                    f"[RX {length}b] {chunk_record['preview']}",
-                )
+                callbacks.on_event(f"[RX {length}b] {live_preview}")
             for event in parser.feed(chunk):
                 if len(events) >= MAX_PASSIVE_EVENTS:
                     status = "BOUNDED_LIMIT"
@@ -296,11 +351,12 @@ def run_passive_diagnostics(
                     stream_offset=stream_offset,
                     opened_at=opened_at,
                     identity=parser.last_prompt_identity,
-                    secrets=sensitive_values,
                 )
                 events.append(record)
                 if last_prompt_event is not None:
-                    last_prompt_event["after_preview"] = last_chunk_preview
+                    last_prompt_event["after_preview"] = _structure_preview(
+                        last_chunk_preview,
+                    )
                     last_prompt_event = None
                 if event.kind is ParserEventKind.PROMPT:
                     last_prompt_event = record
@@ -466,6 +522,7 @@ def run_passive_diagnostics(
             "raw_transcript_saved": False,
             "credentials_saved": False,
             "content_is_redacted_and_bounded": True,
+            "persisted_content": "structural-only",
             "preview_total_limit_chars": MAX_PASSIVE_PREVIEW_TOTAL,
         },
         "hardware_verified": False,
@@ -536,10 +593,9 @@ def _event_record(
     stream_offset: int,
     opened_at: float,
     identity: str | None,
-    secrets: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     kind = event.kind.value
-    preview = _mask_preview(event.output, secrets) if event.output else ""
+    preview = _structure_preview(event.output) if event.output else ""
     record: dict[str, Any] = {
         "index": index,
         "kind": kind,

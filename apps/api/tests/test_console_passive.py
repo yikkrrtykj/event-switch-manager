@@ -48,21 +48,22 @@ class PassiveSerial:
         self.closed = True
 
 
-def _port() -> SerialPortInfo:
+def _port(*, serial_number: str | None = None) -> SerialPortInfo:
     return SerialPortInfo(
         port="COM3",
         description="USB Serial",
         adapter_identity="usb:0403:6001:TEST",
         identity_quality=IdentityQuality.STABLE,
+        serial_number=serial_number,
     )
 
 
-def _discovery() -> SerialDiscovery:
+def _discovery(port: SerialPortInfo | None = None) -> SerialDiscovery:
     return SerialDiscovery(
         platform="win32",
         status=SerialPlatformStatus.SUPPORTED,
         supported=True,
-        ports=(_port(),),
+        ports=(port or _port(),),
     )
 
 
@@ -179,6 +180,44 @@ def test_passive_reuses_application_lease_gate(
     assert serial.writes == []
     assert result.status == "OPEN_FAILED"
     assert manager.active_owner("COM3") is None
+
+
+def test_known_identity_is_redacted_across_chunk_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "test-identity-value"
+    port = _port(serial_number=secret)
+    serial = PassiveSerial([
+        secret[:5],
+        secret[5:] + "\r\nR1#\r\n",
+        secret.lower()[:4],
+        secret.lower()[4:] + "\r\n",
+    ])
+    monkeypatch.setattr(
+        LabBuildMetadata, "load", classmethod(lambda _cls: _metadata()),
+    )
+    result = run_passive_diagnostics(
+        _args(tmp_path, duration=0.4),
+        discovery=_discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    combined = (
+        result.report_path.read_text(encoding="utf-8")
+        + result.events_path.read_text(encoding="utf-8")
+        + result.summary_path.read_text(encoding="utf-8")
+    )
+    assert secret not in combined
+    assert secret.lower() not in combined
+    assert secret[:5].casefold() not in combined.casefold()
+    assert secret[-5:].casefold() not in combined.casefold()
+    assert "<identity>" not in combined
+    for event in result.events:
+        assert secret.casefold() not in json.dumps(event, ensure_ascii=False).casefold()
+    assert all(
+        item.get("preview_kind") == "structural"
+        for item in json.loads(result.report_path.read_text(encoding="utf-8"))["chunks"]
+    )
 
 
 def test_passive_export_is_bounded_and_checksummed(
