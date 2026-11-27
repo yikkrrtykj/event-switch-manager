@@ -265,6 +265,7 @@ class ConsoleSession:
         self._wake_sent = False
         self._cancel_event = threading.Event()
         self._last_prompt_read_saw_data = False
+        self._last_prompt_raw_bytes = 0
         self._write_token = object()
         self._last_failure: dict[str, object] | None = None
         self._cleanup_error: dict[str, object] | None = None
@@ -794,7 +795,6 @@ class ConsoleSession:
         )
         if callable(reset_write_accounting):
             reset_write_accounting()
-        response_start = self._total_response_bytes
         stage = "authorize-query"
 
         def failed_result(exc: BaseException) -> ConsoleQueryResult:
@@ -814,7 +814,7 @@ class ConsoleSession:
                 ),
                 command_sent=command_sent,
                 sent_bytes=sent_bytes,
-                response_bytes=max(0, self._total_response_bytes - response_start),
+                response_bytes=self._last_prompt_raw_bytes,
                 completion_status=(
                     "not-sent" if not command_sent else "unverified"
                 ),
@@ -870,7 +870,7 @@ class ConsoleSession:
                 ),
                 command_sent=command_sent,
                 sent_bytes=sent_bytes,
-                response_bytes=max(0, self._total_response_bytes - response_start),
+                response_bytes=self._last_prompt_raw_bytes,
                 failure_stage=(
                     "device-command" if status is QueryStatus.FAILED else None
                 ),
@@ -950,6 +950,7 @@ class ConsoleSession:
     ) -> _PromptRead:
         deadline = self._read_deadline(timeout=timeout)
         self._last_prompt_read_saw_data = False
+        self._last_prompt_raw_bytes = 0
         output = ""
         candidate: _PromptRead | None = None
         while time.monotonic() < deadline:
@@ -986,6 +987,7 @@ class ConsoleSession:
             chunk = self._transport.read_chunk(read_limit)
             if not chunk:
                 continue
+            self._last_prompt_raw_bytes += len(chunk.encode("utf-8"))
             self._last_prompt_read_saw_data = True
             if self._completion_policy is not None:
                 self._completion_policy.observe_chunk(chunk)

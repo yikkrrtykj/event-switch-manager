@@ -785,6 +785,29 @@ def test_prompt_trailing_non_whitespace_fails_closed() -> None:
     assert session.state is SessionState.FAILED
 
 
+def test_partial_response_bytes_counted_without_final_prompt() -> None:
+    chunk = "show version\npartial output without prompt"
+    transport = _ScriptedTransport(
+        "R1>\n",
+        {"show version": chunk},
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=0.2,
+    )
+    session.open(None)
+    try:
+        with pytest.raises(SessionError):
+            session.query_result(ConsoleQuery.VERSION)
+        failed = session.last_results[-1]
+        assert failed.command_sent is True
+        assert failed.sent_bytes == len("show version\r")
+        assert failed.response_bytes == len(chunk)
+        assert failed.output_bytes == 0
+        assert failed.failure_stage == "read"
+    finally:
+        session.close()
+
+
 def test_transport_read_failure_retains_lease_when_close_fails() -> None:
     manager = ConsoleLeaseManager()
     session = ConsoleSession(
