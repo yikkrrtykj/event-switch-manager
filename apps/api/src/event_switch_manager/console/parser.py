@@ -70,6 +70,7 @@ class ParserEvent:
     mode: PromptMode | None = None
     auth_prompt: AuthPromptKind | None = None
     reason: str | None = None
+    line_terminated: bool = False
 
 
 class ConsoleOutputLimit(RuntimeError):
@@ -363,6 +364,7 @@ class ConsolePromptParser:
             if prompt is not None:
                 start = self._buffer.rfind(last_line)
                 output = self._buffer[:start]
+                line_terminated = self._buffer.endswith("\n")
                 self._buffer = ""
                 mode = (
                     PromptMode.PRIVILEGED_EXEC
@@ -405,6 +407,7 @@ class ConsolePromptParser:
                     ParserEventKind.PROMPT,
                     prompt=prompt_text,
                     mode=mode,
+                    line_terminated=line_terminated,
                 ))
                 continue
             break

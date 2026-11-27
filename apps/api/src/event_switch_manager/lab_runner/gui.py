@@ -42,6 +42,12 @@ from .cli import (
 from .cli import (
     retry_cleanup as retry_console_cleanup,
 )
+from .passive import (
+    PassiveCallbacks,
+    PassiveDiagnosticResult,
+    export_passive_zip,
+    run_passive_diagnostics,
+)
 from .reporting import ArtifactIdentityError, LabBuildMetadata
 from .targets import LAB_TARGETS, get_target
 from .transport import lab_serial_safety_flags
@@ -171,6 +177,8 @@ class ConsoleLabGui:
         self.ui_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.worker: threading.Thread | None = None
         self.refresh_worker: threading.Thread | None = None
+        self.passive_cancel: threading.Event | None = None
+        self.passive_result: PassiveDiagnosticResult | None = None
         self.worker_result: int | None = None
         self.discovery: SerialDiscovery | None = None
         self.last_output_dir: Path | None = None
@@ -303,6 +311,19 @@ class ConsoleLabGui:
             state="disabled",
         )
         self.cleanup_button.pack(side="left", padx=8)
+        self.passive_button = ttk.Button(
+            actions,
+            text="被动终端诊断（只收不发）",
+            command=self.start_passive_diagnostics,
+        )
+        self.passive_button.pack(side="left", padx=8)
+        self.export_button = ttk.Button(
+            actions,
+            text="导出诊断 ZIP",
+            command=self.export_passive_diagnostics,
+            state="disabled",
+        )
+        self.export_button.pack(side="left", padx=8)
         ttk.Button(actions, text="打开报告目录", command=self.open_report_dir).pack(side="left")
         self.progress = ttk.Progressbar(actions, mode="indeterminate", length=180)
         self.progress.pack(side="right")
@@ -608,7 +629,184 @@ class ConsoleLabGui:
         self.worker = threading.Thread(target=worker, name="console-lab-worker", daemon=True)
         self.worker.start()
 
+    def start_passive_diagnostics(self) -> None:
+        if self.worker is not None and self.worker.is_alive():
+            return
+        if cleanup_required():
+            messagebox.showerror(
+                "ConsoleLab",
+                "上一会话 cleanup 未确认释放；禁止打开被动诊断。",
+                parent=self.root,
+            )
+            return
+        if not self.artifact_ok or not self.self_ok:
+            messagebox.showerror(
+                "ConsoleLab", "Artifact 或 self-test 未通过。", parent=self.root,
+            )
+            return
+        port = self.selected_port()
+        if port is None:
+            messagebox.showerror("ConsoleLab", "请先选择端口。", parent=self.root)
+            return
+        target = get_target(self.target_var.get())
+        manual_bt = bool(self.manual_bt_var.get())
+        direction = self.bt_direction_var.get()
+        try:
+            validate_selection(
+                port,
+                non_production_confirmed=self.non_production_var.get(),
+                manual_bluetooth_binding=manual_bt,
+                operator_bluetooth_direction=direction,
+            )
+        except GuiValidationError as exc:
+            messagebox.showerror("ConsoleLab 安全门禁", str(exc), parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "被动终端诊断",
+            (
+                "被动诊断模式只接收串口字节，绝不发送 CR、认证信息、分页字符"
+                "或查询命令。\n\n"
+                "它只用于采集脱敏 Parser 事件；不会自动恢复为正常查询会话。\n\n"
+                "确认继续？"
+            ),
+            parent=self.root,
+        ):
+            return
+        if port.transport_kind is PortTransportKind.BLUETOOTH_SPP:
+            if not messagebox.askyesno(
+                "Bluetooth 人工绑定",
+                (
+                    f"COM: {port.port}\n枚举方向: {port.bluetooth_direction.value}\n"
+                    f"人工确认方向: {direction}\n"
+                    f"identity: {port.adapter_identity}\n\n"
+                    "仅本次被动诊断有效，不作为稳定 USB 身份。"
+                ),
+                parent=self.root,
+            ):
+                return
+        self.passive_cancel = threading.Event()
+        self.passive_result = None
+        self.export_button.configure(state="disabled")
+        self.progress.configure(mode="indeterminate", value=0)
+        self.progress.start(12)
+        self.connect_button.configure(state="disabled")
+        self.passive_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
+        self.connection_status_var.set("状态: PASSIVE DIAGNOSTIC / receive-only")
+        self._append_log(
+            "\n=== 被动终端诊断：receive-only，禁止任何应用层发送 ===\n",
+        )
+        self.last_output_dir = Path("console-lab-output")
+        args = argparse.Namespace(
+            target=target.key,
+            com=port.port,
+            manual_bluetooth_binding=manual_bt,
+            bluetooth_direction=(
+                direction
+                if port.transport_kind is PortTransportKind.BLUETOOTH_SPP
+                else "unknown"
+            ),
+            output_dir=str(self.last_output_dir),
+            duration_seconds=15.0,
+            ttl_minutes=5.0,
+            operator_confirmed=True,
+        )
+        cancel_event = self.passive_cancel
+
+        def emit_event(text: str) -> None:
+            self.output_queue.put(("log", text + "\n"))
+
+        def emit_chunk(record: dict[str, Any]) -> None:
+            self.output_queue.put(("passive_chunk", record))
+
+        def emit_status(text: str) -> None:
+            self.output_queue.put(("log", text + "\n"))
+
+        def worker() -> None:
+            try:
+                result = run_passive_diagnostics(
+                    args,
+                    callbacks=PassiveCallbacks(
+                        on_event=emit_event,
+                        on_chunk=emit_chunk,
+                        on_status=emit_status,
+                    ),
+                    cancel_event=cancel_event,
+                )
+                self.output_queue.put(("passive_done", result))
+            except Exception as exc:
+                self.output_queue.put(
+                    ("passive_error", f"{type(exc).__name__}: {exc}"),
+                )
+
+        self.worker = threading.Thread(
+            target=worker, name="console-lab-passive", daemon=True,
+        )
+        self.worker.start()
+
+    def export_passive_diagnostics(self) -> None:
+        result = self.passive_result
+        if result is None:
+            messagebox.showinfo("ConsoleLab", "尚未生成被动诊断结果。", parent=self.root)
+            return
+        try:
+            path = export_passive_zip(result)
+        except Exception as exc:
+            messagebox.showerror(
+                "ConsoleLab",
+                f"诊断 ZIP 导出失败：{type(exc).__name__}",
+                parent=self.root,
+            )
+            return
+        messagebox.showinfo(
+            "ConsoleLab",
+            f"被动诊断 ZIP 已生成：\n{path}",
+            parent=self.root,
+        )
+
+    def _finish_passive(self, result: PassiveDiagnosticResult) -> None:
+        self.passive_result = result
+        self.worker = None
+        self.passive_cancel = None
+        self.progress.stop()
+        self.progress.configure(value=0)
+        self.cancel_button.configure(state="disabled")
+        self.connection_status_var.set(
+            f"状态: PASSIVE {result.status} / bytes_written=0",
+        )
+        self._append_log(
+            f"\n=== 被动诊断结束 status={result.status} "
+            f"rx={len(result.chunks)} cleanup={result.cleanup_status} ===\n",
+        )
+        self.export_button.configure(
+            state="normal" if result.zip_path is not None else "disabled",
+        )
+        if result.cleanup_status != "RELEASED":
+            self.connect_button.configure(state="disabled")
+            self.passive_button.configure(state="disabled")
+            messagebox.showwarning(
+                "ConsoleLab cleanup",
+                "被动诊断 cleanup 未确认；禁止打开新会话。",
+                parent=self.root,
+            )
+        else:
+            self.connect_button.configure(
+                state="normal" if (self.artifact_ok and self.self_ok) else "disabled",
+            )
+            self.passive_button.configure(state="normal")
+        if self._closing:
+            self.root.after(50, self._destroy)
+
     def cancel_experiment(self) -> None:
+        if (
+            self.passive_cancel is not None
+            and self.worker is not None
+            and self.worker.is_alive()
+        ):
+            self.passive_cancel.set()
+            self._append_log("\n=== 请求结束被动诊断（停止接收并 cleanup） ===\n")
+            self.cancel_button.configure(state="disabled")
+            return
         self._append_log("\n=== 操作者请求取消；最多一次 clean-up 重试 ===\n")
         cancel_active_experiment()
         self.cancel_button.configure(state="disabled")
@@ -670,6 +868,27 @@ class ConsoleLabGui:
                     self._apply_discovery(payload)
                 elif kind == "done":
                     self._finish_worker(int(payload))
+                elif kind == "passive_done":
+                    self._finish_passive(payload)
+                elif kind == "passive_error":
+                    self.worker = None
+                    self.passive_cancel = None
+                    self.progress.stop()
+                    self.progress.configure(value=0)
+                    self.cancel_button.configure(state="disabled")
+                    self.connect_button.configure(
+                        state="normal"
+                        if (self.artifact_ok and self.self_ok) else "disabled",
+                    )
+                    self.passive_button.configure(state="normal")
+                    self._append_log(f"\n=== 被动诊断失败：{payload} ===\n")
+                elif kind == "passive_chunk":
+                    length = 0
+                    if isinstance(payload, dict):
+                        length = int(payload.get("length", 0))
+                    self.connection_status_var.set(
+                        f"状态: PASSIVE RX chunk={length}b / bytes_written=0",
+                    )
                 elif kind == "cleanup_result":
                     self._finish_cleanup(bool(payload))
         except queue.Empty:
@@ -860,6 +1079,8 @@ class ConsoleLabGui:
             self.cancel_button.configure(state="disabled")
             self._append_log("\n=== 关闭窗口：发送取消请求并等待 cleanup ===\n")
             self._close_active_dialog()
+            if self.passive_cancel is not None:
+                self.passive_cancel.set()
             cancel_active_experiment()
             self.progress.start(12)
             return

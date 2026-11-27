@@ -2520,6 +2520,25 @@ def test_first_query_failure_not_masked_by_cancelled_authorization(
     assert query["failure_stage"] is not None
 
 
+def test_gui_passive_diagnostic_entry_is_separate_and_receive_only() -> None:
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk display unavailable")
+    from event_switch_manager.lab_runner import gui as gui_module
+
+    root.withdraw()
+    app = gui_module.ConsoleLabGui(root, smoke=True)
+    try:
+        assert "被动终端诊断" in str(app.passive_button.cget("text"))
+        assert "只收不发" in str(app.passive_button.cget("text"))
+        assert str(app.export_button.cget("state")) == "disabled"
+        assert "连接并开始实验" in str(app.connect_button.cget("text"))
+    finally:
+        app.on_close()
+
+
 def test_gui_profile_switch_refreshes_auth_summary_and_progress() -> None:
     tk = pytest.importorskip("tkinter")
     try:

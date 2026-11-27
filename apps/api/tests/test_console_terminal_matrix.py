@@ -313,6 +313,26 @@ def test_pagination_chunking_is_invariant() -> None:
         assert any(event.kind is ParserEventKind.PAGINATION for event in events)
 
 
+def test_r91_attach_failure_fixture_is_evidence_only() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "console_lab_r91_attach_failure.json"
+    data = json.loads(fixture.read_text(encoding="utf-8"))
+    failure = data["failure"]
+    assert data["schema"] == "r91-passive-attach-failure-fixture-v1"
+    assert failure["transport_status"] == "OPENED"
+    assert failure["passive_attach_status"] == "FAILED"
+    assert failure["primary_failure"] == "AmbiguousConsoleOutput"
+    assert failure["prompt_collision_reason"] == "output-between-prompt-candidates"
+    assert failure["prompt_candidates"] == 3
+    assert failure["prompt_modes"] == {"user-exec": 3}
+    assert failure["prompt_repeats"] == 0
+    assert failure["rx_chunk_count"] == 188
+    assert failure["rx_total_bytes"] == 293
+    assert failure["parser_buffer_bytes"] == 0
+    assert failure["wake_sent"] is False
+    assert failure["queries"] == 0
+    assert failure["root_cause"] == "not-inferred"
+
+
 def test_r90_terminal_failure_fixture_is_sanitized() -> None:
     fixture = Path(__file__).parent / "fixtures" / "console_lab_r90_terminal_failure.json"
     data = json.loads(fixture.read_text(encoding="utf-8"))
@@ -326,6 +346,18 @@ def test_r90_terminal_failure_fixture_is_sanitized() -> None:
     assert failure["terminal_diagnostics"]["raw_transcript_saved"] is False
     assert failure["terminal_diagnostics"]["credential_saved"] is False
     assert "password" not in fixture.read_text(encoding="utf-8").casefold()
+
+
+def test_prompt_candidate_exposes_incomplete_line_metadata() -> None:
+    parser = ConsolePromptParser()
+    events = parser.feed("banner\r\nR1#")
+    prompt_event = next(event for event in events if event.kind is ParserEventKind.PROMPT)
+    assert prompt_event.line_terminated is False
+
+    parser = ConsolePromptParser()
+    events = parser.feed("banner\r\nR1#\r\n")
+    prompt_event = next(event for event in events if event.kind is ParserEventKind.PROMPT)
+    assert prompt_event.line_terminated is True
 
 
 def test_prompt_identity_token_never_contains_hostname() -> None:

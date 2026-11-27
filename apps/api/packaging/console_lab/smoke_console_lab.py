@@ -55,6 +55,10 @@ def main() -> int:
             checks.append(f"{name}-present")
         else:
             errors.append(f"missing-{name}")
+    if list(package.rglob("*.zip")):
+        errors.append("nested-zip-present")
+    else:
+        checks.append("single-extraction-no-nested-zip")
     if list(package.rglob("*.sqlite3")):
         errors.append("product-database-present")
     else:
@@ -108,6 +112,14 @@ def main() -> int:
                 checks.append("cli-record-sha")
             else:
                 errors.append("cli-record-sha-mismatch")
+            if record.get("delivery_layout") == "onedir-single-extraction":
+                checks.append("single-extraction-layout")
+            else:
+                errors.append("single-extraction-layout-missing")
+            if record.get("artifact_contains_build_zip") is False:
+                checks.append("no-build-zip-in-user-artifact")
+            else:
+                errors.append("build-zip-must-be-separate")
         except ValueError:
             errors.append("build-record-invalid")
 

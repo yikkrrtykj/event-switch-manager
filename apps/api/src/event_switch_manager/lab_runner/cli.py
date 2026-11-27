@@ -131,7 +131,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="EventSwitchManager-ConsoleLab",
         description="受控 Cisco Console 只读实验工具（本地、离线、operator-assisted）",
     )
-    parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R90")
+    parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R91")
     parser.add_argument("--self-test", action="store_true", help="离线自检；不枚举也不打开串口")
     parser.add_argument(
         "--artifact-check", action="store_true",

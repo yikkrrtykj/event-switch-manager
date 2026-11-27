@@ -40,6 +40,9 @@ H0-GUI — 独立 GUI
 [ ] R90 报告分别显示 transport / attach / authentication / query / cleanup 状态
 [ ] 终端诊断不包含完整 transcript、密码或凭据内容
 [ ] 重复同身份同模式 Prompt 与单次 Prompt 的行为一致；不同 identity/mode fail-closed
+[ ] 用户 Artifact 只解压一次即可运行；包内无嵌套 build ZIP
+[ ] “被动终端诊断”模式不发送任何应用层字节（CR/认证/分页/查询）
+[ ] 被动诊断事件无完整 transcript、密码或凭据，且可一键导出诊断 ZIP
 [ ] 连接前安全授权区域显示端口/identity/PID/release/命令/有效期
 [ ] 密码输入遮挡且不保存
 [ ] 关闭窗口/取消触发安全清理；cleanup failure 可见

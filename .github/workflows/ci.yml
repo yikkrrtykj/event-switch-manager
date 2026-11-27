@@ -224,19 +224,51 @@ jobs:
               Copy-Item -Path (Join-Path $pair.Value "*.log") -Destination $logDir -Force
             }
           }
-      - name: Upload Windows portable evidence
+      - name: Upload Windows portable runtime (single extraction)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-portable-runtime
           if-no-files-found: warn
+          include-hidden-files: true
+          path: |
+            apps/api/dist/EventSwitchManager/**
+            apps/api/dist/EventSwitchManager-build-record.json
+      - name: Upload Windows portable engineering archive
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-portable-build-archive
+          if-no-files-found: warn
           path: |
             apps/api/dist/EventSwitchManager-windows-x64.zip
             apps/api/dist/EventSwitchManager-build-record.json
+      - name: Upload Windows portable smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-portable-smoke-evidence
+          if-no-files-found: warn
+          path: |
             apps/api/dist/EventSwitchManager-smoke-report.json
             apps/api/dist/EventSwitchManager-smoke-percent-report.json
             apps/api/dist/EventSwitchManager-smoke-logs
             apps/api/dist/EventSwitchManager-smoke-logs-percent
+      - name: Download Windows portable artifact once
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-portable-runtime
+          path: ${{ runner.temp }}/portable-downloaded
+      - name: Verify one-extraction Windows portable runtime
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "portable-downloaded"
+          $exe = Get-ChildItem -LiteralPath $root -Filter "EventSwitchManager.exe" -Recurse -File | Select-Object -First 1
+          if (-not $exe) { throw "Portable EXE missing after a single artifact extraction." }
+          if (Get-ChildItem -LiteralPath $root -Filter "*.zip" -Recurse -File) {
+            throw "Portable user artifact still contains a nested ZIP."
+          }
+          Write-Output "One-extraction portable runtime: $($exe.FullName)"
 
   windows-console-lab:
     name: Windows Console Lab Runner
@@ -295,18 +327,73 @@ jobs:
           $report = Get-Content "apps/api/dist-console-lab/EventSwitchManager-ConsoleLab-smoke-percent-report.json" -Raw | ConvertFrom-Json
           if ($report.status -ne "passed") { throw "ConsoleLab percent-path smoke did not pass." }
           Write-Output "ConsoleLab percent-path checks: $($report.checks -join ', ')"
-      - name: Upload ConsoleLab artifact
+      - name: Copy ConsoleLab checksums into user runtime
+        if: always()
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath "apps/api/dist-console-lab/SHA256SUMS.console-lab" `
+            -Destination "apps/api/dist-console-lab/EventSwitchManager-ConsoleLab/SHA256SUMS.console-lab" -Force
+      - name: Upload ConsoleLab runtime (single extraction)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-console-lab
           if-no-files-found: warn
+          include-hidden-files: true
+          path: apps/api/dist-console-lab/EventSwitchManager-ConsoleLab/**
+      - name: Upload ConsoleLab engineering archive
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-console-lab-build-archive
+          if-no-files-found: warn
           path: |
             apps/api/dist-console-lab/EventSwitchManager-ConsoleLab-windows-x64.zip
             apps/api/dist-console-lab/EventSwitchManager-ConsoleLab-build-record.json
+            apps/api/dist-console-lab/SHA256SUMS.console-lab
+      - name: Upload ConsoleLab smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-console-lab-smoke-evidence
+          if-no-files-found: warn
+          path: |
             apps/api/dist-console-lab/EventSwitchManager-ConsoleLab-smoke-report.json
             apps/api/dist-console-lab/EventSwitchManager-ConsoleLab-smoke-percent-report.json
-            apps/api/dist-console-lab/SHA256SUMS.console-lab
+      - name: Download ConsoleLab artifact once
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-console-lab
+          path: ${{ runner.temp }}/console-lab-downloaded
+      - name: Verify one-extraction ConsoleLab runtime
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "console-lab-downloaded"
+          $exe = Get-ChildItem -LiteralPath $root -Filter "EventSwitchManager-ConsoleLab.exe" -Recurse -File | Select-Object -First 1
+          $cli = Get-ChildItem -LiteralPath $root -Filter "EventSwitchManager-ConsoleLab-CLI.exe" -Recurse -File | Select-Object -First 1
+          if (-not $exe) { throw "ConsoleLab GUI EXE missing after a single artifact extraction." }
+          if (-not $cli) { throw "ConsoleLab CLI EXE missing after a single artifact extraction." }
+          if (Get-ChildItem -LiteralPath $root -Filter "*.zip" -Recurse -File) {
+            throw "ConsoleLab user artifact still contains a nested ZIP."
+          }
+          $package = $exe.Directory.FullName
+          $checksums = Join-Path $package "SHA256SUMS.console-lab"
+          if (-not (Test-Path $checksums)) { throw "ConsoleLab checksum manifest missing." }
+          $checksumLines = Get-Content -LiteralPath $checksums
+          foreach ($name in @("EventSwitchManager-ConsoleLab.exe", "EventSwitchManager-ConsoleLab-CLI.exe")) {
+            $entry = $checksumLines | Where-Object { $_ -match "  EventSwitchManager-ConsoleLab/$([regex]::Escape($name))$" } | Select-Object -First 1
+            if (-not $entry) { throw "Checksum entry missing for $name" }
+            $expected = ($entry -split "  ", 2)[0].ToLowerInvariant()
+            $actual = (Get-FileHash -LiteralPath (Join-Path $package $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($expected -ne $actual) { throw "Checksum mismatch for $name" }
+          }
+          python apps/api/packaging/console_lab/smoke_console_lab.py `
+            --package $package `
+            --report (Join-Path $env:RUNNER_TEMP "console-lab-downloaded-smoke.json")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content (Join-Path $env:RUNNER_TEMP "console-lab-downloaded-smoke.json") -Raw | ConvertFrom-Json
+          if ($report.status -ne "passed") { throw "Single-extraction ConsoleLab smoke did not pass." }
+          Write-Output "One-extraction ConsoleLab checks: $($report.checks -join ', ')"
 
   secrets:
     name: Gitleaks

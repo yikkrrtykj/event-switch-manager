@@ -1,4 +1,4 @@
-Event Switch Manager — Windows Console Lab Runner（R90）
+Event Switch Manager — Windows Console Lab Runner（R91）
 =========================================================
 
 默认双击：
@@ -17,6 +17,20 @@ CLI 诊断使用独立 console 入口：
 
   EventSwitchManager-ConsoleLab.exe      windowed GUI
   EventSwitchManager-ConsoleLab-CLI.exe  console diagnostics
+
+--- R91 被动终端诊断 ---
+
+GUI 中的“被动终端诊断（只收不发）”入口与正常只读采集明确分离：
+
+- 复用现有串口 identity 绑定、人工 Bluetooth 方向确认、独占 open 和 cleanup 门禁。
+- 只调用串口 open/read/close，不发送 CR、认证信息、分页字符或查询命令。
+- 显示实时、有界、脱敏的 RX/parser 事件；控制字符显示为 `<CR>`/`<LF>`/
+  `<BS>`/`<TAB>`/`<ESC>` 等结构化表示。
+- 记录 prompt 候选匿名 identity、mode、candidate index、相对时间和 collision 原因。
+- 未知敏感 token 默认遮挡；不保存完整原始 transcript、密码或凭据。
+- 15 秒有界；同时受最大字节/事件/chunk 数限制，超限安全结束。
+- 结束后可一键“导出诊断 ZIP”，包含报告、摘要、事件 JSONL 和 SHA256SUMS。
+  该诊断 ZIP 是用户主动导出文件，不属于软件运行 Artifact。
 
 --- 原有 CLI 诊断说明 ---
 
@@ -55,11 +69,17 @@ CLI 诊断使用独立 console 入口：
 
 2. Artifact 身份与 COM 枚举（均不打开串口）
 -------------------------------------------
-先从独立下载的 ZIP 解压，核对外层 ZIP 和 EXE：
+从 GitHub Actions 下载 `windows-console-lab` Artifact 后只解压一次；
+解压结果就是运行目录 `EventSwitchManager-ConsoleLab\`，其中直接包含 GUI/CLI EXE、
+`_internal`、instructions、Build Record、依赖 Manifest 和 `SHA256SUMS.console-lab`。
+用户运行包内不再嵌套第二个 ZIP。
 
-  Get-FileHash .\EventSwitchManager-ConsoleLab-windows-x64.zip -Algorithm SHA256
   Get-FileHash .\EventSwitchManager-ConsoleLab\EventSwitchManager-ConsoleLab.exe -Algorithm SHA256
+  Get-FileHash .\EventSwitchManager-ConsoleLab\EventSwitchManager-ConsoleLab-CLI.exe -Algorithm SHA256
 
+构建 ZIP（`EventSwitchManager-ConsoleLab-windows-x64.zip`）仅作为独立工程归档，
+另存于 `windows-console-lab-build-archive` Artifact，不是用户运行包的一部分。
+GitHub Artifact digest/ID、构建 ZIP SHA、GUI/CLI EXE SHA 是不同概念，不能混用。
 与 `SHA256SUMS.console-lab` 及 `EventSwitchManager-ConsoleLab-build-record.json`
 比较。程序启动真实实验时也会重新计算运行 EXE 的 SHA-256，与 Build Record
 不一致即拒绝实验。source-run、unknown Git SHA 或缺失 Build Record 不能用于正式验收。
