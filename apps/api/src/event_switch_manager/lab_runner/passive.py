@@ -42,7 +42,7 @@ from .reporting import LabBuildMetadata
 from .targets import get_target
 from .transport import AuthorizedSerialTransport, LabSerialError
 
-MAX_DURATION_SECONDS = 30.0
+MAX_DURATION_SECONDS = 15.0
 MAX_PASSIVE_BYTES = 64 * 1024
 MAX_PASSIVE_EVENTS = 256
 MAX_PASSIVE_CHUNKS = 512
@@ -64,9 +64,12 @@ _LONG_TOKEN = re.compile(r"\b[A-Za-z0-9+/=_-]{16,}\b")
 _SECRETISH = re.compile(r"(?i)\b(?:password|secret|username)\b\s*[:=]\s*\S+")
 
 
-def _mask_preview(text: str) -> str:
+def _mask_preview(text: str, secrets: tuple[str, ...] = ()) -> str:
     """Return a bounded structural preview; never return a raw transcript."""
     redacted = _ANSI.sub(" <ANSI> ", text)
+    for secret in secrets:
+        if secret:
+            redacted = redacted.replace(secret, "<redacted-identity>")
     redacted = _SECRETISH.sub("<REDACTED>", redacted)
     redacted = _IP.sub("<ip>", redacted)
     redacted = _MAC.sub("<mac>", redacted)
@@ -212,6 +215,16 @@ def run_passive_diagnostics(
     transport_opened = False
     cleanup_status = "NOT_ATTEMPTED"
     lease = None
+    sensitive_values = tuple(
+        value for value in (
+            port.adapter_identity,
+            port.serial_number,
+            port.location,
+            port.bluetooth_name,
+            port.pnp_instance_identity,
+            port.remote_bluetooth_identity,
+        ) if value
+    )
     primary_failure: dict[str, Any] | None = None
     error: str | None = None
     status = "COMPLETED"
@@ -240,6 +253,7 @@ def run_passive_diagnostics(
         notify("passive: transport OPENED; receive-only (no bytes will be sent)")
         deadline = opened_at + duration
         while time.monotonic() < deadline and not active.is_set():
+            authorization.check_active()
             if len(events) >= MAX_PASSIVE_EVENTS or len(chunks) >= MAX_PASSIVE_CHUNKS:
                 status = "BOUNDED_LIMIT"
                 break
@@ -261,7 +275,7 @@ def run_passive_diagnostics(
                 "length": length,
                 "offset_bytes": stream_offset,
                 "relative_seconds": round(now - opened_at, 6),
-                "preview": _mask_preview(chunk),
+                "preview": _mask_preview(chunk, sensitive_values),
             }
             chunks.append(chunk_record)
             last_chunk_preview = str(chunk_record["preview"])
@@ -282,6 +296,7 @@ def run_passive_diagnostics(
                     stream_offset=stream_offset,
                     opened_at=opened_at,
                     identity=parser.last_prompt_identity,
+                    secrets=sensitive_values,
                 )
                 events.append(record)
                 if last_prompt_event is not None:
@@ -521,9 +536,10 @@ def _event_record(
     stream_offset: int,
     opened_at: float,
     identity: str | None,
+    secrets: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     kind = event.kind.value
-    preview = _mask_preview(event.output) if event.output else ""
+    preview = _mask_preview(event.output, secrets) if event.output else ""
     record: dict[str, Any] = {
         "index": index,
         "kind": kind,

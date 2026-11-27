@@ -71,7 +71,7 @@ GUI 中的“被动终端诊断（只收不发）”入口与正常只读采集�
 -------------------------------------------
 从 GitHub Actions 下载 `windows-console-lab` Artifact 后只解压一次；
 解压结果就是运行目录 `EventSwitchManager-ConsoleLab\`，其中直接包含 GUI/CLI EXE、
-`_internal`、instructions、Build Record、依赖 Manifest 和 `SHA256SUMS.console-lab`。
+`_internal`、instructions、Build Record、依赖 Manifest 和 `SHA256SUMS.runtime`。
 用户运行包内不再嵌套第二个 ZIP。
 
   Get-FileHash .\EventSwitchManager-ConsoleLab\EventSwitchManager-ConsoleLab.exe -Algorithm SHA256
@@ -80,7 +80,9 @@ GUI 中的“被动终端诊断（只收不发）”入口与正常只读采集�
 构建 ZIP（`EventSwitchManager-ConsoleLab-windows-x64.zip`）仅作为独立工程归档，
 另存于 `windows-console-lab-build-archive` Artifact，不是用户运行包的一部分。
 GitHub Artifact digest/ID、构建 ZIP SHA、GUI/CLI EXE SHA 是不同概念，不能混用。
-与 `SHA256SUMS.console-lab` 及 `EventSwitchManager-ConsoleLab-build-record.json`
+用户运行包内使用 `SHA256SUMS.runtime`（仅运行文件）；`SHA256SUMS.console-lab`
+只属于独立构建归档。
+与 `SHA256SUMS.runtime` 及 `EventSwitchManager-ConsoleLab-build-record.json`
 比较。程序启动真实实验时也会重新计算运行 EXE 的 SHA-256，与 Build Record
 不一致即拒绝实验。source-run、unknown Git SHA 或缺失 Build Record 不能用于正式验收。
 

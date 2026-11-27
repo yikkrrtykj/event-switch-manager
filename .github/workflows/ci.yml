@@ -329,12 +329,30 @@ jobs:
           $report = Get-Content "apps/api/dist-console-lab/EventSwitchManager-ConsoleLab-smoke-percent-report.json" -Raw | ConvertFrom-Json
           if ($report.status -ne "passed") { throw "ConsoleLab percent-path smoke did not pass." }
           Write-Output "ConsoleLab percent-path checks: $($report.checks -join ', ')"
-      - name: Copy ConsoleLab checksums into user runtime
+      - name: Create ConsoleLab runtime checksum manifest
         if: always()
         shell: pwsh
         run: |
-          Copy-Item -LiteralPath "apps/api/dist-console-lab/SHA256SUMS.console-lab" `
-            -Destination "apps/api/dist-console-lab/EventSwitchManager-ConsoleLab/SHA256SUMS.console-lab" -Force
+          $package = "apps/api/dist-console-lab/EventSwitchManager-ConsoleLab"
+          $paths = @(
+            "EventSwitchManager-ConsoleLab.exe",
+            "EventSwitchManager-ConsoleLab-CLI.exe",
+            "DEPENDENCIES-SHA256SUMS.txt",
+            "EventSwitchManager-ConsoleLab-build-record.json",
+            "instructions/README.zh-CN.txt",
+            "instructions/H0-H4-ACCEPTANCE-TEMPLATE.txt"
+          )
+          $lines = foreach ($relative in $paths) {
+            $full = Join-Path $package $relative
+            if (-not (Test-Path $full)) { throw "Runtime checksum target missing: $relative" }
+            $hash = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $relative"
+          }
+          [IO.File]::WriteAllLines(
+            (Join-Path $package "SHA256SUMS.runtime"),
+            $lines,
+            (New-Object System.Text.UTF8Encoding($false))
+          )
       - name: Upload ConsoleLab runtime (single extraction)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -381,11 +399,11 @@ jobs:
             throw "ConsoleLab user artifact still contains a nested build ZIP."
           }
           $package = $exe.Directory.FullName
-          $checksums = Join-Path $package "SHA256SUMS.console-lab"
-          if (-not (Test-Path $checksums)) { throw "ConsoleLab checksum manifest missing." }
+          $checksums = Join-Path $package "SHA256SUMS.runtime"
+          if (-not (Test-Path $checksums)) { throw "ConsoleLab runtime checksum manifest missing." }
           $checksumLines = Get-Content -LiteralPath $checksums
           foreach ($name in @("EventSwitchManager-ConsoleLab.exe", "EventSwitchManager-ConsoleLab-CLI.exe")) {
-            $entry = $checksumLines | Where-Object { $_ -match "  EventSwitchManager-ConsoleLab/$([regex]::Escape($name))$" } | Select-Object -First 1
+            $entry = $checksumLines | Where-Object { $_ -match "  $([regex]::Escape($name))$" } | Select-Object -First 1
             if (-not $entry) { throw "Checksum entry missing for $name" }
             $expected = ($entry -split "  ", 2)[0].ToLowerInvariant()
             $actual = (Get-FileHash -LiteralPath (Join-Path $package $name) -Algorithm SHA256).Hash.ToLowerInvariant()
