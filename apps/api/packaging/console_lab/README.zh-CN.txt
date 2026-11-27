@@ -1,4 +1,4 @@
-Event Switch Manager — Windows Console Lab Runner（R89）
+Event Switch Manager — Windows Console Lab Runner（R90）
 =========================================================
 
 默认双击：
@@ -35,6 +35,13 @@ CLI 诊断使用独立 console 入口：
   query 是否实际发送、sent_bytes、response_bytes、真实查询耗时及授权最终状态。
 - 未发送的查询 completion 状态为 not-sent；已发送但未确认的为 unverified，
   不会伪造完成状态。
+- R90 报告把 transport_open、passive attach、authentication、query、cleanup
+  分开记录；同时导出有界终端诊断（RX chunk 数量/长度/相对时间、parser event
+  类型、匿名 prompt identity、prompt 候选/重复数、collision 原因、buffer 状态）。
+  不保存凭据或完整 transcript。
+- R90 terminal parser 对 CR/LF、空格、退格、ANSI、登录 Banner、重复同身份
+  EXEC Prompt、命令回显和分页做 chunk-boundary 归一化；不同 hostname/权限模式、
+  config/ROMMON/setup、异步非预期数据、未提交命令仍 fail-closed。
 - 真实串口完成边界、DTR/RTS 行为、OS 独占和硬件验收仍是 NOT_VERIFIED。
 
 1. 运行环境

@@ -35,6 +35,7 @@ from .lease import (
 )
 from .models import ConsoleQueryResult, ConsoleSource, QueryStatus
 from .parser import (
+    MAX_PROMPT_CANDIDATES,
     AuthPromptKind,
     ConsoleOutputLimit,
     ConsolePaginationLimit,
@@ -270,6 +271,19 @@ class ConsoleSession:
         self._write_token = object()
         self._last_failure: dict[str, object] | None = None
         self._cleanup_error: dict[str, object] | None = None
+        self._terminal_diag_started = time.monotonic()
+        self._terminal_rx_chunks = 0
+        self._terminal_rx_bytes = 0
+        self._terminal_rx_lengths: list[int] = []
+        self._terminal_rx_offsets: list[float] = []
+        self._terminal_events: dict[str, int] = {}
+        self._terminal_prompt_candidates = 0
+        self._terminal_prompt_repeats = 0
+        self._terminal_prompt_modes: dict[str, int] = {}
+        self._terminal_prompt_identity: str | None = None
+        self._terminal_collision_reason: str | None = None
+        self._auth_prompt_seen = False
+        self._authentication_completed = False
 
     @property
     def state(self) -> SessionState:
@@ -280,6 +294,51 @@ class ConsoleSession:
     def last_results(self) -> tuple[ConsoleQueryResult, ...]:
         with self._state_lock:
             return tuple(self._last_results)
+
+    @property
+    def authentication_prompt_seen(self) -> bool:
+        return self._auth_prompt_seen
+
+    @property
+    def authentication_completed(self) -> bool:
+        return self._authentication_completed
+
+    @property
+    def terminal_diagnostics(self) -> dict[str, object]:
+        """Bounded, content-free terminal telemetry for failure reports."""
+        return {
+            "rx_chunk_count": self._terminal_rx_chunks,
+            "rx_total_bytes": self._terminal_rx_bytes,
+            "rx_chunk_lengths": list(self._terminal_rx_lengths),
+            "rx_offsets_seconds": list(self._terminal_rx_offsets),
+            "parser_event_counts": dict(self._terminal_events),
+            "prompt_candidates": self._terminal_prompt_candidates,
+            "prompt_repeats": self._terminal_prompt_repeats,
+            "prompt_modes": dict(self._terminal_prompt_modes),
+            "prompt_identity_token": self._terminal_prompt_identity,
+            "prompt_collision_reason": self._terminal_collision_reason,
+            "parser_buffer_bytes": self._parser.buffered_bytes,
+            "parser_unconsumed_non_whitespace": (
+                self._parser.has_unconsumed_non_whitespace
+            ),
+            "authentication_prompt_seen": self._auth_prompt_seen,
+            "authentication_completed": self._authentication_completed,
+        }
+
+    def _record_terminal_chunk(self, chunk: str) -> None:
+        length = len(chunk.encode("utf-8"))
+        self._terminal_rx_chunks += 1
+        self._terminal_rx_bytes += length
+        if len(self._terminal_rx_lengths) < 64:
+            self._terminal_rx_lengths.append(length)
+            self._terminal_rx_offsets.append(
+                round(time.monotonic() - self._terminal_diag_started, 6),
+            )
+
+    def _record_terminal_event(self, kind: ParserEventKind) -> None:
+        self._terminal_events[kind.value] = (
+            self._terminal_events.get(kind.value, 0) + 1
+        )
 
     @property
     def last_failure(self) -> dict[str, object] | None:
@@ -513,8 +572,14 @@ class ConsoleSession:
                 raise
             self._complete_attach(read, credentials)
         except Exception as exc:
+            if self._auth_prompt_seen:
+                failure_stage = "authentication"
+            elif self.transport_ever_opened:
+                failure_stage = "passive-attach"
+            else:
+                failure_stage = "transport-open"
             self._record_failure(
-                "open",
+                failure_stage,
                 getattr(exc, "code", type(exc).__name__),
                 exc,
             )
@@ -629,6 +694,8 @@ class ConsoleSession:
             if remaining <= 0:
                 raise AuthenticationError("console authentication budget expired")
             read = self._read_for_prompt(timeout=remaining)
+        if auth_events:
+            self._authentication_completed = True
         self._bind_initial_prompt(read)
         if (
             credentials is not None
@@ -993,6 +1060,7 @@ class ConsoleSession:
             chunk = self._transport.read_chunk(read_limit)
             if not chunk:
                 continue
+            self._record_terminal_chunk(chunk)
             chunk_bytes = len(chunk.encode("utf-8"))
             self._last_prompt_raw_bytes += chunk_bytes
             if self._active_query is not None:
@@ -1001,12 +1069,14 @@ class ConsoleSession:
             if self._completion_policy is not None:
                 self._completion_policy.observe_chunk(chunk)
             for event in self._parser.feed(chunk):
+                self._record_terminal_event(event.kind)
                 if event.kind is ParserEventKind.OUTPUT:
                     output += event.output
                     self._total_response_bytes += len(event.output.encode("utf-8"))
                     if self._total_response_bytes > self._max_total_response_bytes:
                         raise ConsoleOutputLimit("console session output limit exceeded")
                 elif event.kind is ParserEventKind.AUTH_PROMPT:
+                    self._auth_prompt_seen = True
                     if candidate is not None:
                         raise AmbiguousConsoleOutput("duplicate terminal response")
                     return _PromptRead(output, None, event.auth_prompt)
@@ -1026,8 +1096,34 @@ class ConsoleSession:
                     )
                 elif event.kind is ParserEventKind.PROMPT:
                     self._last_prompt_read_saw_data = True
-                    if candidate is not None and output[len(candidate.output):].strip():
-                        self._parser.mark_prompt_collision()
+                    if candidate is not None:
+                        if (
+                            candidate.prompt != event.prompt
+                            or candidate.mode is not event.mode
+                        ):
+                            self._parser.mark_prompt_collision(
+                                "prompt-identity-changed-between-candidates",
+                            )
+                        interstitial = output[len(candidate.output):]
+                        if interstitial.strip():
+                            self._parser.mark_prompt_collision(
+                                "output-between-prompt-candidates",
+                            )
+                    if self._parser.prompt_candidates > MAX_PROMPT_CANDIDATES:
+                        self._parser.mark_prompt_collision(
+                            "excessive-prompt-candidates",
+                        )
+                    self._terminal_prompt_candidates = (
+                        self._parser.prompt_candidates
+                    )
+                    self._terminal_prompt_repeats = self._parser.prompt_repeats
+                    mode_key = event.mode.value if event.mode is not None else "unknown"
+                    self._terminal_prompt_modes[mode_key] = (
+                        self._terminal_prompt_modes.get(mode_key, 0) + 1
+                    )
+                    self._terminal_prompt_identity = (
+                        self._parser.last_prompt_identity
+                    )
                     candidate = _PromptRead(
                         output, event.mode, None, event.prompt,
                     )
@@ -1036,6 +1132,9 @@ class ConsoleSession:
                 elif event.kind is ParserEventKind.UNSAFE_STATE:
                     raise UnsafeConsoleState(event.reason or "unsafe console state")
             if candidate is not None and self._parser.prompt_collision:
+                self._terminal_collision_reason = (
+                    self._parser.prompt_collision_reason or "prompt-collision"
+                )
                 raise AmbiguousConsoleOutput(
                     "prompt-like text occurred in command output",
                 )

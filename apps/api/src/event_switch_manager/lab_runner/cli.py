@@ -131,7 +131,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="EventSwitchManager-ConsoleLab",
         description="受控 Cisco Console 只读实验工具（本地、离线、operator-assisted）",
     )
-    parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R89")
+    parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R90")
     parser.add_argument("--self-test", action="store_true", help="离线自检；不枚举也不打开串口")
     parser.add_argument(
         "--artifact-check", action="store_true",
@@ -669,6 +669,11 @@ def _run_experiment(args: argparse.Namespace) -> int:
     evidence: ConsoleEvidence | None = None
     connection_state = "NOT_ATTEMPTED"
     cleanup_status = "NOT_ATTEMPTED"
+    transport_status = "NOT_ATTEMPTED"
+    attachment_status = "NOT_ATTEMPTED"
+    authentication_status = "NOT_ATTEMPTED"
+    query_status = "NOT_ATTEMPTED"
+    attachment_established = False
     error: str | None = None
     cancelled = False
     wake_sent = False
@@ -717,8 +722,15 @@ def _run_experiment(args: argparse.Namespace) -> int:
         )
         _check_cancel()
         phase = "transport-open"
+        transport_status = "OPENING"
+        attachment_status = "ATTACHING"
         session.open(None, initial_timeout=10.0, allow_silent=True)
         connection_state = "OPENED"
+        transport_status = "OPENED"
+        attachment_status = (
+            "ATTACHED" if session.is_attached else "AWAITING_PROMPT"
+        )
+        attachment_established = session.is_attached
         _check_cancel()
         if session.state is SessionState.AWAITING_PROMPT:
             phase = "passive-attach"
@@ -739,6 +751,8 @@ def _run_experiment(args: argparse.Namespace) -> int:
             session.finish_attach(None, timeout=30.0)
         if not session.is_attached:
             raise SessionError("no reliable EXEC prompt after passive attach/wake")
+        attachment_established = True
+        attachment_status = "ATTACHED"
         if session.state is SessionState.USER_EXEC and _confirm(
             "当前为 USER EXEC；是否需要发送 enable 进入 privileged EXEC？"
             "密码仅在出现提示时安全读取。输入 y 继续: ",
@@ -770,6 +784,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
             )
 
         phase = "bootstrap-query"
+        query_status = "IN_PROGRESS"
         evidence = adapter.observe(
             session,
             expected_pid=target.expected_pid,
@@ -787,6 +802,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
             failed_results,
         )
         if evidence_failure:
+            query_status = "FAILED"
             failed = failed_results[0] if failed_results else None
             primary_failure = {
                 "stage": evidence.observation.failure_stage or "query",
@@ -955,11 +971,50 @@ def _run_experiment(args: argparse.Namespace) -> int:
     else:
         queries_complete = False
         operator_confirmed = False
-    if primary_failure is not None and error is None:
-        error = (
-            f"{primary_failure.get('stage', 'unknown')}:"
-            f"{primary_failure.get('code', 'failure')}"
-        )
+    if session.transport_ever_opened:
+        transport_status = "OPENED"
+    elif transport_status in {"OPENING", "ATTACHING"}:
+        transport_status = "OPEN_FAILED"
+        attachment_status = "NOT_ATTEMPTED"
+    if attachment_established:
+        attachment_status = "ATTACHED"
+    elif transport_status == "OPENED":
+        attachment_status = "FAILED"
+    if session.authentication_completed:
+        authentication_status = "COMPLETED"
+    elif session.authentication_prompt_seen:
+        authentication_status = "FAILED"
+    elif attachment_established:
+        authentication_status = "NOT_REQUIRED"
+    if query_status == "IN_PROGRESS":
+        query_status = "COMPLETED" if queries_complete else "FAILED"
+    if transport_status == "OPEN_FAILED":
+        overall_connection_status = "OPEN_FAILED"
+    elif attachment_status != "ATTACHED":
+        overall_connection_status = "ATTACH_FAILED"
+    elif authentication_status == "FAILED":
+        overall_connection_status = "AUTH_FAILED"
+    elif query_status == "FAILED":
+        overall_connection_status = "QUERY_FAILED"
+    elif cleanup_status == "CLEANUP_REQUIRED":
+        overall_connection_status = "CLEANUP_REQUIRED"
+    else:
+        overall_connection_status = connection_state
+    if primary_failure is not None:
+        primary_stage = str(primary_failure.get("stage") or "")
+        if primary_stage in {
+            "transport-open", "passive-attach", "authentication", "query",
+            "send", "read", "parse", "authorize-query",
+        }:
+            phase = (
+                "passive-attach" if primary_stage == "open"
+                else primary_stage
+            )
+        if error is None:
+            error = (
+                f"{primary_failure.get('stage', 'unknown')}:"
+                f"{primary_failure.get('code', 'failure')}"
+            )
     if operator_cancelled:
         authorization_state = "cancelled-by-operator"
     elif primary_failure is not None:
@@ -978,10 +1033,17 @@ def _run_experiment(args: argparse.Namespace) -> int:
         "cleanup_failure": cleanup_failure,
         "operator_cancelled": operator_cancelled,
         "authorization_final_state": authorization_state,
+        "transport_status": transport_status,
+        "passive_attach_status": attachment_status,
+        "authentication_status": authentication_status,
+        "query_status": query_status,
+        "cleanup_status": cleanup_status,
+        "overall_connection_status": overall_connection_status,
         "transport_opened": session.transport_ever_opened,
-        "transport_open_attempted": connection_state != "NOT_ATTEMPTED",
+        "transport_open_attempted": transport_status != "NOT_ATTEMPTED",
         "wake_sent": wake_sent,
         "wake_confirmed": wake_confirmed,
+        "terminal": session.terminal_diagnostics,
     }
     experiment_verdict = (
         "READONLY_QUERIES_COMPLETED"
@@ -994,10 +1056,15 @@ def _run_experiment(args: argparse.Namespace) -> int:
         else "FAILED_OR_CANCELLED"
     )
     connection = {
-        "status": connection_state,
+        "status": overall_connection_status,
         "com_endpoint": port.port,
         "opened": session.transport_ever_opened,
         "transport_opened": session.transport_ever_opened,
+        "transport_status": transport_status,
+        "passive_attach_status": attachment_status,
+        "authentication_status": authentication_status,
+        "query_status": query_status,
+        "cleanup_status": cleanup_status,
         "wake_sent": wake_sent,
         "wake_confirmed": wake_confirmed,
         "operator_confirmations": confirmations[0],
@@ -1054,7 +1121,9 @@ def _run_experiment(args: argparse.Namespace) -> int:
         )
     print(f"AUTHORIZATION-FINAL-STATE: {authorization_state}")
     print(
-        f"FINAL: connection={connection_state} cleanup={cleanup_status} "
+        f"FINAL: connection={overall_connection_status} cleanup={cleanup_status} "
+        f"transport={transport_status} attach={attachment_status} "
+        f"auth={authentication_status} query={query_status} "
         f"verdict={experiment_verdict} REAL-SERIAL-COMPLETION=NOT_VERIFIED "
         "DEVICE-WRITES=DISABLED",
     )

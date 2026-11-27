@@ -1,0 +1,31 @@
+{
+  "schema": "r90-terminal-failure-fixture-v1",
+  "note": "Sanitized third field observation for offline protocol regression.",
+  "failure": {
+    "id": "r90-bt-passive-attach-prompt-collision",
+    "com_endpoint": "COM3",
+    "transport_kind": "bluetooth-spp",
+    "direction": "outgoing",
+    "transport_opened": true,
+    "connection_status": "ATTACH_FAILED",
+    "transport_status": "OPENED",
+    "passive_attach_status": "FAILED",
+    "authentication_status": "NOT_REQUIRED",
+    "query_status": "NOT_ATTEMPTED",
+    "cleanup_status": "RELEASED",
+    "wake_sent": false,
+    "queries": 0,
+    "duration_seconds": 7.157,
+    "primary_failure": {
+      "stage": "passive-attach",
+      "code": "AmbiguousConsoleOutput"
+    },
+    "terminal_diagnostics": {
+      "rx_chunk_count_positive": true,
+      "prompt_identity_token_present": true,
+      "prompt_collision_reason_present": true,
+      "raw_transcript_saved": false,
+      "credential_saved": false
+    }
+  }
+}

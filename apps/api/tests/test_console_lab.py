@@ -2265,11 +2265,57 @@ def test_run_experiment_records_open_failure_truthfully(
     assert exit_code != 0
     report = next(tmp_path.glob("experiment-*/console-lab-report.json"))
     payload = json.loads(report.read_text(encoding="utf-8"))
-    assert payload["connection"]["status"] == "OPEN_FAILED"
+    assert payload["connection"]["status"] == "ATTACH_FAILED"
+    assert payload["connection"]["transport_status"] == "OPENED"
+    assert payload["connection"]["passive_attach_status"] == "FAILED"
     assert payload["connection"]["opened"] is True
     assert payload["connection"]["transport_opened"] is True
     assert payload["outcome"]["experiment_verdict"] == "FAILED_OR_CANCELLED"
     assert serial.writes == []
+
+
+def test_attach_prompt_collision_reports_stage_and_terminal_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    port = _port()
+    discovery = _discovery(port)
+    serial = FakeSerial(initial="banner\r\nR1#\r\nR2#\r\n")
+    metadata = LabBuildMetadata("a" * 40, "b" * 64, "test", True, True)
+    monkeypatch.setattr(LabBuildMetadata, "load", classmethod(lambda _cls: metadata))
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", lambda: discovery)
+    monkeypatch.setattr(lab_cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        lab_cli,
+        "AuthorizedSerialTransport",
+        lambda auth, parameters=None: AuthorizedSerialTransport(
+            auth,
+            discovery=lambda: discovery,
+            serial_factory=lambda _port, _params: serial,
+        ),
+    )
+    exit_code = lab_cli.run_experiment(argparse.Namespace(
+        target="2960x",
+        com="COM3",
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path),
+    ))
+    assert exit_code != 0
+    report = next(tmp_path.glob("experiment-*/console-lab-report.json"))
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    connection = payload["connection"]
+    assert connection["opened"] is True
+    assert connection["transport_status"] == "OPENED"
+    assert connection["passive_attach_status"] == "FAILED"
+    assert connection["status"] == "ATTACH_FAILED"
+    assert payload["diagnostics"]["phase"] == "passive-attach"
+    assert payload["diagnostics"]["primary_failure"]["stage"] == "passive-attach"
+    assert payload["diagnostics"]["terminal"]["prompt_collision_reason"] is not None
+    assert payload["diagnostics"]["terminal"]["rx_chunk_count"] >= 1
+    assert payload["diagnostics"]["wake_sent"] is False
+    assert payload["connection"]["readonly_queries_completed"] is False
 
 
 def test_late_data_during_final_review_cannot_be_success(

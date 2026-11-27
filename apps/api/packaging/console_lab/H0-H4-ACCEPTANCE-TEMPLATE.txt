@@ -37,6 +37,9 @@ H0-GUI — 独立 GUI
 [ ] 失败查询记录 command_sent / sent_bytes / response_bytes / 实际耗时，
     未发送或未确认时不会显示完成
 [ ] Bluetooth 人工方向与枚举方向分别显示并记录
+[ ] R90 报告分别显示 transport / attach / authentication / query / cleanup 状态
+[ ] 终端诊断不包含完整 transcript、密码或凭据内容
+[ ] 重复同身份同模式 Prompt 与单次 Prompt 的行为一致；不同 identity/mode fail-closed
 [ ] 连接前安全授权区域显示端口/identity/PID/release/命令/有效期
 [ ] 密码输入遮挡且不保存
 [ ] 关闭窗口/取消触发安全清理；cleanup failure 可见

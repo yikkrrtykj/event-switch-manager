@@ -786,6 +786,12 @@ class ConsoleLabGui:
             f"Secondary failure: {json.dumps(secondary, ensure_ascii=False)}",
             f"Cleanup failure: {json.dumps(cleanup, ensure_ascii=False)}",
             f"Authorization final state: {diagnostics.get('authorization_final_state')}",
+            f"阶段状态: transport={diagnostics.get('transport_status')} "
+            f"attach={diagnostics.get('passive_attach_status')} "
+            f"auth={diagnostics.get('authentication_status')} "
+            f"query={diagnostics.get('query_status')} "
+            f"cleanup={diagnostics.get('cleanup_status')}",
+            f"Terminal: {json.dumps(diagnostics.get('terminal') or {}, ensure_ascii=False)}",
             f"耗时: {diagnostics.get('experiment_duration_seconds')}s",
             f"PID: {observation.get('exact_pid')}",
             f"IOS: {observation.get('software_version')}",
