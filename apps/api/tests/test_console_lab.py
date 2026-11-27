@@ -1205,6 +1205,7 @@ def test_rejected_query_does_not_reuse_previous_write_count() -> None:
         assert failed.query is ConsoleQuery.INVENTORY
         assert failed.command_sent is False
         assert failed.sent_bytes == 0
+        assert failed.response_bytes == 0
         assert failed.completion_status == "not-sent"
         assert failed.failure_stage == "authorize-query"
     finally:

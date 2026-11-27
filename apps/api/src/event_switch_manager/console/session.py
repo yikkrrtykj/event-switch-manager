@@ -266,6 +266,7 @@ class ConsoleSession:
         self._cancel_event = threading.Event()
         self._last_prompt_read_saw_data = False
         self._last_prompt_raw_bytes = 0
+        self._query_raw_bytes = 0
         self._write_token = object()
         self._last_failure: dict[str, object] | None = None
         self._cleanup_error: dict[str, object] | None = None
@@ -790,6 +791,7 @@ class ConsoleSession:
         command_sent = False
         sent_bytes = 0
         send_started = False
+        self._query_raw_bytes = 0
         reset_write_accounting = getattr(
             self._transport, "reset_write_accounting", None,
         )
@@ -814,7 +816,7 @@ class ConsoleSession:
                 ),
                 command_sent=command_sent,
                 sent_bytes=sent_bytes,
-                response_bytes=self._last_prompt_raw_bytes,
+                response_bytes=self._query_raw_bytes,
                 completion_status=(
                     "not-sent" if not command_sent else "unverified"
                 ),
@@ -870,7 +872,7 @@ class ConsoleSession:
                 ),
                 command_sent=command_sent,
                 sent_bytes=sent_bytes,
-                response_bytes=self._last_prompt_raw_bytes,
+                response_bytes=self._query_raw_bytes,
                 failure_stage=(
                     "device-command" if status is QueryStatus.FAILED else None
                 ),
@@ -987,7 +989,10 @@ class ConsoleSession:
             chunk = self._transport.read_chunk(read_limit)
             if not chunk:
                 continue
-            self._last_prompt_raw_bytes += len(chunk.encode("utf-8"))
+            chunk_bytes = len(chunk.encode("utf-8"))
+            self._last_prompt_raw_bytes += chunk_bytes
+            if self._active_query is not None:
+                self._query_raw_bytes += chunk_bytes
             self._last_prompt_read_saw_data = True
             if self._completion_policy is not None:
                 self._completion_policy.observe_chunk(chunk)
