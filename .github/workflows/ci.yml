@@ -265,8 +265,10 @@ jobs:
           $root = Join-Path $env:RUNNER_TEMP "portable-downloaded"
           $exe = Get-ChildItem -LiteralPath $root -Filter "EventSwitchManager.exe" -Recurse -File | Select-Object -First 1
           if (-not $exe) { throw "Portable EXE missing after a single artifact extraction." }
-          if (Get-ChildItem -LiteralPath $root -Filter "*.zip" -Recurse -File) {
-            throw "Portable user artifact still contains a nested ZIP."
+          $nested = Get-ChildItem -LiteralPath $root -Filter "*.zip" -Recurse -File |
+            Where-Object { $_.FullName -notmatch "\\_internal\\" -and $_.Name -ne "base_library.zip" }
+          if ($nested) {
+            throw "Portable user artifact still contains a nested build ZIP."
           }
           Write-Output "One-extraction portable runtime: $($exe.FullName)"
 
@@ -373,8 +375,10 @@ jobs:
           $cli = Get-ChildItem -LiteralPath $root -Filter "EventSwitchManager-ConsoleLab-CLI.exe" -Recurse -File | Select-Object -First 1
           if (-not $exe) { throw "ConsoleLab GUI EXE missing after a single artifact extraction." }
           if (-not $cli) { throw "ConsoleLab CLI EXE missing after a single artifact extraction." }
-          if (Get-ChildItem -LiteralPath $root -Filter "*.zip" -Recurse -File) {
-            throw "ConsoleLab user artifact still contains a nested ZIP."
+          $nested = Get-ChildItem -LiteralPath $root -Filter "*.zip" -Recurse -File |
+            Where-Object { $_.FullName -notmatch "\\_internal\\" -and $_.Name -ne "base_library.zip" }
+          if ($nested) {
+            throw "ConsoleLab user artifact still contains a nested build ZIP."
           }
           $package = $exe.Directory.FullName
           $checksums = Join-Path $package "SHA256SUMS.console-lab"

@@ -22,6 +22,10 @@ SHA meanings are distinct:
 - **Artifact digest / ID**: GitHub Actions artifact metadata; not the same as
   either EXE or build ZIP SHA.
 
+PyInstaller's internal `_internal/base_library.zip` is a runtime component, not
+a delivery archive; the single-extraction checks ignore that internal file and
+reject any root/user-visible build ZIP.
+
 The user runtime is verified by a CI job that downloads the uploaded artifact
 once, checks that no `.zip` remains inside it, runs the GUI/CLI smoke, and checks
 the package checksum manifest.

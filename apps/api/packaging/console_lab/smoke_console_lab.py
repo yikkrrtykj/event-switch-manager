@@ -55,7 +55,11 @@ def main() -> int:
             checks.append(f"{name}-present")
         else:
             errors.append(f"missing-{name}")
-    if list(package.rglob("*.zip")):
+    nested_zips = [
+        item for item in package.rglob("*.zip")
+        if "_internal" not in item.parts and item.name != "base_library.zip"
+    ]
+    if nested_zips:
         errors.append("nested-zip-present")
     else:
         checks.append("single-extraction-no-nested-zip")
