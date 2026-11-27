@@ -26,6 +26,7 @@ from event_switch_manager.console.discovery import (
     discover_serial_ports,
 )
 from event_switch_manager.console.lease import (
+    ConsoleLease,
     ConsoleLeaseManager,
     default_lease_manager,
 )
@@ -88,30 +89,54 @@ def _mask_preview(text: str, secrets: tuple[str, ...] = ()) -> str:
     )
 
 
-class _RollingRedactor:
-    """Redact known identities across read-chunk boundaries."""
+class _LineRedactor:
+    """Redact known identities only after a complete terminal line exists.
+
+    A split identity is never emitted as a prefix: live publishing is held at
+    the current line boundary.  The partial line is flushed only at end of the
+    bounded diagnostic run, when any completed identity can be redacted.
+    """
 
     def __init__(self, secrets: tuple[str, ...]) -> None:
-        self._secrets = tuple(
-            secret for secret in secrets if secret
-        )
+        self._secrets = tuple(secret for secret in secrets if secret)
         self._max_secret = max((len(secret) for secret in self._secrets), default=0)
-        self._raw_tail = ""
+        self._pending = ""
 
-    def feed(self, chunk: str) -> str:
-        combined = self._raw_tail + chunk
+    def _safe(self, text: str) -> str:
         for secret in self._secrets:
-            combined = re.sub(
+            text = re.sub(
                 re.escape(secret),
                 "<identity>",
-                combined,
+                text,
                 flags=re.IGNORECASE,
             )
-        if self._max_secret > 1:
-            self._raw_tail = (self._raw_tail + chunk)[-(self._max_secret - 1):]
-        else:
-            self._raw_tail = ""
-        return _mask_preview(combined)
+        return _mask_preview(text)
+
+    def feed(self, chunk: str) -> str:
+        self._pending += chunk
+        parts: list[str] = []
+        while True:
+            positions = [index for index in (
+                self._pending.find("\n"), self._pending.find("\r"),
+            ) if index >= 0]
+            if not positions:
+                break
+            boundary = min(positions) + 1
+            line, self._pending = self._pending[:boundary], self._pending[boundary:]
+            parts.append(self._safe(line))
+        if len(self._pending) > _PREVIEW_CHARS * 4:
+            keep = max(self._max_secret, 1)
+            held = self._pending[-keep:]
+            excess = self._pending[:-keep]
+            self._pending = held
+            parts.append(_structure_preview(excess))
+        return "".join(parts)
+
+    def flush(self) -> str:
+        if not self._pending:
+            return ""
+        pending, self._pending = self._pending, ""
+        return self._safe(pending)
 
 
 def _structure_preview(text: str) -> str:
@@ -145,6 +170,50 @@ def _identity_token(prompt: str | None, mode: str | None) -> str | None:
         return None
     material = f"{prompt}|{mode or 'unknown'}".encode()
     return hashlib.sha256(material).hexdigest()[:16]
+
+
+@dataclass
+class _PassiveCleanupHandle:
+    transport: AuthorizedSerialTransport
+    lease: ConsoleLease
+    authorization: Any
+
+    def retry(self) -> None:
+        self.transport.close()
+        self.lease.release()
+        self.authorization.cancel()
+
+
+_PASSIVE_CLEANUP_LOCK = threading.Lock()
+_RETAINED_PASSIVE_CLEANUP: _PassiveCleanupHandle | None = None
+
+
+def cleanup_required() -> bool:
+    with _PASSIVE_CLEANUP_LOCK:
+        return _RETAINED_PASSIVE_CLEANUP is not None
+
+
+def retry_cleanup() -> bool:
+    """Retry only the retained passive close; never opens a session."""
+    global _RETAINED_PASSIVE_CLEANUP
+    with _PASSIVE_CLEANUP_LOCK:
+        handle = _RETAINED_PASSIVE_CLEANUP
+    if handle is None:
+        return True
+    try:
+        handle.retry()
+    except Exception:
+        return False
+    with _PASSIVE_CLEANUP_LOCK:
+        if _RETAINED_PASSIVE_CLEANUP is handle:
+            _RETAINED_PASSIVE_CLEANUP = None
+    return True
+
+
+def _retain_cleanup(handle: _PassiveCleanupHandle) -> None:
+    global _RETAINED_PASSIVE_CLEANUP
+    with _PASSIVE_CLEANUP_LOCK:
+        _RETAINED_PASSIVE_CLEANUP = handle
 
 
 @dataclass
@@ -220,6 +289,10 @@ def run_passive_diagnostics(
     """Receive terminal bytes only; the only serial methods used are open/read/close."""
     if not bool(getattr(args, "operator_confirmed", False)):
         raise PermissionError("passive diagnostics require operator confirmation")
+    if cleanup_required():
+        raise PermissionError(
+            "previous passive cleanup is unconfirmed; retry cleanup first",
+        )
     output_root = Path(getattr(args, "output_dir", "console-lab-output"))
     target = get_target(str(args.target))
     requested_direction = str(
@@ -279,7 +352,7 @@ def run_passive_diagnostics(
     )
     primary_failure: dict[str, Any] | None = None
     error: str | None = None
-    redactor = _RollingRedactor(sensitive_values)
+    redactor = _LineRedactor(sensitive_values)
     status = "COMPLETED"
     stream_offset = 0
     stream_bytes = 0
@@ -338,7 +411,7 @@ def run_passive_diagnostics(
             last_chunk_preview = str(chunk_record["preview"])
             if callbacks and callbacks.on_chunk:
                 callbacks.on_chunk(chunk_record)
-            if callbacks and callbacks.on_event:
+            if live_preview and callbacks and callbacks.on_event:
                 callbacks.on_event(f"[RX {length}b] {live_preview}")
             for event in parser.feed(chunk):
                 if len(events) >= MAX_PASSIVE_EVENTS:
@@ -426,8 +499,14 @@ def run_passive_diagnostics(
         }
         error = f"{primary_failure['stage']}:{primary_failure['code']}"
     finally:
+        tail_preview = redactor.flush()
+        if tail_preview and callbacks and callbacks.on_event:
+            callbacks.on_event(f"[RX tail] {tail_preview}")
         try:
             transport.close()
+            if lease is not None:
+                lease.release()
+            authorization.cancel()
             cleanup_status = "RELEASED"
         except Exception as exc:
             cleanup_status = "CLEANUP_REQUIRED"
@@ -437,18 +516,10 @@ def run_passive_diagnostics(
                 "exception_type": type(exc).__name__,
             }
             status = "CLEANUP_REQUIRED"
-        authorization.cancel()
-        if lease is not None:
-            try:
-                lease.release()
-            except Exception as exc:
-                cleanup_status = "CLEANUP_REQUIRED"
-                primary_failure = primary_failure or {
-                    "stage": "cleanup",
-                    "code": "lease-release-failed",
-                    "exception_type": type(exc).__name__,
-                }
-                status = "CLEANUP_REQUIRED"
+            if lease is not None:
+                _retain_cleanup(
+                    _PassiveCleanupHandle(transport, lease, authorization),
+                )
         duration_actual = round(time.monotonic() - opened_at, 6)
 
     preview_budget = MAX_PASSIVE_PREVIEW_TOTAL

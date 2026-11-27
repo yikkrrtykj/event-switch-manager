@@ -784,6 +784,7 @@ class ConsoleLabGui:
         if result.cleanup_status != "RELEASED":
             self.connect_button.configure(state="disabled")
             self.passive_button.configure(state="disabled")
+            self.cleanup_button.configure(state="normal")
             messagebox.showwarning(
                 "ConsoleLab cleanup",
                 "被动诊断 cleanup 未确认；禁止打开新会话。",
@@ -876,11 +877,16 @@ class ConsoleLabGui:
                     self.progress.stop()
                     self.progress.configure(value=0)
                     self.cancel_button.configure(state="disabled")
-                    self.connect_button.configure(
-                        state="normal"
-                        if (self.artifact_ok and self.self_ok) else "disabled",
-                    )
-                    self.passive_button.configure(state="normal")
+                    if cleanup_required():
+                        self.connect_button.configure(state="disabled")
+                        self.passive_button.configure(state="disabled")
+                        self.cleanup_button.configure(state="normal")
+                    else:
+                        self.connect_button.configure(
+                            state="normal"
+                            if (self.artifact_ok and self.self_ok) else "disabled",
+                        )
+                        self.passive_button.configure(state="normal")
                     self._append_log(f"\n=== 被动诊断失败：{payload} ===\n")
                 elif kind == "passive_chunk":
                     length = 0
@@ -961,6 +967,7 @@ class ConsoleLabGui:
             self.connect_button.configure(
                 state="normal" if (self.artifact_ok and self.self_ok) else "disabled",
             )
+            self.passive_button.configure(state="normal")
             self.cleanup_button.configure(state="disabled")
             try:
                 messagebox.showinfo(

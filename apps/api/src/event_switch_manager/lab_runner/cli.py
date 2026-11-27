@@ -46,6 +46,12 @@ from .authorization import (
     issue_authorization,
 )
 from .completion import LiveCompletionPolicy
+from .passive import (
+    cleanup_required as passive_cleanup_required,
+)
+from .passive import (
+    retry_cleanup as retry_passive_cleanup,
+)
 from .reporting import (
     ArtifactIdentityError,
     LabBuildMetadata,
@@ -77,20 +83,24 @@ def last_report_path() -> Path | None:
 
 
 def cleanup_required() -> bool:
-    return _RETAINED_CLEANUP_SESSION is not None
+    return (
+        _RETAINED_CLEANUP_SESSION is not None
+        or passive_cleanup_required()
+    )
 
 
 def retry_cleanup() -> bool:
-    """Retry the retained session close; never opens a new session."""
+    """Retry retained normal/passive cleanup; never opens a new session."""
     global _RETAINED_CLEANUP_SESSION
     session = _RETAINED_CLEANUP_SESSION
-    if session is None:
-        return True
-    try:
-        session.close()
-    except SessionCleanupError:
-        return False
-    _RETAINED_CLEANUP_SESSION = None
+    if session is not None:
+        try:
+            session.close()
+        except SessionCleanupError:
+            return False
+        _RETAINED_CLEANUP_SESSION = None
+    if passive_cleanup_required():
+        return retry_passive_cleanup()
     return True
 
 
@@ -519,9 +529,10 @@ def run_experiment(
 def _run_experiment(args: argparse.Namespace) -> int:
     global _ACTIVE_SESSION, _LAST_REPORT_PATH, _RETAINED_CLEANUP_SESSION
     _LAST_REPORT_PATH = None
-    if _RETAINED_CLEANUP_SESSION is not None:
+    if cleanup_required():
         print(
-            "拒绝新会话：上一会话 cleanup 未确认释放；请先重试 cleanup。",
+            "拒绝新会话：上一次 normal/passive cleanup 未确认释放；"
+            "请先重试 cleanup。",
             file=sys.stderr,
         )
         return EXIT_CLEANUP

@@ -220,6 +220,76 @@ def test_known_identity_is_redacted_across_chunk_boundaries(
     )
 
 
+def test_live_preview_withholds_split_identity_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "test-live-value"
+    port = _port(serial_number=secret)
+    serial = PassiveSerial([
+        secret[:7],
+        secret[7:],
+        "\r\nR1#\r\n",
+    ])
+    seen: list[str] = []
+    monkeypatch.setattr(
+        LabBuildMetadata, "load", classmethod(lambda _cls: _metadata()),
+    )
+    from event_switch_manager.lab_runner.passive import PassiveCallbacks
+
+    result = run_passive_diagnostics(
+        _args(tmp_path, duration=0.4),
+        callbacks=PassiveCallbacks(on_event=seen.append),
+        discovery=_discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    live = "\n".join(seen)
+    assert secret[:7] not in live
+    assert secret[7:] not in live
+    assert "<identity>" in live
+    assert result.bytes_written == 0
+    assert serial.writes == []
+
+
+def test_passive_close_failure_retains_lease_until_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.console.lease import ConsoleLeaseManager
+    from event_switch_manager.lab_runner import cli as lab_cli
+    from event_switch_manager.lab_runner import passive as passive_module
+
+    manager = ConsoleLeaseManager()
+    serial = PassiveSerial(["\r\nR1#\r\n"], close_failures=1)
+    monkeypatch.setattr(
+        LabBuildMetadata, "load", classmethod(lambda _cls: _metadata()),
+    )
+    result = run_passive_diagnostics(
+        _args(tmp_path, duration=0.2),
+        discovery=_discovery(),
+        serial_factory=lambda _port, _params: serial,
+        lease_manager=manager,
+    )
+    assert result.status == "CLEANUP_REQUIRED"
+    assert result.cleanup_status == "CLEANUP_REQUIRED"
+    assert passive_module.cleanup_required() is True
+    assert lab_cli.cleanup_required() is True
+    assert manager.active_owner("COM3") == "passive-terminal-diagnostic"
+    assert serial.closed is False
+    with pytest.raises(PermissionError):
+        run_passive_diagnostics(
+            _args(tmp_path, duration=0.1),
+            discovery=_discovery(),
+            serial_factory=lambda _port, _params: serial,
+            lease_manager=manager,
+        )
+    assert passive_module.retry_cleanup() is True
+    assert passive_module.cleanup_required() is False
+    assert lab_cli.cleanup_required() is False
+    assert serial.closed is True
+    assert manager.active_owner("COM3") is None
+
+
 def test_passive_export_is_bounded_and_checksummed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
