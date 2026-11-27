@@ -693,6 +693,10 @@ def _event_record(
         })
     if event.auth_prompt is not None:
         record["auth_prompt_kind"] = event.auth_prompt.value
+    if event.kind is ParserEventKind.STARTUP_READY:
+        record["startup_reason"] = event.reason
+        record["startup_host_token"] = event.startup_host_token
+        record["line_terminated"] = event.line_terminated
     if event.reason is not None:
         record["reason"] = event.reason
     return record

@@ -170,6 +170,17 @@ def sanitize_console_text(text: str) -> str:
     return "".join(output)
 
 
+def _startup_context_unsafe(text: str) -> bool:
+    return any(pattern.search(text) is not None for pattern in (
+        _PROMPT,
+        _CONFIG_PROMPT,
+        _ROMMON_PROMPT,
+        _SWITCH_PROMPT,
+        _AUTH_PROMPT,
+        _INITIAL_DIALOG,
+    ))
+
+
 def _auth_kind(label: str) -> AuthPromptKind:
     normalized = label.casefold()
     if normalized == "username":
@@ -331,11 +342,14 @@ class ConsolePromptParser:
                     "\n", 0, startup_match.start(),
                 ) + 1
                 output = self._buffer[:line_start]
-                line_terminated = self._buffer[startup_match.end():].startswith(
-                    "\n",
+                startup_remainder = self._buffer[startup_match.end():]
+                line_terminated = startup_remainder.startswith("\n")
+                host_token: str | None = None
+                ambiguous_context = (
+                    _startup_context_unsafe(output)
+                    or _startup_context_unsafe(startup_remainder)
                 )
                 self._buffer = ""
-                host_token: str | None = None
                 prior_lines = output.rstrip().splitlines()
                 if prior_lines:
                     available = _STARTUP_AVAILABLE.fullmatch(
@@ -350,7 +364,10 @@ class ConsolePromptParser:
                 self._startup_readiness = True
                 events.append(ParserEvent(
                     ParserEventKind.STARTUP_READY,
-                    reason="press-return",
+                    reason=(
+                        "press-return-with-context"
+                        if ambiguous_context else "press-return"
+                    ),
                     startup_host_token=host_token,
                     line_terminated=line_terminated,
                 ))

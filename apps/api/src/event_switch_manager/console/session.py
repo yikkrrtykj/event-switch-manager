@@ -1102,6 +1102,10 @@ class ConsoleSession:
                     if self._total_response_bytes > self._max_total_response_bytes:
                         raise ConsoleOutputLimit("console session output limit exceeded")
                 elif event.kind is ParserEventKind.STARTUP_READY:
+                    if event.reason != "press-return":
+                        raise AmbiguousConsoleOutput(
+                            "startup readiness context is ambiguous",
+                        )
                     if not allow_startup_readiness:
                         raise UnsafeConsoleState(
                             "unexpected startup readiness text",

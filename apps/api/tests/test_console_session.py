@@ -853,6 +853,57 @@ def test_ordinary_banner_is_not_startup_readiness() -> None:
     assert transport.writes == []
 
 
+def test_startup_readiness_with_existing_prompt_fails_closed() -> None:
+    transport = _ScriptedTransport(
+        "Press RETURN to get started.\r\nR1#\r\n",
+        {},
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    with pytest.raises(AmbiguousConsoleOutput):
+        session.open(None, allow_silent=True)
+    assert session.state is SessionState.FAILED
+    assert transport.writes == []
+
+
+def test_prompt_before_startup_readiness_fails_closed() -> None:
+    transport = _ScriptedTransport(
+        "R1#\r\nPress RETURN to get started.\r\n",
+        {},
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    with pytest.raises(AmbiguousConsoleOutput):
+        session.open(None, allow_silent=True)
+    assert session.state is SessionState.FAILED
+    assert transport.writes == []
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "R1(config)#\r\n",
+        "rommon 1 >\r\n",
+        "switch: \r\n",
+        "Username: \r\n",
+    ],
+)
+def test_unsafe_prefix_before_startup_readiness_fails_closed(prefix: str) -> None:
+    transport = _ScriptedTransport(
+        prefix + "Press RETURN to get started.\r\n",
+        {},
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    with pytest.raises(AmbiguousConsoleOutput):
+        session.open(None, allow_silent=True)
+    assert session.state is SessionState.FAILED
+    assert transport.writes == []
+
+
 def test_startup_readiness_text_in_query_output_fails_closed() -> None:
     transport = _ScriptedTransport(
         "R1#\r\n",

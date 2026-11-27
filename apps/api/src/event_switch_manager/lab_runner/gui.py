@@ -496,6 +496,8 @@ class ConsoleLabGui:
         return bool(self._run_on_ui(show, timeout_seconds + 2))
 
     def ask_credential(self, kind: AuthPromptKind) -> str:
+        self.connection_status_var.set("状态: 等待认证 / 凭据不保存")
+
         def show() -> str:
             result: dict[str, str] = {}
             dialog = tk.Toplevel(self.root)
