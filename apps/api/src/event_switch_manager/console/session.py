@@ -788,15 +788,22 @@ class ConsoleSession:
         execution_started: float | None = None
         command_sent = False
         sent_bytes = 0
+        send_started = False
+        reset_write_accounting = getattr(
+            self._transport, "reset_write_accounting", None,
+        )
+        if callable(reset_write_accounting):
+            reset_write_accounting()
         response_start = self._total_response_bytes
         stage = "authorize-query"
 
         def failed_result(exc: BaseException) -> ConsoleQueryResult:
             nonlocal command_sent, sent_bytes
-            sent_bytes = max(
-                sent_bytes,
-                int(getattr(self._transport, "last_write_bytes", 0) or 0),
-            )
+            if send_started:
+                sent_bytes = max(
+                    sent_bytes,
+                    int(getattr(self._transport, "last_write_bytes", 0) or 0),
+                )
             command_sent = command_sent or sent_bytes > 0
             return ConsoleQueryResult(
                 query=query,
@@ -812,7 +819,7 @@ class ConsoleSession:
                     "not-sent" if not command_sent else "unverified"
                 ),
                 failure_stage=stage,
-                failure_code=type(exc).__name__,
+                failure_code=getattr(exc, "code", type(exc).__name__),
                 unknown_fields=("bootstrap-query-failed",),
             )
 
@@ -824,6 +831,7 @@ class ConsoleSession:
             # command timing or the observation I/O budget.
             execution_started = time.monotonic()
             stage = "send"
+            send_started = True
             sent_bytes = self._send(
                 spec.command + "\r", ConsoleSendOperation.QUERY, query=query,
             )
@@ -1035,7 +1043,10 @@ class ConsoleSession:
                 # Bluetooth may deliver the terminal CR/LF/space after the
                 # prompt candidate.  Consume only bounded terminal whitespace;
                 # non-whitespace still fails closed.
-                self._drain_pending_whitespace(deadline)
+                if not self._drain_pending_whitespace(deadline):
+                    raise AmbiguousConsoleOutput(
+                        "late non-whitespace terminal data",
+                    )
                 pending = bool(pending_fn()) if callable(pending_fn) else False
             if not pending and not self._parser.has_unconsumed_non_whitespace:
                 return candidate

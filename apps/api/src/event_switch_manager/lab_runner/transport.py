@@ -133,6 +133,9 @@ class AuthorizedSerialTransport:
     def last_write_bytes(self) -> int:
         return self._last_write_bytes
 
+    def reset_write_accounting(self) -> None:
+        self._last_write_bytes = 0
+
     def bind_write_token(self, token: object, state_provider: object | None = None) -> None:
         self._write_token = token
         self._write_state_provider = state_provider

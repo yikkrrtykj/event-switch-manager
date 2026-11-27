@@ -1178,6 +1178,39 @@ def test_authorized_lab_session_opens_and_runs_typed_query() -> None:
     assert serial.closed is True
 
 
+def test_rejected_query_does_not_reuse_previous_write_count() -> None:
+    port = _port()
+    auth = _auth(port=port)
+    serial = FakeTerminalSerial()
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.002),
+        timeout=1.0,
+    )
+    session.open(None)
+    try:
+        first = session.query_result(ConsoleQuery.VERSION)
+        assert first.command_sent is True
+        assert first.sent_bytes == len("show version\r")
+        auth.cancel()
+        with pytest.raises(SessionError):
+            session.query_result(ConsoleQuery.INVENTORY)
+        failed = session.last_results[-1]
+        assert failed.query is ConsoleQuery.INVENTORY
+        assert failed.command_sent is False
+        assert failed.sent_bytes == 0
+        assert failed.completion_status == "not-sent"
+        assert failed.failure_stage == "authorize-query"
+    finally:
+        session.close()
+
+
 def test_blocking_empty_read_does_not_consume_full_prompt_deadline() -> None:
     import time
 
