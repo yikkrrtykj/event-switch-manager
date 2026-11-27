@@ -266,6 +266,8 @@ class ConsoleSession:
         self._cancel_event = threading.Event()
         self._last_prompt_read_saw_data = False
         self._write_token = object()
+        self._last_failure: dict[str, object] | None = None
+        self._cleanup_error: dict[str, object] | None = None
 
     @property
     def state(self) -> SessionState:
@@ -276,6 +278,43 @@ class ConsoleSession:
     def last_results(self) -> tuple[ConsoleQueryResult, ...]:
         with self._state_lock:
             return tuple(self._last_results)
+
+    @property
+    def last_failure(self) -> dict[str, object] | None:
+        with self._state_lock:
+            return dict(self._last_failure) if self._last_failure else None
+
+    @property
+    def cleanup_error(self) -> dict[str, object] | None:
+        with self._state_lock:
+            return dict(self._cleanup_error) if self._cleanup_error else None
+
+    def _record_failure(
+        self, stage: str, code: str, exc: BaseException | None = None,
+    ) -> None:
+        if self._last_failure is not None:
+            return
+        cause = exc
+        os_error_type = None
+        winerror = None
+        errno = None
+        if cause is not None:
+            cause_type = type(cause).__name__
+            os_error_type = getattr(cause, "os_error_type", None) or (
+                cause_type if isinstance(cause, OSError) else None
+            )
+            winerror = getattr(cause, "winerror", None)
+            errno = getattr(cause, "errno", None)
+        else:
+            cause_type = None
+        self._last_failure = {
+            "stage": stage,
+            "code": code,
+            "exception_type": cause_type,
+            "os_error_type": os_error_type,
+            "winerror": winerror,
+            "errno": errno,
+        }
 
     @property
     def transport_ever_opened(self) -> bool:
@@ -468,6 +507,11 @@ class ConsoleSession:
                 raise
             self._complete_attach(read, credentials)
         except Exception as exc:
+            self._record_failure(
+                "open",
+                getattr(exc, "code", type(exc).__name__),
+                exc,
+            )
             self._fail()
             if isinstance(exc, SessionError):
                 raise
@@ -522,7 +566,7 @@ class ConsoleSession:
         operation: ConsoleSendOperation,
         *,
         query: ConsoleQuery | None = None,
-    ) -> None:
+    ) -> int:
         if self._cancel_event.is_set():
             raise SessionError("console session was cancelled")
         if self._lab_gate is not None:
@@ -531,14 +575,15 @@ class ConsoleSession:
         if callable(write_authorized):
             # The real transport is the final per-write authorization boundary;
             # the session capability token prevents direct callers bypassing it.
-            write_authorized(
+            sent = write_authorized(
                 text,
                 operation=operation,
                 query=query,
                 session_token=self._write_token,
             )
-        else:
-            self._transport.write(text)
+            return int(sent) if isinstance(sent, int) else len(text.encode("ascii"))
+        self._transport.write(text)
+        return len(text.encode("ascii"))
 
     def _complete_attach(
         self,
@@ -605,6 +650,11 @@ class ConsoleSession:
                 )
                 self._complete_attach(read, credentials)
             except Exception as exc:
+                self._record_failure(
+                    "attach",
+                    getattr(exc, "code", type(exc).__name__),
+                    exc,
+                )
                 self._fail()
                 if isinstance(exc, SessionError):
                     raise
@@ -734,15 +784,53 @@ class ConsoleSession:
         self._state = SessionState.QUERYING
         self._parser.reset()
         self._active_query = query
+        started = time.monotonic()
+        execution_started: float | None = None
+        command_sent = False
+        sent_bytes = 0
+        response_start = self._total_response_bytes
+        stage = "authorize-query"
+
+        def failed_result(exc: BaseException) -> ConsoleQueryResult:
+            nonlocal command_sent, sent_bytes
+            sent_bytes = max(
+                sent_bytes,
+                int(getattr(self._transport, "last_write_bytes", 0) or 0),
+            )
+            command_sent = command_sent or sent_bytes > 0
+            return ConsoleQueryResult(
+                query=query,
+                command=spec.command,
+                status=QueryStatus.FAILED,
+                duration_seconds=round(
+                    time.monotonic() - (execution_started or started), 6,
+                ),
+                command_sent=command_sent,
+                sent_bytes=sent_bytes,
+                response_bytes=max(0, self._total_response_bytes - response_start),
+                completion_status=(
+                    "not-sent" if not command_sent else "unverified"
+                ),
+                failure_stage=stage,
+                failure_code=type(exc).__name__,
+                unknown_fields=("bootstrap-query-failed",),
+            )
+
         try:
             if self._lab_gate is not None:
                 self._lab_gate.authorize_query(query)
             self._check_discovery_budget()
             # Operator reading/confirmation time is not part of the device
             # command timing or the observation I/O budget.
-            started = time.monotonic()
-            self._send(spec.command + "\r", ConsoleSendOperation.QUERY, query=query)
+            execution_started = time.monotonic()
+            stage = "send"
+            sent_bytes = self._send(
+                spec.command + "\r", ConsoleSendOperation.QUERY, query=query,
+            )
+            command_sent = sent_bytes > 0
+            stage = "read"
             read = self._read_for_prompt(allow_pagination=True)
+            stage = "parse"
             if read.auth is not None:
                 raise UnexpectedAuthPrompt("authentication prompt during query")
             self._check_bound_prompt(read)
@@ -761,7 +849,9 @@ class ConsoleSession:
                 command=spec.command,
                 status=status,
                 output=output,
-                duration_seconds=round(time.monotonic() - started, 6),
+                duration_seconds=round(
+                    time.monotonic() - (execution_started or started), 6,
+                ),
                 output_bytes=len(output.encode("utf-8", errors="replace")),
                 output_lines=len(output.splitlines()),
                 pagination_events=self._parser.pages,
@@ -769,6 +859,15 @@ class ConsoleSession:
                     "candidate-quiet-window"
                     if self._completion_policy is not None
                     else "legacy-parser-timing"
+                ),
+                command_sent=command_sent,
+                sent_bytes=sent_bytes,
+                response_bytes=max(0, self._total_response_bytes - response_start),
+                failure_stage=(
+                    "device-command" if status is QueryStatus.FAILED else None
+                ),
+                failure_code=(
+                    "device-command-error" if status is QueryStatus.FAILED else None
                 ),
             )
             self._last_results.append(result)
@@ -778,20 +877,27 @@ class ConsoleSession:
                 else SessionState.USER_EXEC
             )
             if status is QueryStatus.FAILED:
+                self._record_failure("device-command", "device-command-error")
                 raise DeviceCommandError("device rejected the read-only query")
             return result
+        except DeviceCommandError:
+            self._state = previous_state
+            raise
         except (ConsoleTimeout, TransportDisconnected, UnsafeConsoleState) as exc:
+            self._last_results.append(failed_result(exc))
+            self._record_failure(stage, type(exc).__name__, exc)
             self._fail()
             if isinstance(exc, SessionError):
                 raise
             raise SessionError("console query interrupted") from exc
         except (ConsolePaginationLimit, ConsoleOutputLimit) as exc:
+            self._last_results.append(failed_result(exc))
+            self._record_failure(stage, type(exc).__name__, exc)
             self._fail()
             raise ConsoleTimeout("console output bound exceeded") from exc
-        except DeviceCommandError:
-            self._state = previous_state
-            raise
         except Exception as exc:
+            self._last_results.append(failed_result(exc))
+            self._record_failure(stage, type(exc).__name__, exc)
             self._fail()
             if isinstance(exc, SessionError):
                 raise
@@ -925,6 +1031,12 @@ class ConsoleSession:
                 self._lab_gate.check_active()
             pending_fn = getattr(self._transport, "pending_data", None)
             pending = bool(pending_fn()) if callable(pending_fn) else False
+            if pending:
+                # Bluetooth may deliver the terminal CR/LF/space after the
+                # prompt candidate.  Consume only bounded terminal whitespace;
+                # non-whitespace still fails closed.
+                self._drain_pending_whitespace(deadline)
+                pending = bool(pending_fn()) if callable(pending_fn) else False
             if not pending and not self._parser.has_unconsumed_non_whitespace:
                 return candidate
         self._check_discovery_budget()
@@ -958,8 +1070,9 @@ class ConsoleSession:
                 raise SessionCleanupError("console cleanup failed") from cleanup_error
             self._state = SessionState.CLOSED
 
-    def _fail(self) -> None:
+    def _fail(self, *, preserve_primary: bool = False) -> None:
         cleanup_error: Exception | None = None
+        self._state = SessionState.FAILED
         try:
             self._transport.close()
         except Exception as exc:
@@ -973,9 +1086,14 @@ class ConsoleSession:
                     lease.release()
                 except Exception as exc:
                     cleanup_error = exc
-        self._state = SessionState.FAILED
         if cleanup_error is not None:
-            raise SessionCleanupError("console cleanup failed") from cleanup_error
+            self._cleanup_error = {
+                "stage": "cleanup",
+                "code": "cleanup-failed",
+                "exception_type": type(cleanup_error).__name__,
+            }
+            if not preserve_primary:
+                raise SessionCleanupError("console cleanup failed") from cleanup_error
 
     def __enter__(self) -> ConsoleSession:
         return self

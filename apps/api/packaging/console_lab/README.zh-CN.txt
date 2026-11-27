@@ -1,4 +1,4 @@
-Event Switch Manager — Windows Console Lab Runner（R88）
+Event Switch Manager — Windows Console Lab Runner（R89）
 =========================================================
 
 默认双击：
@@ -31,6 +31,10 @@ CLI 诊断使用独立 console 入口：
 - 不发送 BREAK，不主动修改 DTR/RTS，不自动 reset，不支持写配置。
 - 程序只允许 show 只读查询；密码不在命令行参数或环境变量传递。
 - 实验报告不包含完整 transcript，敏感 identity 字段会脱敏或哈希。
+- R89 报告包含诊断字段：primary/secondary/cleanup failure 分离、失败阶段、
+  query 是否实际发送、sent_bytes、response_bytes、真实查询耗时及授权最终状态。
+- 未发送的查询 completion 状态为 not-sent；已发送但未确认的为 unverified，
+  不会伪造完成状态。
 - 真实串口完成边界、DTR/RTS 行为、OS 独占和硬件验收仍是 NOT_VERIFIED。
 
 1. 运行环境

@@ -175,6 +175,11 @@ class ConsoleQueryResult(Record):
     output_lines: int = 0
     pagination_events: int = 0
     completion_status: str = "candidate-quiet-window"
+    command_sent: bool = False
+    sent_bytes: int = 0
+    response_bytes: int = 0
+    failure_stage: str | None = None
+    failure_code: str | None = None
     unknown_fields: tuple[str, ...] = ()
 
 
@@ -203,6 +208,8 @@ class ConsoleObservation(Record):
     unknown_fields: tuple[str, ...] = ()
     completeness: ObservationCompleteness = ObservationCompleteness.INCOMPLETE
     parser_version: Literal["con-01-transcript-v2"] = CONSOLE_PARSER_VERSION
+    failure_stage: str | None = None
+    failure_code: str | None = None
     hardware_verified: Literal[False] = False
     deployment_approved: Literal[False] = False
 
@@ -288,6 +295,11 @@ def compute_evidence_fingerprint(evidence: ConsoleEvidence) -> str:
             result.pop("output_lines", None)
             result.pop("pagination_events", None)
             result.pop("completion_status", None)
+            result.pop("command_sent", None)
+            result.pop("sent_bytes", None)
+            result.pop("response_bytes", None)
+            result.pop("failure_stage", None)
+            result.pop("failure_code", None)
     return hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
 
 

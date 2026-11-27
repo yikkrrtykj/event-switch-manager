@@ -739,6 +739,52 @@ class _ReadAndCloseFailure(_ScriptedTransport):
         raise TransportError("safe-close-failure")
 
 
+class _PromptTrailingWhitespaceTransport(_ScriptedTransport):
+    def __init__(
+        self,
+        initial: str,
+        tail: str = "\n",
+        responses: dict[str, str | tuple[str, ...]] | None = None,
+    ) -> None:
+        super().__init__(initial, responses or {})
+        self.tail = tail
+        self.tail_read = False
+
+    def pending_data(self) -> bool:
+        return bool(self._queue) or not self.tail_read
+
+    def read_chunk(self, timeout: float) -> str:
+        if self._queue:
+            return super().read_chunk(timeout)
+        if not self.tail_read:
+            self.tail_read = True
+            return self.tail
+        return ""
+
+
+def test_prompt_trailing_whitespace_is_drained_before_next_query() -> None:
+    transport = _PromptTrailingWhitespaceTransport(
+        "R1#\n",
+        tail="\n",
+        responses={"show version": "show version\nCisco IOS\nR1#\n"},
+    )
+    session = ConsoleSession(transport, lease_manager=ConsoleLeaseManager(), timeout=1.0)
+    session.open(None)
+    result = session.query_result(ConsoleQuery.VERSION)
+    session.close()
+    assert result.status.value == "ok"
+    assert result.command_sent is True
+    assert result.sent_bytes == len("show version\r")
+
+
+def test_prompt_trailing_non_whitespace_fails_closed() -> None:
+    transport = _PromptTrailingWhitespaceTransport("R1>\n", tail="X")
+    session = ConsoleSession(transport, lease_manager=ConsoleLeaseManager(), timeout=1.0)
+    with pytest.raises(SessionError):
+        session.open(None)
+    assert session.state is SessionState.FAILED
+
+
 def test_transport_read_failure_retains_lease_when_close_fails() -> None:
     manager = ConsoleLeaseManager()
     session = ConsoleSession(

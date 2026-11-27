@@ -65,7 +65,10 @@ from event_switch_manager.lab_runner.reporting import (
     verify_report_fingerprint,
 )
 from event_switch_manager.lab_runner.targets import get_target
-from event_switch_manager.lab_runner.transport import AuthorizedSerialTransport
+from event_switch_manager.lab_runner.transport import (
+    AuthorizedSerialTransport,
+    LabSerialError,
+)
 
 
 def _port(
@@ -1398,6 +1401,76 @@ def test_credential_is_not_sent_after_auth_budget_expiry() -> None:
     assert serial.writes == []
 
 
+def test_operator_cancel_is_distinguished_from_internal_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    class CompleteAdapter:
+        def observe(
+            self,
+            session: ConsoleSession,
+            *,
+            expected_pid: str,
+            expected_release: str,
+            query_hook: Any,
+            lab_provenance: LabProvenance,
+            deadline_seconds: float,
+            partial_evidence_callback: Any = None,
+        ) -> ConsoleEvidence:
+            _ = (
+                expected_pid, expected_release, query_hook, deadline_seconds,
+                partial_evidence_callback,
+            )
+            observation = ConsoleObservation(
+                source=ConsoleSource.AUTHORIZED_LIVE_LAB,
+                session_identity="operator-cancel",
+                exact_pid="WS-C2960X-24TS-L",
+                software_version="15.2(7)E10",
+                completeness=ObservationCompleteness.COMPLETE,
+            )
+            return build_evidence(
+                observation, (), lab_provenance=lab_provenance,
+            )
+
+    port = _port()
+    discovery = _discovery(port)
+    serial = FakeSerial(initial="R1>\n")
+    metadata = LabBuildMetadata("a" * 40, "b" * 64, "test", True, True)
+    monkeypatch.setattr(LabBuildMetadata, "load", classmethod(lambda _cls: metadata))
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", lambda: discovery)
+    monkeypatch.setattr(
+        lab_cli,
+        "_confirm",
+        lambda prompt, **_kwargs: "核对" not in prompt and "enable" not in prompt.casefold(),
+    )
+    monkeypatch.setattr(lab_cli, "CiscoObservationAdapter", CompleteAdapter)
+    monkeypatch.setattr(
+        lab_cli,
+        "AuthorizedSerialTransport",
+        lambda auth, parameters=None: AuthorizedSerialTransport(
+            auth,
+            discovery=lambda: discovery,
+            serial_factory=lambda _port, _params: serial,
+        ),
+    )
+    exit_code = lab_cli.run_experiment(argparse.Namespace(
+        target="2960x",
+        com="COM3",
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path),
+    ))
+    assert exit_code != 0
+    report = next(tmp_path.glob("experiment-*/console-lab-report.json"))
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    diagnostics = payload["diagnostics"]
+    assert diagnostics["operator_cancelled"] is True
+    assert diagnostics["primary_failure"] is None
+    assert diagnostics["authorization_final_state"] == "cancelled-by-operator"
+    assert payload["cleanup"]["status"] == "RELEASED"
+
+
 def test_operator_confirmation_time_is_not_query_execution_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2215,6 +2288,149 @@ def test_late_data_during_final_review_cannot_be_success(
     assert payload["outcome"]["experiment_verdict"] == "FAILED_OR_CANCELLED"
     assert payload["evidence"]["source"] == "AUTHORIZED_LIVE_LAB"
     assert payload["evidence"]["lab_provenance_digest"] is not None
+
+
+def test_r89_field_failure_fixtures_are_sanitized() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "console_lab_r89_failures.json"
+    data = json.loads(fixture.read_text(encoding="utf-8"))
+    assert data["schema"] == "r89-field-failure-fixtures-v1"
+    assert len(data["failures"]) == 2
+    text = fixture.read_text(encoding="utf-8").casefold()
+    for forbidden in ("password", "secret", "hostname", "serial_number", "mac"):
+        assert forbidden not in text
+    first = data["failures"][0]
+    assert first["transport_opened"] is False
+    assert first["connection_status"] == "OPEN_FAILED"
+    second = data["failures"][1]
+    assert second["transport_opened"] is True
+    assert second["query"] == "version"
+    assert second["sent_bytes"] == 13
+    assert second["response_bytes"] == 0
+    assert second["authorization_final_state"] == "cancelled-after-primary-failure"
+
+
+def test_serial_open_failure_preserves_os_diagnostic() -> None:
+    port = _port()
+    auth = _auth(port=port)
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: (_ for _ in ()).throw(
+            OSError(13, "synthetic denied"),
+        ),
+    )
+    auth.authorize_open(transport)
+    with pytest.raises(LabSerialError) as error:
+        transport.open()
+    assert error.value.code == "lab-serial-open-failed"
+    assert error.value.stage == "open"
+    assert error.value.os_error_type in {"OSError", "PermissionError"}
+    assert transport.ever_opened is False
+    assert transport.cleanup_required is False
+
+
+def test_first_query_failure_not_masked_by_cancelled_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    class ReadFailSerial(FakeSerial):
+        def __init__(self) -> None:
+            super().__init__(initial="")
+            self.fail_reads = False
+
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            if data == b"\r":
+                self.buffer += "R1>\n"
+            else:
+                self.fail_reads = True
+            return len(data)
+
+        def read(self, count: int) -> bytes:
+            if self.fail_reads:
+                raise OSError(10054, "synthetic bluetooth reset")
+            return super().read(count)
+
+    port = _port()
+    discovery = _discovery(port)
+    serial = ReadFailSerial()
+    metadata = LabBuildMetadata("a" * 40, "b" * 64, "test", True, True)
+    monkeypatch.setattr(LabBuildMetadata, "load", classmethod(lambda _cls: metadata))
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", lambda: discovery)
+    monkeypatch.setattr(
+        lab_cli,
+        "_confirm",
+        lambda prompt, **_kwargs: "enable" not in prompt.casefold(),
+    )
+    monkeypatch.setattr(
+        lab_cli,
+        "AuthorizedSerialTransport",
+        lambda auth, parameters=None: AuthorizedSerialTransport(
+            auth,
+            discovery=lambda: discovery,
+            serial_factory=lambda _port, _params: serial,
+        ),
+    )
+    exit_code = lab_cli.run_experiment(argparse.Namespace(
+        target="2960x",
+        com="COM3",
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path),
+    ))
+    assert exit_code != 0
+    report_path = next(tmp_path.glob("experiment-*/console-lab-report.json"))
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    diagnostics = payload["diagnostics"]
+    primary = diagnostics["primary_failure"]
+    assert primary is not None
+    assert primary["stage"] in {"read", "send", "parse"}
+    assert primary["query"] == "version"
+    assert primary["command_sent"] is True
+    assert primary["sent_bytes"] == len("show version\r")
+    assert primary["response_bytes"] == 0
+    assert diagnostics["wake_sent"] is True
+    assert diagnostics["wake_confirmed"] is True
+    assert diagnostics["authorization_final_state"] == (
+        "cancelled-after-primary-failure"
+    )
+    assert "authorization: lab authorization was cancelled" not in (
+        payload.get("error") or ""
+    )
+    query = next(
+        item for item in payload["queries"] if item["query"] == "version"
+    )
+    assert query["command_sent"] is True
+    assert query["sent_bytes"] == len("show version\r")
+    assert query["response_bytes"] == 0
+    assert query["failure_stage"] is not None
+
+
+def test_gui_profile_switch_refreshes_auth_summary_and_progress() -> None:
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk display unavailable")
+    from event_switch_manager.lab_runner import gui as gui_module
+
+    root.withdraw()
+    app = gui_module.ConsoleLabGui(root, smoke=True)
+    app.discovery = _discovery(_port())
+    app.port_tree.insert("", "end", iid="COM3", values=(
+        "COM3", "usb", "unknown", "-", "stable", "no",
+    ))
+    app.port_tree.selection_set("COM3")
+    app.target_var.set("c1000")
+    app._update_auth_panel()
+    assert "C1000-16T-2G-L" in app.auth_text.get()
+    assert app.progress.cget("value") == 0
+    app.progress.start(12)
+    app._finish_worker(6)
+    assert int(app.progress.cget("value")) == 0
+    assert "EXIT_6" in app.connection_status_var.get()
+    app.on_close()
 
 
 def test_build_record_supports_gui_and_cli_entrypoint_hashes(tmp_path: Path) -> None:

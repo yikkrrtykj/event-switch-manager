@@ -24,6 +24,7 @@ from event_switch_manager.console.models import (
     ConsoleEvidence,
     LabProvenance,
     ObservationCompleteness,
+    QueryStatus,
     build_evidence,
     compute_evidence_fingerprint,
 )
@@ -130,7 +131,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="EventSwitchManager-ConsoleLab",
         description="受控 Cisco Console 只读实验工具（本地、离线、operator-assisted）",
     )
-    parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R88")
+    parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R89")
     parser.add_argument("--self-test", action="store_true", help="离线自检；不枚举也不打开串口")
     parser.add_argument(
         "--artifact-check", action="store_true",
@@ -673,7 +674,41 @@ def _run_experiment(args: argparse.Namespace) -> int:
     wake_sent = False
     wake_confirmed = False
     final_review_confirmed = False
+    primary_failure: dict[str, Any] | None = None
+    secondary_failure: dict[str, Any] | None = None
+    cleanup_failure: dict[str, Any] | None = None
+    operator_cancelled = False
+    phase = "startup"
+    experiment_started = time.monotonic()
     exit_code = EXIT_OK
+
+    def record_primary(
+        exc: BaseException,
+        *,
+        fallback_stage: str,
+        fallback_code: str | None = None,
+    ) -> None:
+        nonlocal primary_failure, secondary_failure
+        if primary_failure is not None:
+            if secondary_failure is None:
+                secondary_failure = {
+                    "stage": fallback_stage,
+                    "code": fallback_code or type(exc).__name__,
+                    "exception_type": type(exc).__name__,
+                }
+            return
+        recorded = session.last_failure
+        if recorded:
+            primary_failure = dict(recorded)
+            primary_failure.setdefault("query", None)
+            return
+        primary_failure = {
+            "stage": fallback_stage,
+            "code": fallback_code or type(exc).__name__,
+            "exception_type": type(exc).__name__,
+            "query": None,
+        }
+
     try:
         connection_state = "OPEN_FAILED"
         _check_cancel()
@@ -681,10 +716,12 @@ def _run_experiment(args: argparse.Namespace) -> int:
             "\n被动 attach：不预先索取凭据；仅在设备实际出现认证提示时安全读取。",
         )
         _check_cancel()
+        phase = "transport-open"
         session.open(None, initial_timeout=10.0, allow_silent=True)
         connection_state = "OPENED"
         _check_cancel()
         if session.state is SessionState.AWAITING_PROMPT:
+            phase = "passive-attach"
             print("设备当前静默，未返回任何已确认的 EXEC prompt。")
             if not _confirm(
                 "确认该设备处于安全、非生产实验状态且无未提交命令；"
@@ -694,9 +731,11 @@ def _run_experiment(args: argparse.Namespace) -> int:
             if not _confirm("再次确认发送唯一一次 CR 唤醒？输入 y 继续: "):
                 raise ConsoleOperatorAbort("operator did not confirm wake")
             _check_cancel()
+            phase = "wake"
             session.wake_once()
             wake_sent = True
             wake_confirmed = True
+            phase = "post-wake-attach"
             session.finish_attach(None, timeout=30.0)
         if not session.is_attached:
             raise SessionError("no reliable EXEC prompt after passive attach/wake")
@@ -730,6 +769,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
                 ),
             )
 
+        phase = "bootstrap-query"
         evidence = adapter.observe(
             session,
             expected_pid=target.expected_pid,
@@ -739,50 +779,110 @@ def _run_experiment(args: argparse.Namespace) -> int:
             deadline_seconds=min(290.0, max(10.0, remaining - 1.0)),
             partial_evidence_callback=retain_partial,
         )
-        if evidence.completeness is ObservationCompleteness.COMPLETE:
+        failed_results = [
+            result for result in evidence.query_results
+            if result.status is QueryStatus.FAILED or result.failure_code
+        ]
+        evidence_failure = evidence.observation.failure_code is not None or bool(
+            failed_results,
+        )
+        if evidence_failure:
+            failed = failed_results[0] if failed_results else None
+            primary_failure = {
+                "stage": evidence.observation.failure_stage or "query",
+                "code": evidence.observation.failure_code or "query-failed",
+                "query": failed.query.value if failed else None,
+                "command": failed.command if failed else None,
+                "command_sent": failed.command_sent if failed else False,
+                "sent_bytes": failed.sent_bytes if failed else 0,
+                "response_bytes": failed.response_bytes if failed else 0,
+                "duration_seconds": (
+                    failed.duration_seconds if failed else None
+                ),
+                "completion_status": (
+                    failed.completion_status if failed else "unverified"
+                ),
+            }
+            error = (
+                f"query: {primary_failure['code']} "
+                f"stage={primary_failure['stage']}"
+            )
+            exit_code = EXIT_TRANSPORT
+            print("实验查询失败；保留 primary failure，不做正常 final active 校验。")
+        elif evidence.completeness is ObservationCompleteness.COMPLETE:
             print("程序完成解析；该结果仍不是硬件认证。")
         else:
             print("观察结果为 PARTIAL/INCOMPLETE；报告记录未知字段，禁止标记 COMPLETE。")
-        final_review_confirmed = _confirm(
-            "请核对以上全部脱敏查询结果；确认本次只读流程结束时输入 YES: ",
-        )
-        _check_cancel()
-        if not final_review_confirmed:
-            cancelled = True
-            error = "operator: final result review not confirmed"
-            exit_code = EXIT_TRANSPORT
-        else:
-            if session.pending_data():
-                raise ConsoleOperatorAbort("late terminal data during final review")
-            authorization.check_active()
+        if primary_failure is None:
+            phase = "final-review"
+            final_review_confirmed = _confirm(
+                "请核对以上全部脱敏查询结果；确认本次只读流程结束时输入 YES: ",
+            )
+            _check_cancel()
+            if not final_review_confirmed:
+                cancelled = True
+                operator_cancelled = True
+                error = "operator: final result review not confirmed"
+                exit_code = EXIT_TRANSPORT
+            else:
+                phase = "final-check"
+                if session.pending_data():
+                    raise ConsoleOperatorAbort(
+                        "late terminal data during final review",
+                    )
+                if session.is_attached:
+                    authorization.check_active()
     except LabAuthorizationError as exc:
-        error = f"authorization: {exc}"
+        if primary_failure is not None:
+            secondary_failure = {
+                "stage": phase,
+                "code": f"authorization:{exc}",
+                "exception_type": type(exc).__name__,
+            }
+        else:
+            record_primary(exc, fallback_stage=phase, fallback_code="authorization")
+        if primary_failure is None:
+            error = f"authorization: {exc}"
         exit_code = EXIT_AUTHORIZATION
     except IdentityConflict as exc:
+        record_primary(exc, fallback_stage="identity", fallback_code="identity-conflict")
         error = f"identity: {exc}"
         exit_code = EXIT_IDENTITY
         if partial_evidence:
             evidence = partial_evidence[0]
     except ConsoleOperatorAbort as exc:
-        error = f"operator: {exc}"
+        operator_cancelled = True
         cancelled = True
+        error = f"operator: {exc}"
         exit_code = EXIT_TRANSPORT
     except KeyboardInterrupt:
         session.cancel()
+        operator_cancelled = True
         error = "operator-interrupt"
         cancelled = True
         exit_code = EXIT_TRANSPORT
     except ConsoleTimeout as exc:
+        record_primary(exc, fallback_stage=phase, fallback_code="timeout")
         error = f"timeout: {exc}"
         exit_code = EXIT_TRANSPORT
     except SessionCleanupError as exc:
-        error = f"cleanup: {exc}"
+        cleanup_failure = {
+            "stage": "cleanup",
+            "code": "cleanup-failed",
+            "exception_type": type(exc).__name__,
+        }
+        if primary_failure is None and session.last_failure:
+            primary_failure = dict(session.last_failure)
+        if primary_failure is None:
+            error = f"cleanup: {exc}"
         cleanup_status = "CLEANUP_REQUIRED"
         exit_code = EXIT_CLEANUP
     except SessionError as exc:
+        record_primary(exc, fallback_stage=phase, fallback_code="session")
         error = f"session: {exc}"
         exit_code = EXIT_TRANSPORT
     except Exception as exc:
+        record_primary(exc, fallback_stage=phase, fallback_code="unexpected")
         error = f"unexpected: {type(exc).__name__}"
         exit_code = EXIT_TRANSPORT
     finally:
@@ -794,9 +894,14 @@ def _run_experiment(args: argparse.Namespace) -> int:
                 with _ACTIVE_LOCK:
                     if _RETAINED_CLEANUP_SESSION is session:
                         _RETAINED_CLEANUP_SESSION = None
-            except SessionCleanupError:
+            except SessionCleanupError as exc:
                 cleanup_status = "CLEANUP_REQUIRED"
                 connection_state = "CLEANUP_REQUIRED"
+                cleanup_failure = {
+                    "stage": "cleanup",
+                    "code": "cleanup-failed",
+                    "exception_type": type(exc).__name__,
+                }
                 exit_code = EXIT_CLEANUP
                 with _ACTIVE_LOCK:
                     _RETAINED_CLEANUP_SESSION = session
@@ -807,8 +912,13 @@ def _run_experiment(args: argparse.Namespace) -> int:
                 with _ACTIVE_LOCK:
                     if _RETAINED_CLEANUP_SESSION is session:
                         _RETAINED_CLEANUP_SESSION = None
-            except SessionCleanupError:
+            except SessionCleanupError as exc:
                 cleanup_status = "CLEANUP_REQUIRED"
+                cleanup_failure = {
+                    "stage": "cleanup",
+                    "code": "cleanup-failed",
+                    "exception_type": type(exc).__name__,
+                }
                 exit_code = EXIT_CLEANUP
                 with _ACTIVE_LOCK:
                     _RETAINED_CLEANUP_SESSION = session
@@ -845,6 +955,34 @@ def _run_experiment(args: argparse.Namespace) -> int:
     else:
         queries_complete = False
         operator_confirmed = False
+    if primary_failure is not None and error is None:
+        error = (
+            f"{primary_failure.get('stage', 'unknown')}:"
+            f"{primary_failure.get('code', 'failure')}"
+        )
+    if operator_cancelled:
+        authorization_state = "cancelled-by-operator"
+    elif primary_failure is not None:
+        authorization_state = "cancelled-after-primary-failure"
+    elif cleanup_failure is not None:
+        authorization_state = "cancelled-after-cleanup-failure"
+    else:
+        authorization_state = "cancelled-normal-completion"
+    diagnostics = {
+        "phase": phase,
+        "experiment_duration_seconds": round(
+            time.monotonic() - experiment_started, 6,
+        ),
+        "primary_failure": primary_failure,
+        "secondary_failure": secondary_failure,
+        "cleanup_failure": cleanup_failure,
+        "operator_cancelled": operator_cancelled,
+        "authorization_final_state": authorization_state,
+        "transport_opened": session.transport_ever_opened,
+        "transport_open_attempted": connection_state != "NOT_ATTEMPTED",
+        "wake_sent": wake_sent,
+        "wake_confirmed": wake_confirmed,
+    }
     experiment_verdict = (
         "READONLY_QUERIES_COMPLETED"
         if (
@@ -871,6 +1009,8 @@ def _run_experiment(args: argparse.Namespace) -> int:
         "experiment_verdict": experiment_verdict,
         "hardware_verdict": "NOT_VERIFIED",
         "real_serial_completion": "NOT_VERIFIED",
+        "duration_seconds": diagnostics["experiment_duration_seconds"],
+        "failure_phase": phase,
     }
     try:
         payload = writer.write(
@@ -881,6 +1021,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
             error=error,
             cancelled=cancelled,
             query_results=session.last_results,
+            diagnostics=diagnostics,
         )
     except Exception as exc:
         print(f"报告写入失败: {type(exc).__name__}", file=sys.stderr)
@@ -889,6 +1030,29 @@ def _run_experiment(args: argparse.Namespace) -> int:
     print(f"\n报告: {_LAST_REPORT_PATH}")
     print(f"摘要: {output_dir / 'console-lab-summary.txt'}")
     print(f"报告指纹: {payload['report_fingerprint']}")
+    if primary_failure is not None:
+        print(
+            "PRIMARY-FAILURE: "
+            f"stage={primary_failure.get('stage')} "
+            f"code={primary_failure.get('code')} "
+            f"query={primary_failure.get('query')} "
+            f"command_sent={primary_failure.get('command_sent')} "
+            f"sent_bytes={primary_failure.get('sent_bytes')} "
+            f"response_bytes={primary_failure.get('response_bytes')}",
+        )
+    if secondary_failure is not None:
+        print(
+            "SECONDARY-FAILURE: "
+            f"stage={secondary_failure.get('stage')} "
+            f"code={secondary_failure.get('code')}",
+        )
+    if cleanup_failure is not None:
+        print(
+            "CLEANUP-FAILURE: "
+            f"stage={cleanup_failure.get('stage')} "
+            f"code={cleanup_failure.get('code')}",
+        )
+    print(f"AUTHORIZATION-FINAL-STATE: {authorization_state}")
     print(
         f"FINAL: connection={connection_state} cleanup={cleanup_status} "
         f"verdict={experiment_verdict} REAL-SERIAL-COMPLETION=NOT_VERIFIED "

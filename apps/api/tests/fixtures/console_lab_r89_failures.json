@@ -1,0 +1,51 @@
+{
+  "schema": "r89-field-failure-fixtures-v1",
+  "note": "Sanitized field observations for offline regression.",
+  "failures": [
+    {
+      "id": "r89-bt-open-failure",
+      "target": "C1000-16T-2G-L/15.2(7)E2",
+      "com_endpoint": "COM3",
+      "transport_kind": "bluetooth-spp",
+      "direction": "outgoing",
+      "binding": "manual",
+      "transport_opened": false,
+      "connection_status": "OPEN_FAILED",
+      "cleanup_status": "RELEASED",
+      "elapsed_seconds": 0.005,
+      "primary_failure": {
+        "stage": "transport-open",
+        "code": "lab-serial-open-failed",
+        "exception_type": "OSError"
+      }
+    },
+    {
+      "id": "r89-bt-first-query-failure",
+      "target": "C1000-16T-2G-L/15.2(7)E2",
+      "com_endpoint": "COM3",
+      "transport_kind": "bluetooth-spp",
+      "direction": "outgoing",
+      "binding": "manual",
+      "transport_opened": true,
+      "connection_status": "RELEASED",
+      "cleanup_status": "RELEASED",
+      "elapsed_seconds": 24.264,
+      "wake_sent": true,
+      "wake_confirmed": true,
+      "operator_confirmations": 1,
+      "query": "version",
+      "command": "show version",
+      "command_sent": true,
+      "sent_bytes": 13,
+      "response_bytes": 0,
+      "query_duration_seconds": 0.0,
+      "query_status": "failed",
+      "unknown_fields": ["bootstrap-query-failed"],
+      "primary_failure": {
+        "stage": "read",
+        "code": "transport-error"
+      },
+      "authorization_final_state": "cancelled-after-primary-failure"
+    }
+  ]
+}

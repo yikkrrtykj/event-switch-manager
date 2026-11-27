@@ -260,6 +260,7 @@ class LabReportWriter:
         error: str | None,
         cancelled: bool = False,
         query_results: tuple[Any, ...] = (),
+        diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if evidence is not None and evidence.source is ConsoleSource.AUTHORIZED_LIVE_LAB:
             validate_lab_provenance(
@@ -279,6 +280,11 @@ class LabReportWriter:
                 "output_lines": item.output_lines,
                 "pagination_events": item.pagination_events,
                 "completion_status": item.completion_status,
+                "command_sent": item.command_sent,
+                "sent_bytes": item.sent_bytes,
+                "response_bytes": item.response_bytes,
+                "failure_stage": item.failure_stage,
+                "failure_code": item.failure_code,
                 "unknown_fields": list(item.unknown_fields),
             }
             for item in source_results
@@ -307,6 +313,7 @@ class LabReportWriter:
             },
             "discovery": self._discovery_summary(),
             "connection": connection,
+            "diagnostics": diagnostics or {},
             "outcome": {
                 "connection_status": connection.get("status"),
                 "opened": connection.get("opened"),
@@ -367,6 +374,7 @@ class LabReportWriter:
         error: str | None,
         cancelled: bool = False,
         query_results: tuple[Any, ...] = (),
+        diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         payload = self.build_payload(
@@ -377,6 +385,7 @@ class LabReportWriter:
             error=error,
             cancelled=cancelled,
             query_results=query_results,
+            diagnostics=diagnostics,
         )
         report_path = self.output_dir / "console-lab-report.json"
         fingerprint_input_path = self.output_dir / "console-lab-report-fingerprint-input.json"

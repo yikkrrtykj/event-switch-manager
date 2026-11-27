@@ -33,6 +33,21 @@ SerialFactory = Callable[[str, SerialParameters], Any]
 DiscoveryFactory = Callable[[], SerialDiscovery]
 
 
+class LabSerialError(TransportError):
+    """Safe serial-stage diagnosis without credentials or raw payloads."""
+
+    def __init__(self, code: str, stage: str, cause: BaseException | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.stage = stage
+        self.exception_type = type(cause).__name__ if cause is not None else None
+        self.os_error_type = (
+            type(cause).__name__ if isinstance(cause, OSError) else None
+        )
+        self.winerror = getattr(cause, "winerror", None)
+        self.errno = getattr(cause, "errno", None)
+
+
 def _pyserial_factory(port: str, parameters: SerialParameters) -> Any:
     from serial import Serial  # type: ignore[import-untyped]
 
@@ -84,6 +99,7 @@ class AuthorizedSerialTransport:
         self._ever_opened = False
         self._write_token: object | None = None
         self._write_state_provider: object | None = None
+        self._last_write_bytes = 0
 
     @property
     def authorization(self) -> LabAuthorization:
@@ -113,6 +129,10 @@ class AuthorizedSerialTransport:
     def ever_opened(self) -> bool:
         return self._ever_opened
 
+    @property
+    def last_write_bytes(self) -> int:
+        return self._last_write_bytes
+
     def bind_write_token(self, token: object, state_provider: object | None = None) -> None:
         self._write_token = token
         self._write_state_provider = state_provider
@@ -135,9 +155,9 @@ class AuthorizedSerialTransport:
         try:
             discovery = self._discovery()
         except Exception as exc:
-            raise TransportError("lab-serial-enumeration-failed") from exc
+            raise LabSerialError("lab-serial-enumeration-failed", "enumerate", exc) from exc
         if not discovery.supported:
-            raise TransportError("lab-serial-platform-unsupported")
+            raise LabSerialError("lab-serial-platform-unsupported", "enumerate")
         endpoint = self._authorization.com_endpoint.casefold()
         matches = [
             port for port in discovery.ports
@@ -152,7 +172,7 @@ class AuthorizedSerialTransport:
         try:
             serial_port = self._serial_factory(port.port, self._parameters)
         except Exception as exc:
-            raise TransportError("lab-serial-open-failed") from exc
+            raise LabSerialError("lab-serial-open-failed", "open", exc) from exc
         self._serial = serial_port
         self._is_open = True
         self._ever_opened = True
@@ -188,7 +208,7 @@ class AuthorizedSerialTransport:
         operation: ConsoleSendOperation,
         query: ConsoleQuery | None = None,
         session_token: object | None = None,
-    ) -> None:
+    ) -> int:
         if not self._is_open or self._serial is None or self._cleanup_required:
             raise TransportDisconnected("lab serial transport is not open")
         if self._write_token is None or session_token is not self._write_token:
@@ -205,7 +225,7 @@ class AuthorizedSerialTransport:
                 raise TransportError("credential send outside authenticated state")
         self._authorization.authorize_send(operation, text, query)
         if not text:
-            return
+            return 0
         try:
             payload = text.encode("ascii")
         except UnicodeEncodeError as exc:
@@ -214,6 +234,7 @@ class AuthorizedSerialTransport:
             raise TransportError("lab-serial-write-bound-exceeded")
         deadline = time.monotonic() + self._parameters.write_timeout_seconds
         sent = 0
+        self._last_write_bytes = 0
         while sent < len(payload):
             # Expiry/cancellation is re-checked before every partial chunk so
             # no remaining bytes are written after authorization is revoked.
@@ -227,6 +248,8 @@ class AuthorizedSerialTransport:
             if not isinstance(count, int) or count <= 0:
                 raise TransportError("lab-serial-partial-write")
             sent += count
+            self._last_write_bytes = sent
+        return sent
 
     def read_chunk(self, timeout: float) -> str:
         if not self._is_open or self._serial is None or self._cleanup_required:
@@ -256,6 +279,7 @@ def lab_serial_safety_flags() -> dict[str, str]:
 __all__ = [
     "AuthorizedSerialTransport",
     "BREAK_SUPPORT",
+    "LabSerialError",
     "DTR_RTS_BEHAVIOR",
     "MAX_READ_BYTES",
     "SerialFactory",

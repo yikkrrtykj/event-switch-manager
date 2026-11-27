@@ -33,6 +33,10 @@ H0-GUI — 独立 GUI
 [ ] GUI EXE 无 stdin/stdout/stderr 时仍能启动、日志和凭据交互正常
 [ ] 独立 CLI EXE 仍可执行 self-test / artifact-check / list-ports
 [ ] GUI 启动/刷新/self-test 不自动打开串口
+[ ] 失败报告的 diagnostics 分别记录 primary/secondary/cleanup error
+[ ] 失败查询记录 command_sent / sent_bytes / response_bytes / 实际耗时，
+    未发送或未确认时不会显示完成
+[ ] Bluetooth 人工方向与枚举方向分别显示并记录
 [ ] 连接前安全授权区域显示端口/identity/PID/release/命令/有效期
 [ ] 密码输入遮挡且不保存
 [ ] 关闭窗口/取消触发安全清理；cleanup failure 可见

@@ -202,6 +202,8 @@ class ConsoleLabGui:
         self.artifact_label.pack(anchor="w")
         self.self_label = ttk.Label(status, text="")
         self.self_label.pack(anchor="w")
+        self.connection_status_var = tk.StringVar(value="状态: NOT_ATTEMPTED")
+        ttk.Label(status, textvariable=self.connection_status_var).pack(anchor="w")
         ttk.Label(
             status,
             text="产品 LIVE_DEVICE 保持禁用；本工具仅进行受控只读实验。",
@@ -248,6 +250,7 @@ class ConsoleLabGui:
         target_row.pack(fill="x", pady=(8, 0))
         ttk.Label(target_row, text="目标 Profile:").pack(side="left")
         self.target_var = tk.StringVar(value="2960x")
+        self.target_var.trace_add("write", lambda *_args: self._update_auth_panel())
         ttk.Combobox(
             target_row,
             textvariable=self.target_var,
@@ -584,6 +587,8 @@ class ConsoleLabGui:
             ),
         )
         reset_active_experiment_cancel()
+        self.connection_status_var.set("状态: CONNECTING / operator-assisted")
+        self.progress.configure(mode="indeterminate", value=0)
         self.progress.start(12)
         self.connect_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
@@ -632,6 +637,22 @@ class ConsoleLabGui:
         self.log_text.insert("end", text)
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+        status_var = getattr(self, "connection_status_var", None)
+        if status_var is None:
+            return
+        for line in text.splitlines():
+            if "查询:" in line:
+                status_var.set(f"状态: {line.strip()}")
+                break
+            if "被动 attach" in line:
+                status_var.set("状态: 被动 ATTACH / 等待操作者")
+                break
+            if "开始 operator-assisted" in line:
+                status_var.set("状态: 只读查询中")
+                break
+            if "实验查询失败" in line:
+                status_var.set("状态: 查询失败 / 保留 primary failure")
+                break
 
     def _append_info(self, text: str) -> None:
         self.info_text.configure(state="normal")
@@ -673,6 +694,11 @@ class ConsoleLabGui:
         self.cancel_button.configure(state="disabled")
         self._append_log(f"\n=== 实验结束 exit={code} ===\n")
         blocked = code == EXIT_CLEANUP or cleanup_required()
+        self.progress.stop()
+        self.progress.configure(value=0)
+        self.connection_status_var.set(
+            "状态: CLEANUP_REQUIRED" if blocked else f"状态: EXIT_{code}",
+        )
         if blocked:
             self._append_log("=== cleanup 未确认：CLEANUP_REQUIRED，未声明端口已释放 ===\n")
             self._closing = False
@@ -749,7 +775,18 @@ class ConsoleLabGui:
             return
         observation = payload.get("observation") or {}
         outcome = payload.get("outcome") or {}
+        diagnostics = payload.get("diagnostics") or {}
+        primary = diagnostics.get("primary_failure") or {}
+        secondary = diagnostics.get("secondary_failure") or {}
+        cleanup = diagnostics.get("cleanup_failure") or {}
         lines = [
+            f"Error: {payload.get('error') or '无'}",
+            f"阶段: {diagnostics.get('phase')}",
+            f"Primary failure: {json.dumps(primary, ensure_ascii=False)}",
+            f"Secondary failure: {json.dumps(secondary, ensure_ascii=False)}",
+            f"Cleanup failure: {json.dumps(cleanup, ensure_ascii=False)}",
+            f"Authorization final state: {diagnostics.get('authorization_final_state')}",
+            f"耗时: {diagnostics.get('experiment_duration_seconds')}s",
             f"PID: {observation.get('exact_pid')}",
             f"IOS: {observation.get('software_version')}",
             f"License: {json.dumps(observation.get('license'), ensure_ascii=False)}",
@@ -763,6 +800,10 @@ class ConsoleLabGui:
             f"Cleanup: {outcome.get('cleanup_status')}",
             f"Hardware verdict: {outcome.get('hardware_verdict')}",
         ]
+        self.connection_status_var.set(
+            f"状态: {outcome.get('connection_status')} / "
+            f"{outcome.get('experiment_verdict')}",
+        )
         self._append_info("\n".join(lines))
 
     def smoke_close(self, report_path: Path | None = None) -> None:
