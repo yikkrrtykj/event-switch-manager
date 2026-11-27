@@ -1,0 +1,106 @@
+R86 Real Hardware Acceptance Template
+=====================================
+
+现场执行者：________________        日期：________________
+ConsoleLab Artifact SHA-256：________________________________
+Git SHA：________________________________
+Target：WS-C2960X-24TS-L / 15.2(7)E10 [ ]   C1000-16T-2G-L / 15.2(7)E2 [ ]
+适配器 VID/PID：__________  USB serial：__________  COM：__________
+驱动版本：________________            OS：________________
+
+先决条件（必须全部勾选）
+[ ] 设备无生产业务/关键链路
+[ ] 用户明确允许本设备进行本次只读实验
+[ ] 不执行配置写入、配置备份、CON-02 或 Clean Deploy
+[ ] 不发送 BREAK，不主动切换 DTR/RTS
+[ ] 现场有人可立即断开串口/停止程序
+
+H0 — USB COM / Bluetooth SPP
+----------------------------
+[ ] 枚举显示 endpoint/description/manufacturer/VID:PID/USB serial/location
+[ ] 记录 identity quality 与 duplicate identity
+[ ] 拔插后重新枚举并记录 COM 编号/identity 变化
+[ ] 多适配器场景下没有自动连接错误设备
+[ ] Bluetooth SPP：GUI 显示类型、COM、方向、可靠名称（若有）与低置信度
+[ ] Bluetooth 人工绑定必须由操作者确认具体设备/COM/方向；重复 PnP 身份拒绝
+[ ] 蓝牙 COM 编号或 PnP identity 变化后重新确认，不自动重连
+[ ] 不能仅凭 BTHENUM 或 COM 编号声明稳定身份
+结果：PASS / FAIL / BLOCKED    备注：____________________________
+
+H0-GUI — 独立 GUI
+-----------------
+[ ] 双击 GUI EXE 默认打开 GUI，不出现额外黑色控制台窗口
+[ ] GUI EXE 无 stdin/stdout/stderr 时仍能启动、日志和凭据交互正常
+[ ] 独立 CLI EXE 仍可执行 self-test / artifact-check / list-ports
+[ ] GUI 启动/刷新/self-test 不自动打开串口
+[ ] 失败报告的 diagnostics 分别记录 primary/secondary/cleanup error
+[ ] 失败查询记录 command_sent / sent_bytes / response_bytes / 实际耗时，
+    未发送或未确认时不会显示完成
+[ ] Bluetooth 人工方向与枚举方向分别显示并记录
+[ ] R90 报告分别显示 transport / attach / authentication / query / cleanup 状态
+[ ] 终端诊断不包含完整 transcript、密码或凭据内容
+[ ] 重复同身份同模式 Prompt 与单次 Prompt 的行为一致；不同 identity/mode fail-closed
+[ ] 用户 Artifact 只解压一次即可运行；包内无嵌套 build ZIP
+[ ] “被动终端诊断”模式不发送任何应用层字节（CR/认证/分页/查询）
+[ ] 被动诊断事件无完整 transcript、密码或凭据，且可一键导出诊断 ZIP
+[ ] Cisco `Press RETURN to get started.` 触发 AWAITING_RETURN，
+    经人工确认后最多发送一次 CR
+[ ] 普通 Banner / 命令响应 / 未知输出不得触发 startup 唤醒
+[ ] GUI 明确显示等待响应/按 Enter/等待人工确认/认证/User/Privileged/查询状态
+[ ] 连接前安全授权区域显示端口/identity/PID/release/命令/有效期
+[ ] 密码输入遮挡且不保存
+[ ] 关闭窗口/取消触发安全清理；cleanup failure 可见
+结果：PASS / FAIL / BLOCKED    备注：____________________________
+
+H1 — 独占与连接
+---------------
+[ ] 程序打开指定 COM 前重新枚举并匹配 adapter identity
+[ ] 独立进程/工具尝试占用同一 COM，验证第二个进程不能获得
+    方法：先让 ConsoleLab 空闲等待 passive attach，再运行第二个 PowerShell：
+      $p = New-Object System.IO.Ports.SerialPort("COMx")
+      $p.Open()
+    第二进程只验证独占打开，不写任何字节；若意外获得 handle，立即 Close()
+    并停止本次 H1，不得进一步操作。
+[ ] 正常关闭后同 COM 可重新打开
+[ ] 已占用端口被安全拒绝
+[ ] 关闭失败时报告 CLEANUP_REQUIRED，且不开始新会话
+结果：PASS / FAIL / BLOCKED    备注：____________________________
+
+H2 — Bootstrap
+--------------
+[ ] 得到 EXEC prompt
+[ ] show version
+[ ] show inventory
+[ ] Exact PID/release 与目标一致
+[ ] 登录失败/Enable 失败/认证提示异常时停止
+[ ] 每条 bootstrap 查询获得操作者明确确认
+结果：PASS / FAIL / BLOCKED    备注：____________________________
+
+H3 — 完整只读观察
+-----------------
+按目标执行并确认：
+[ ] show interfaces status（分页/完整边界）
+[ ] show switch（仅 2960X）
+[ ] show license（仅 2960X；C1000 不执行）
+[ ] show boot
+[ ] show file systems
+[ ] 与人工只读输出交叉验证字段/缺失字段
+[ ] 任何超时、歧义、未完成输出都没有标记 COMPLETE
+结果：PASS / FAIL / BLOCKED    备注：____________________________
+
+H4 — 异常恢复
+-------------
+[ ] timeout / cancel / disconnect 均停止且不自动重放命令
+[ ] 拔线后 lease/cleanup 状态明确
+[ ] cleanup retry 可用，未释放时不接管端口
+[ ] 无自动恢复命令、无 configuration mode、无设备写入
+结果：PASS / FAIL / BLOCKED    备注：____________________________
+
+最终
+----
+[ ] 报告已由现场人员保存，SHA256SUMS 可校验
+[ ] 报告已脱敏，无密码/完整 transcript/配置备份
+[ ] 只有以上实际证据才可更新硬件验收；未执行项保持 NOT_VERIFIED
+[ ] H0-H4 未全部 PASS 前不得标记 CON-01-HARDWARE=VERIFIED
+
+现场签名：____________________

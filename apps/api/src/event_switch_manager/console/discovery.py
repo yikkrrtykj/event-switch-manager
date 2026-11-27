@@ -7,6 +7,7 @@ hardware identity.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from collections import Counter
@@ -30,6 +31,19 @@ class IdentityQuality(StrEnum):
     AMBIGUOUS = "ambiguous"
 
 
+class PortTransportKind(StrEnum):
+    USB = "usb"
+    BLUETOOTH_SPP = "bluetooth-spp"
+    NATIVE_SERIAL = "native-serial"
+    UNKNOWN = "unknown"
+
+
+class BluetoothDirection(StrEnum):
+    INCOMING = "incoming"
+    OUTGOING = "outgoing"
+    UNKNOWN = "unknown"
+
+
 class SerialPortInfo(Record):
     port: str
     description: str | None = None
@@ -43,10 +57,32 @@ class SerialPortInfo(Record):
     adapter_identity: str
     identity_quality: IdentityQuality
     duplicate_identity: bool = False
+    transport_kind: PortTransportKind = PortTransportKind.UNKNOWN
+    pnp_instance_identity: str | None = None
+    bluetooth_name: str | None = None
+    bluetooth_direction: BluetoothDirection = BluetoothDirection.UNKNOWN
+    remote_bluetooth_identity: str | None = None
 
     @property
     def usb(self) -> bool:
         return self.vid is not None and self.pid is not None
+
+    @property
+    def manual_binding_required(self) -> bool:
+        return self.transport_kind is PortTransportKind.BLUETOOTH_SPP
+
+    @property
+    def bluetooth_bindable(self) -> bool:
+        return bool(
+            self.transport_kind is PortTransportKind.BLUETOOTH_SPP
+            and self.pnp_instance_identity
+            and self.bluetooth_direction
+            in {
+                BluetoothDirection.INCOMING,
+                BluetoothDirection.OUTGOING,
+                BluetoothDirection.UNKNOWN,
+            }
+        )
 
 
 class SerialDiscovery(Record):
@@ -89,10 +125,63 @@ def _normalize_serial(value: Any) -> str | None:
     return text
 
 
+def _short_hash(value: str) -> str:
+    return hashlib.sha256(value.casefold().encode("utf-8")).hexdigest()[:24]
+
+
+def _bluetooth_direction(hardware_id: str | None) -> BluetoothDirection:
+    if not hardware_id:
+        return BluetoothDirection.UNKNOWN
+    upper = hardware_id.upper()
+    remote = _bluetooth_remote_identity(hardware_id)
+    if "_LOCALMFG&0000" in upper:
+        return BluetoothDirection.INCOMING
+    if remote is None:
+        return BluetoothDirection.UNKNOWN
+    if remote == "000000000000":
+        return BluetoothDirection.INCOMING
+    return BluetoothDirection.OUTGOING
+
+
+def _bluetooth_remote_identity(hardware_id: str | None) -> str | None:
+    if not hardware_id:
+        return None
+    match = re.search(r"&0&([0-9A-Fa-f]{12})(?:_|$)", hardware_id)
+    return match.group(1).upper() if match else None
+
+
+def _bluetooth_info(
+    hardware_id: str | None,
+    description: str | None,
+    *,
+    bluetooth_name: str | None = None,
+) -> tuple[PortTransportKind, BluetoothDirection, str | None, str | None, str | None]:
+    looks_bluetooth = bool(
+        (hardware_id and "BTHENUM" in hardware_id.upper())
+        or (description and ("蓝牙" in description or "bluetooth" in description.casefold()))
+    )
+    if not looks_bluetooth:
+        return PortTransportKind.UNKNOWN, BluetoothDirection.UNKNOWN, None, None, None
+    direction = _bluetooth_direction(hardware_id)
+    remote = _bluetooth_remote_identity(hardware_id)
+    if remote == "000000000000":
+        remote = None
+    pnp = hardware_id.casefold() if hardware_id else None
+    return PortTransportKind.BLUETOOTH_SPP, direction, pnp, remote, bluetooth_name
+
+
 def _adapter_identity(
     *, vid: int | None, pid: int | None, serial: str | None,
     location: str | None, hardware_id: str | None,
+    transport_kind: PortTransportKind = PortTransportKind.UNKNOWN,
+    pnp_instance_identity: str | None = None,
+    description: str | None = None,
 ) -> tuple[str, IdentityQuality]:
+    if transport_kind is PortTransportKind.BLUETOOTH_SPP:
+        # A BTHENUM/PnP instance is useful for a manual, per-session binding,
+        # but is not a verified stable hardware identity across re-pairing.
+        basis = pnp_instance_identity or hardware_id or description or "bluetooth"
+        return f"bluetooth-pnp:{_short_hash(basis)}", IdentityQuality.AMBIGUOUS
     usb = (
         f"{vid:04x}:{pid:04x}"
         if vid is not None and pid is not None
@@ -152,13 +241,36 @@ def discover_serial_ports(
         serial = _normalize_serial(_value(entry, "serial_number"))
         location = _optional_text(_value(entry, "location"))
         hardware_id = _optional_text(_value(entry, "hwid"))
+        description = _optional_text(_value(entry, "description"))
+        bt_kind, bt_direction, pnp, remote, bt_name = _bluetooth_info(
+            hardware_id,
+            description,
+            bluetooth_name=_optional_text(_value(entry, "bluetooth_name")),
+        )
+        if bt_kind is PortTransportKind.BLUETOOTH_SPP:
+            transport_kind = PortTransportKind.BLUETOOTH_SPP
+        elif vid is not None and pid is not None:
+            transport_kind = PortTransportKind.USB
+        elif hardware_id and re.match(
+            r"^(ACPI|PCI|PNP|ROOT)\\",
+            hardware_id,
+            re.IGNORECASE,
+        ):
+            transport_kind = PortTransportKind.NATIVE_SERIAL
+        elif description and ("serial" in description.casefold() or "串行" in description):
+            transport_kind = PortTransportKind.NATIVE_SERIAL
+        else:
+            transport_kind = PortTransportKind.UNKNOWN
         identity, quality = _adapter_identity(
             vid=vid, pid=pid, serial=serial, location=location,
             hardware_id=hardware_id,
+            transport_kind=transport_kind,
+            pnp_instance_identity=pnp,
+            description=description,
         )
         ports.append(SerialPortInfo(
             port=port,
-            description=_optional_text(_value(entry, "description")),
+            description=description,
             hardware_id=hardware_id,
             vid=vid,
             pid=pid,
@@ -168,6 +280,11 @@ def discover_serial_ports(
             interface=_optional_text(_value(entry, "interface")),
             adapter_identity=identity,
             identity_quality=quality,
+            transport_kind=transport_kind,
+            pnp_instance_identity=pnp,
+            bluetooth_name=bt_name,
+            bluetooth_direction=bt_direction,
+            remote_bluetooth_identity=remote,
         ))
 
     counts = Counter(port.adapter_identity for port in ports)
@@ -194,7 +311,9 @@ def discover_serial_ports(
 
 
 __all__ = [
+    "BluetoothDirection",
     "IdentityQuality",
+    "PortTransportKind",
     "SerialDiscovery",
     "SerialPlatformStatus",
     "SerialPortInfo",

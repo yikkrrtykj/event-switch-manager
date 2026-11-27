@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from event_switch_manager.cisco_catalog import PROFILES
@@ -28,6 +29,7 @@ from .models import (
     ConsoleSource,
     ConsoleStackMember,
     ConsoleStorageEntry,
+    LabProvenance,
     LicenseFeature,
     LicenseObservation,
     ObservationCompleteness,
@@ -36,6 +38,7 @@ from .models import (
 )
 from .redaction import redact_console_output
 from .session import (
+    ConsoleOperatorAbort,
     ConsoleSession,
     ConsoleTimeout,
     DiscoveryCancelled,
@@ -578,6 +581,10 @@ def _incomplete_evidence(
     session: ConsoleSession,
     results: tuple[ConsoleQueryResult, ...],
     reason: str,
+    *,
+    lab_provenance: LabProvenance | None = None,
+    failure_stage: str | None = None,
+    failure_code: str | None = None,
 ) -> ConsoleEvidence:
     observation = ConsoleObservation(
         source=session.source,
@@ -585,11 +592,14 @@ def _incomplete_evidence(
         port_identity=session.port_identity,
         unknown_fields=(reason,),
         completeness=ObservationCompleteness.INCOMPLETE,
+        failure_stage=failure_stage,
+        failure_code=failure_code,
     )
     return build_evidence(
         observation,
         results,
         fixture_id=session.fixture_id,
+        lab_provenance=lab_provenance,
     )
 
 
@@ -602,17 +612,42 @@ class CiscoObservationAdapter:
         *,
         deadline_seconds: float = 30.0,
         cancel_event: threading.Event | None = None,
+        expected_pid: str | None = None,
+        expected_release: str | None = None,
+        query_hook: Callable[[ConsoleQuery, ConsoleQueryResult], None] | None = None,
+        lab_provenance: LabProvenance | None = None,
+        partial_evidence_callback: (
+            Callable[[ConsoleObservation, tuple[ConsoleQueryResult, ...]], None] | None
+        ) = None,
     ) -> ConsoleEvidence:
         session.start_discovery(
             deadline_seconds=deadline_seconds,
             cancel_event=cancel_event,
         )
         try:
-            return self._observe(session)
+            return self._observe(
+                session,
+                expected_pid=expected_pid,
+                expected_release=expected_release,
+                query_hook=query_hook,
+                lab_provenance=lab_provenance,
+                partial_evidence_callback=partial_evidence_callback,
+            )
         finally:
             session.end_discovery()
 
-    def _observe(self, session: ConsoleSession) -> ConsoleEvidence:
+    def _observe(
+        self,
+        session: ConsoleSession,
+        *,
+        expected_pid: str | None = None,
+        expected_release: str | None = None,
+        query_hook: Callable[[ConsoleQuery, ConsoleQueryResult], None] | None = None,
+        lab_provenance: LabProvenance | None = None,
+        partial_evidence_callback: (
+            Callable[[ConsoleObservation, tuple[ConsoleQueryResult, ...]], None] | None
+        ) = None,
+    ) -> ConsoleEvidence:
         results: list[ConsoleQueryResult] = []
         bootstrap_commands = {
             query: resolve_query(None, query).command
@@ -621,25 +656,38 @@ class CiscoObservationAdapter:
         try:
             version_result = session.query_result(ConsoleQuery.VERSION)
             results.append(version_result)
+            if query_hook is not None:
+                query_hook(ConsoleQuery.VERSION, version_result)
             inventory_result = session.query_result(ConsoleQuery.INVENTORY)
             results.append(inventory_result)
-        except (DiscoveryCancelled, DiscoveryTimeout):
+            if query_hook is not None:
+                query_hook(ConsoleQuery.INVENTORY, inventory_result)
+        except (ConsoleOperatorAbort, DiscoveryCancelled, DiscoveryTimeout):
             raise
         except Exception as exc:
             status = _failure_status(exc)
-            failed = _failed_result(
-                ConsoleQuery.VERSION
-                if not results
-                else ConsoleQuery.INVENTORY,
-                bootstrap_commands[
-                    ConsoleQuery.VERSION
-                    if not results
-                    else ConsoleQuery.INVENTORY
-                ],
-                status,
+            failed_bootstrap = (
+                ConsoleQuery.VERSION if not results else ConsoleQuery.INVENTORY
             )
+            last_results = session.last_results
+            if last_results and last_results[-1].query is failed_bootstrap:
+                failed = last_results[-1].model_copy(update={"status": status})
+            else:
+                failed = _failed_result(
+                    failed_bootstrap,
+                    bootstrap_commands[failed_bootstrap],
+                    status,
+                )
+            failure = session.last_failure or {}
             return _incomplete_evidence(
-                session, (*results, failed), "bootstrap-query-failed",
+                session,
+                (*results, failed),
+                "bootstrap-query-failed",
+                lab_provenance=lab_provenance,
+                failure_stage=str(failure.get("stage") or "query"),
+                failure_code=str(
+                    failure.get("code") or type(exc).__name__,
+                ),
             )
 
         version_output = version_result.output
@@ -649,29 +697,54 @@ class CiscoObservationAdapter:
         inventory_pids = {
             item.pid.upper() for item in inventory_members if item.pid is not None
         }
-        if len(inventory_pids) > 1:
-            raise IdentityConflict("multiple chassis PIDs in inventory")
         inventory_pid = next(iter(inventory_pids), None)
         exact_pid = inventory_pid or version_model
-        if (
-            version_model is not None
-            and inventory_pid is not None
-            and version_model.upper() != inventory_pid.upper()
-        ):
-            raise IdentityConflict("console identity fields conflict")
         version_serial = _first(_SERIAL, version_output)
         inventory_serials = {
             item.serial_number.casefold()
             for item in inventory_members if item.serial_number is not None
         }
+        family = _family(exact_pid)
+        software_version = _first(_VERSION, version_output)
+        partial_serial = (
+            inventory_members[0].serial_number
+            if len(inventory_members) == 1 else version_serial
+        )
+
+        def retain_partial(reason: str) -> None:
+            if partial_evidence_callback is None:
+                return
+            observation = ConsoleObservation(
+                source=session.source,
+                session_identity=session.session_identity,
+                port_identity=session.port_identity,
+                family=family,
+                hardware_model=exact_pid,
+                exact_pid=exact_pid,
+                serial_number=partial_serial,
+                software_version=software_version,
+                unknown_fields=(reason,),
+                completeness=ObservationCompleteness.PARTIAL,
+            )
+            partial_evidence_callback(observation, tuple(results))
+
+        if len(inventory_pids) > 1:
+            retain_partial("identity-conflict-multiple-pids")
+            raise IdentityConflict("multiple chassis PIDs in inventory")
+        if (
+            version_model is not None
+            and inventory_pid is not None
+            and version_model.upper() != inventory_pid.upper()
+        ):
+            retain_partial("identity-conflict-fields")
+            raise IdentityConflict("console identity fields conflict")
         if (
             version_serial is not None
             and inventory_serials
             and version_serial.casefold() not in inventory_serials
         ):
+            retain_partial("identity-conflict-serials")
             raise IdentityConflict("version and inventory serials conflict")
-        family = _family(exact_pid)
-        software_version = _first(_VERSION, version_output)
         profile = None
         if exact_pid is not None and software_version is not None:
             try:
@@ -680,6 +753,17 @@ class CiscoObservationAdapter:
                 profile = None
         if profile is not None:
             session.set_profile(profile)
+        if expected_pid is not None and (
+            exact_pid is None or exact_pid.upper() != expected_pid.upper()
+        ):
+            retain_partial("identity-conflict-expected-pid")
+            raise IdentityConflict("observed PID does not match the authorized target")
+        if expected_release is not None and (
+            software_version is None
+            or software_version.casefold() != expected_release.casefold()
+        ):
+            retain_partial("identity-conflict-expected-release")
+            raise IdentityConflict("observed release does not match the authorized target")
         unknown: list[str] = []
         serial = None
         if len(inventory_members) == 1:
@@ -714,15 +798,28 @@ class CiscoObservationAdapter:
                     continue
                 try:
                     result = session.query_result(query)
-                except (DiscoveryCancelled, DiscoveryTimeout):
+                except (ConsoleOperatorAbort, DiscoveryCancelled, DiscoveryTimeout):
                     raise
                 except Exception as exc:
                     spec = resolve_query_for_profile(profile, query)
-                    results.append(_failed_result(query, spec.command, _failure_status(exc)))
+                    last_results = session.last_results
+                    failure_status = _failure_status(exc)
+                    if last_results and last_results[-1].query is query:
+                        results.append(
+                            last_results[-1].model_copy(
+                                update={"status": failure_status},
+                            ),
+                        )
+                    else:
+                        results.append(
+                            _failed_result(query, spec.command, failure_status),
+                        )
                     unknown.append(query.value)
                     failed_query = True
                     break
                 results.append(result)
+                if query_hook is not None:
+                    query_hook(query, result)
                 if query is ConsoleQuery.LICENSE:
                     license_output = result.output
                 elif query is ConsoleQuery.INTERFACES:
@@ -855,12 +952,21 @@ class CiscoObservationAdapter:
             storage=storage,
             unknown_fields=tuple(sorted(set(unknown))),
             completeness=completeness,
+            failure_stage=(
+                str((session.last_failure or {}).get("stage") or "query")
+                if failed_query else None
+            ),
+            failure_code=(
+                str((session.last_failure or {}).get("code") or "query-failed")
+                if failed_query else None
+            ),
         )
         return build_evidence(
             observation,
             tuple(results),
             fixture_id=session.fixture_id,
             unsupported_queries=tuple(unsupported),
+            lab_provenance=lab_provenance,
         )
 
     def discover(self, console: ConsoleEngine) -> SwitchObservation:

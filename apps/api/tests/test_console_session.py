@@ -34,6 +34,7 @@ from event_switch_manager.console.session import (
     SessionState,
     UnexpectedAuthPrompt,
     UnexpectedConsolePrompt,
+    UnsafeConsoleState,
 )
 from event_switch_manager.console.simulator import (
     SimulatedConsoleTransport,
@@ -299,10 +300,12 @@ class _ScriptedTransport:
 
     def __init__(
         self,
-        initial: str,
+        initial: str | list[str],
         responses: dict[str, str | tuple[str, ...]],
     ) -> None:
-        self._queue: list[str] = [initial]
+        self._queue: list[str] = (
+            list(initial) if isinstance(initial, list) else [initial]
+        )
         self._responses = responses
         self._open = False
         self.writes: list[str] = []
@@ -737,6 +740,284 @@ class _ReadAndCloseFailure(_ScriptedTransport):
 
     def close(self) -> None:
         raise TransportError("safe-close-failure")
+
+
+class _PromptTrailingWhitespaceTransport(_ScriptedTransport):
+    def __init__(
+        self,
+        initial: str,
+        tail: str = "\n",
+        responses: dict[str, str | tuple[str, ...]] | None = None,
+    ) -> None:
+        super().__init__(initial, responses or {})
+        self.tail = tail
+        self.tail_read = False
+
+    def pending_data(self) -> bool:
+        return bool(self._queue) or not self.tail_read
+
+    def read_chunk(self, timeout: float) -> str:
+        if self._queue:
+            return super().read_chunk(timeout)
+        if not self.tail_read:
+            self.tail_read = True
+            return self.tail
+        return ""
+
+
+def test_prompt_trailing_whitespace_is_drained_before_next_query() -> None:
+    transport = _PromptTrailingWhitespaceTransport(
+        "R1#\n",
+        tail="\n",
+        responses={"show version": "show version\nCisco IOS\nR1#\n"},
+    )
+    session = ConsoleSession(transport, lease_manager=ConsoleLeaseManager(), timeout=1.0)
+    session.open(None)
+    result = session.query_result(ConsoleQuery.VERSION)
+    session.close()
+    assert result.status.value == "ok"
+    assert result.command_sent is True
+    assert result.sent_bytes == len("show version\r")
+
+
+def test_prompt_trailing_non_whitespace_fails_closed() -> None:
+    transport = _PromptTrailingWhitespaceTransport("R1>\n", tail="X")
+    session = ConsoleSession(transport, lease_manager=ConsoleLeaseManager(), timeout=1.0)
+    with pytest.raises(SessionError):
+        session.open(None)
+    assert session.state is SessionState.FAILED
+
+
+def test_partial_response_bytes_counted_without_final_prompt() -> None:
+    chunk = "show version\npartial output without prompt"
+    transport = _ScriptedTransport(
+        "R1>\n",
+        {"show version": chunk},
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=0.2,
+    )
+    session.open(None)
+    try:
+        with pytest.raises(SessionError):
+            session.query_result(ConsoleQuery.VERSION)
+        failed = session.last_results[-1]
+        assert failed.command_sent is True
+        assert failed.sent_bytes == len("show version\r")
+        assert failed.response_bytes == len(chunk)
+        assert failed.output_bytes == 0
+        assert failed.failure_stage == "read"
+    finally:
+        session.close()
+
+
+def test_startup_readiness_requires_explicit_single_wake() -> None:
+    transport = _ScriptedTransport(
+        "lab-c1000 con0 is now available\r\n"
+        "Press RETURN to get started.\r\n",
+        {"": "lab-c1000>\r\n"},
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    session.open(None, allow_silent=True)
+    try:
+        assert session.state is SessionState.AWAITING_RETURN
+        assert session.startup_readiness_seen is True
+        assert transport.writes == []
+        # Single operator-controlled wake is exercised end-to-end in
+        # test_startup_readiness_to_c1000_queries_complete.
+    finally:
+        session.close()
+
+
+def test_existing_exec_prompt_does_not_send_extra_cr() -> None:
+    transport = _ScriptedTransport("R1#\r\n", {})
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    session.open(None)
+    try:
+        assert session.state is SessionState.PRIVILEGED_EXEC
+        assert session.startup_readiness_seen is False
+        assert transport.writes == []
+    finally:
+        session.close()
+
+
+def test_ordinary_banner_is_not_startup_readiness() -> None:
+    transport = _ScriptedTransport("Cisco IOS Software\r\n", {})
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=0.2,
+    )
+    with pytest.raises(SessionError):
+        session.open(None, allow_silent=True)
+    assert session.state is SessionState.FAILED
+    assert transport.writes == []
+
+
+def test_startup_readiness_with_existing_prompt_fails_closed() -> None:
+    transport = _ScriptedTransport(
+        "Press RETURN to get started.\r\nR1#\r\n",
+        {},
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    with pytest.raises((AmbiguousConsoleOutput, UnsafeConsoleState)):
+        session.open(None, allow_silent=True)
+    assert session.state is SessionState.FAILED
+    assert transport.writes == []
+
+
+def test_delayed_startup_whitespace_is_confirmed_after_quiet_window() -> None:
+    transport = _ScriptedTransport(
+        [
+            "lab-c1000 con0 is now available\r\n"
+            "Press RETURN to get started.",
+            "\r\n",
+        ],
+        {"": "lab-c1000>\r\n"},
+    )
+    session = ConsoleSession(
+        transport,
+        lease_manager=ConsoleLeaseManager(),
+        timeout=1.0,
+        startup_quiet_seconds=0.05,
+    )
+    session.open(None, allow_silent=True)
+    try:
+        assert session.state is SessionState.AWAITING_RETURN
+        assert transport.writes == []
+        assert transport._queue == []
+    finally:
+        session.close()
+
+
+def test_unknown_suffix_after_startup_candidate_fails_closed() -> None:
+    transport = _ScriptedTransport(
+        [
+            "Press RETURN to get started.\r\n",
+            "banner\r\n",
+        ],
+        {},
+    )
+    session = ConsoleSession(
+        transport,
+        lease_manager=ConsoleLeaseManager(),
+        timeout=1.0,
+        startup_quiet_seconds=0.05,
+    )
+    with pytest.raises((AmbiguousConsoleOutput, UnsafeConsoleState)):
+        session.open(None, allow_silent=True)
+    assert session.state is SessionState.FAILED
+    assert transport.writes == []
+
+
+class _SimulatorLabGate:
+    authorization = object()
+
+    def authorize_open(self, transport: object) -> None:
+        _ = transport
+
+    def authorize_query(self, query: object) -> None:
+        _ = query
+
+    def authorize_send(
+        self,
+        operation: object,
+        text: str,
+        query: object = None,
+    ) -> None:
+        _ = (operation, text, query)
+
+    def check_active(self) -> None:
+        return None
+
+    def remaining_seconds(self) -> float:
+        return 60.0
+
+
+def test_unknown_data_before_wake_cr_fails_closed() -> None:
+    transport = _ScriptedTransport(
+        "Press RETURN to get started.\r\n",
+        {},
+    )
+    session = ConsoleSession(
+        transport,
+        lease_manager=ConsoleLeaseManager(),
+        lab_gate=_SimulatorLabGate(),
+        timeout=1.0,
+        startup_quiet_seconds=0.05,
+    )
+    session.open(None, allow_silent=True)
+    try:
+        assert session.state is SessionState.AWAITING_RETURN
+        transport._queue.append("banner\r\n")
+        with pytest.raises((AmbiguousConsoleOutput, UnsafeConsoleState)):
+            session.wake_once()
+        assert transport.writes == []
+        assert session.state is SessionState.AWAITING_RETURN
+    finally:
+        session.close()
+
+
+def test_prompt_before_startup_readiness_fails_closed() -> None:
+    transport = _ScriptedTransport(
+        "R1#\r\nPress RETURN to get started.\r\n",
+        {},
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    with pytest.raises((AmbiguousConsoleOutput, UnsafeConsoleState)):
+        session.open(None, allow_silent=True)
+    assert session.state is SessionState.FAILED
+    assert transport.writes == []
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "R1(config)#\r\n",
+        "rommon 1 >\r\n",
+        "switch: \r\n",
+        "Username: \r\n",
+    ],
+)
+def test_unsafe_prefix_before_startup_readiness_fails_closed(prefix: str) -> None:
+    transport = _ScriptedTransport(
+        prefix + "Press RETURN to get started.\r\n",
+        {},
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    with pytest.raises((AmbiguousConsoleOutput, UnsafeConsoleState)):
+        session.open(None, allow_silent=True)
+    assert session.state is SessionState.FAILED
+    assert transport.writes == []
+
+
+def test_startup_readiness_text_in_query_output_fails_closed() -> None:
+    transport = _ScriptedTransport(
+        "R1#\r\n",
+        {
+            "show version": (
+                "Press RETURN to get started.\r\nR1#\r\n",
+            ),
+        },
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    session.open(None)
+    try:
+        with pytest.raises(SessionError):
+            session.query_result(ConsoleQuery.VERSION)
+        assert session.state is SessionState.FAILED
+    finally:
+        session.close()
 
 
 def test_transport_read_failure_retains_lease_when_close_fails() -> None:

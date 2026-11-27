@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$Python = "python",
     [string]$WebDist = "",
     [string]$OutputRoot = ""
@@ -121,6 +121,9 @@ $record = [ordered]@{
     executable_sha256 = $exeHash
     zip = "EventSwitchManager-windows-x64.zip"
     zip_sha256 = $zipHash
+    delivery_layout = "onedir-single-extraction"
+    artifact_contains_build_zip = $false
+    build_zip_role = "engineering-archive-only"
     web_dist = $webDist
     static_assets_index_sha256 = (Get-FileHash -LiteralPath (Join-Path $webDist "index.html") -Algorithm SHA256).Hash.ToLowerInvariant()
     web_assets = @(Get-ChildItem -LiteralPath (Join-Path $webDist "assets") -File | Select-Object -ExpandProperty Name)

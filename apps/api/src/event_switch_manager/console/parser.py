@@ -7,6 +7,7 @@ derives a next CLI command from output text.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -23,6 +24,11 @@ _CONFIG_PROMPT = re.compile(
 _ROMMON_PROMPT = re.compile(r"(?mi)^rommon(?:\s+\d+)?\s*>\s*$")
 _SWITCH_PROMPT = re.compile(r"(?mi)^switch:\s*$")
 _INITIAL_DIALOG = re.compile(r"(?i)initial configuration dialog.*\[yes/no\]")
+_STARTUP_AVAILABLE = re.compile(
+    r"(?i)^(?P<host>[A-Za-z0-9][A-Za-z0-9._-]{0,63})"
+    r"\s+con0\s+is\s+now\s+available\.?\s*$",
+)
+_STARTUP_RETURN = re.compile(r"(?m)^\s*Press RETURN to get started\.[ \t]*$")
 _AUTH_PROMPT = re.compile(
     r"(?im)^(?P<label>username|password|enable password|enter password)\s*:\s*$",
 )
@@ -32,6 +38,14 @@ _COMMAND_ERROR = re.compile(
 
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_PAGINATION_PAGES = 20
+MAX_PROMPT_REPEATS = 2
+MAX_PROMPT_CANDIDATES = 3
+
+
+def prompt_identity_token(prompt: str, mode: PromptMode | None = None) -> str:
+    """Anonymous stable token for diagnostics; never exposes the hostname."""
+    material = f"{prompt}|{mode.value if mode is not None else 'unknown'}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
 class ParserEventKind(StrEnum):
@@ -40,6 +54,7 @@ class ParserEventKind(StrEnum):
     AUTH_PROMPT = "auth-prompt"
     PAGINATION = "pagination"
     UNSAFE_STATE = "unsafe-state"
+    STARTUP_READY = "startup-ready"
 
 
 class PromptMode(StrEnum):
@@ -61,6 +76,8 @@ class ParserEvent:
     mode: PromptMode | None = None
     auth_prompt: AuthPromptKind | None = None
     reason: str | None = None
+    line_terminated: bool = False
+    startup_host_token: str | None = None
 
 
 class ConsoleOutputLimit(RuntimeError):
@@ -82,19 +99,18 @@ class _TerminalSanitizer:
     def __init__(self) -> None:
         self._escape_mode: str | None = None
         self._osc_escape = False
-        self._pending_cr = False
+        self._skip_lf = False
 
     def reset(self) -> None:
         self._escape_mode = None
         self._osc_escape = False
-        self._pending_cr = False
+        self._skip_lf = False
 
     def feed(self, data: str) -> str:
         output: list[str] = []
         for character in data:
-            if self._pending_cr:
-                self._pending_cr = False
-                output.append("\n")
+            if self._skip_lf:
+                self._skip_lf = False
                 if character == "\n":
                     continue
             if self._escape_mode is not None:
@@ -126,7 +142,11 @@ class _TerminalSanitizer:
                 self._escape_mode = "start"
                 continue
             if character == "\r":
-                self._pending_cr = True
+                # A lone CR is a complete line terminator even when CR/LF
+                # arrive in different reads.  The following LF, if any, is
+                # suppressed without buffering across chunk boundaries.
+                output.append("\n")
+                self._skip_lf = True
                 continue
             if character == "\b":
                 output.append("\b")
@@ -148,6 +168,23 @@ def sanitize_console_text(text: str) -> str:
         else:
             output.append(character)
     return "".join(output)
+
+
+def _startup_prefix(
+    output: str,
+) -> tuple[bool, str | None]:
+    """Accept only blank lines or one exact con0-available host line."""
+    nonempty = [
+        line.strip() for line in output.splitlines() if line.strip()
+    ]
+    if not nonempty:
+        return True, None
+    if len(nonempty) != 1:
+        return False, None
+    available = _STARTUP_AVAILABLE.fullmatch(nonempty[0])
+    if available is None:
+        return False, None
+    return True, prompt_identity_token(available.group("host"), None)
 
 
 def _auth_kind(label: str) -> AuthPromptKind:
@@ -174,6 +211,13 @@ class ConsolePromptParser:
         self._pages = 0
         self._terminal = _TerminalSanitizer()
         self._prompt_collision = False
+        self._prompt_collision_reason: str | None = None
+        self._prompt_candidates = 0
+        self._prompt_repeats = 0
+        self._last_prompt_identity: str | None = None
+        self._last_prompt_text: str | None = None
+        self._last_prompt_mode: PromptMode | None = None
+        self._startup_readiness = False
         self.parser_version = CONSOLE_PARSER_VERSION
 
     @property
@@ -185,6 +229,26 @@ class ConsolePromptParser:
         return self._prompt_collision
 
     @property
+    def prompt_collision_reason(self) -> str | None:
+        return self._prompt_collision_reason
+
+    @property
+    def startup_readiness(self) -> bool:
+        return self._startup_readiness
+
+    @property
+    def prompt_candidates(self) -> int:
+        return self._prompt_candidates
+
+    @property
+    def prompt_repeats(self) -> int:
+        return self._prompt_repeats
+
+    @property
+    def last_prompt_identity(self) -> str | None:
+        return self._last_prompt_identity
+
+    @property
     def buffered_bytes(self) -> int:
         return len(self._buffer.encode("utf-8", errors="replace"))
 
@@ -192,14 +256,61 @@ class ConsolePromptParser:
     def has_unconsumed_non_whitespace(self) -> bool:
         return bool(self._buffer.strip())
 
-    def mark_prompt_collision(self) -> None:
+    def mark_prompt_collision(self, reason: str = "caller-detected") -> None:
         self._prompt_collision = True
+        self._prompt_collision_reason = reason
 
     def reset(self) -> None:
         self._buffer = ""
         self._pages = 0
         self._terminal.reset()
         self._prompt_collision = False
+        self._prompt_collision_reason = None
+        self._prompt_candidates = 0
+        self._prompt_repeats = 0
+        self._last_prompt_identity = None
+        self._last_prompt_text = None
+        self._last_prompt_mode = None
+        self._startup_readiness = False
+
+    def _prompt_collision_for_prefix(
+        self,
+        prefix: str,
+        prompt_text: str,
+        mode: PromptMode,
+    ) -> str | None:
+        """Distinguish a safe repeated same-identity prompt from corruption.
+
+        Only exact repeats of the same prompt identity and mode are accepted,
+        and only within a small bound.  Different identities, mixed modes,
+        config/ROMMON prompts, or excessive repeats remain collisions.
+        """
+        repeated = 0
+        prompt_seen = False
+        for line in prefix.splitlines():
+            normalized = line.strip()
+            if not normalized:
+                continue
+            if _CONFIG_PROMPT.fullmatch(normalized):
+                return "config-prompt-in-output"
+            if _ROMMON_PROMPT.fullmatch(normalized):
+                return "rommon-prompt-in-output"
+            if _SWITCH_PROMPT.fullmatch(normalized):
+                return "switch-prompt-in-output"
+            match = _PROMPT.fullmatch(normalized)
+            if match is None:
+                if prompt_seen:
+                    return "output-after-prompt-in-prefix"
+                continue
+            if normalized != prompt_text:
+                return "different-prompt-in-output"
+            repeated += 1
+            prompt_seen = True
+        if repeated > MAX_PROMPT_REPEATS:
+            return "excessive-prompt-repeats"
+        if repeated:
+            self._prompt_repeats += repeated
+        return None
 
     def feed(self, data: str) -> tuple[ParserEvent, ...]:
         if not isinstance(data, str):
@@ -230,6 +341,34 @@ class ConsolePromptParser:
                 continue
 
             last_line = stripped.rsplit("\n", 1)[-1]
+
+            startup_match = _STARTUP_RETURN.search(self._buffer)
+            if startup_match is not None:
+                line_start = self._buffer.rfind(
+                    "\n", 0, startup_match.start(),
+                ) + 1
+                output = self._buffer[:line_start]
+                startup_remainder = self._buffer[startup_match.end():]
+                line_terminated = startup_remainder.startswith("\n")
+                prefix_ok, host_token = _startup_prefix(output)
+                suffix_ok = startup_remainder.strip() == ""
+                self._buffer = ""
+                if not prefix_ok or not suffix_ok:
+                    events.append(ParserEvent(
+                        ParserEventKind.UNSAFE_STATE,
+                        reason="startup-context-unrecognized",
+                    ))
+                    continue
+                if output:
+                    events.append(ParserEvent(ParserEventKind.OUTPUT, output=output))
+                self._startup_readiness = True
+                events.append(ParserEvent(
+                    ParserEventKind.STARTUP_READY,
+                    reason="press-return",
+                    startup_host_token=host_token,
+                    line_terminated=line_terminated,
+                ))
+                continue
 
             auth = _AUTH_PROMPT.fullmatch(last_line.strip())
             if auth is not None:
@@ -283,19 +422,50 @@ class ConsolePromptParser:
             if prompt is not None:
                 start = self._buffer.rfind(last_line)
                 output = self._buffer[:start]
+                line_terminated = self._buffer.endswith("\n")
                 self._buffer = ""
+                mode = (
+                    PromptMode.PRIVILEGED_EXEC
+                    if prompt.group("suffix") == "#"
+                    else PromptMode.USER_EXEC
+                )
+                prompt_text = last_line.strip()
+                if (
+                    self._last_prompt_text is not None
+                    and (
+                        prompt_text != self._last_prompt_text
+                        or mode is not self._last_prompt_mode
+                    )
+                ):
+                    self._prompt_collision = True
+                    self._prompt_collision_reason = (
+                        "prompt-identity-changed-between-chunks"
+                    )
                 if output:
-                    if _PROMPT.search(output) is not None:
+                    collision = self._prompt_collision_for_prefix(
+                        output, prompt_text, mode,
+                    )
+                    if collision is not None:
                         self._prompt_collision = True
+                        self._prompt_collision_reason = collision
                     events.append(ParserEvent(ParserEventKind.OUTPUT, output=output))
+                self._prompt_candidates += 1
+                if (
+                    self._prompt_candidates + self._prompt_repeats
+                    > MAX_PROMPT_CANDIDATES
+                ):
+                    self._prompt_collision = True
+                    self._prompt_collision_reason = "excessive-prompt-candidates"
+                self._last_prompt_text = prompt_text
+                self._last_prompt_mode = mode
+                self._last_prompt_identity = prompt_identity_token(
+                    prompt_text, mode,
+                )
                 events.append(ParserEvent(
                     ParserEventKind.PROMPT,
-                    prompt=last_line.strip(),
-                    mode=(
-                        PromptMode.PRIVILEGED_EXEC
-                        if prompt.group("suffix") == "#"
-                        else PromptMode.USER_EXEC
-                    ),
+                    prompt=prompt_text,
+                    mode=mode,
+                    line_terminated=line_terminated,
                 ))
                 continue
             break
@@ -311,11 +481,15 @@ __all__ = [
     "ConsoleOutputLimit",
     "ConsolePaginationLimit",
     "ConsolePromptParser",
+    "ParserEventKind",
     "MAX_PAGINATION_PAGES",
+    "MAX_PROMPT_CANDIDATES",
+    "MAX_PROMPT_REPEATS",
     "MAX_RESPONSE_BYTES",
     "ParserEvent",
     "ParserEventKind",
     "PromptMode",
     "command_error_present",
+    "prompt_identity_token",
     "sanitize_console_text",
 ]

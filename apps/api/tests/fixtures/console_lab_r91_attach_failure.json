@@ -1,0 +1,24 @@
+{
+  "schema": "r91-passive-attach-failure-fixture-v1",
+  "note": "Sanitized fourth field observation; no inferred root cause.",
+  "failure": {
+    "com_endpoint": "COM3",
+    "transport_kind": "bluetooth-spp",
+    "direction": "outgoing",
+    "transport_status": "OPENED",
+    "passive_attach_status": "FAILED",
+    "primary_failure": "AmbiguousConsoleOutput",
+    "prompt_collision_reason": "output-between-prompt-candidates",
+    "prompt_candidates": 3,
+    "prompt_modes": {"user-exec": 3},
+    "prompt_repeats": 0,
+    "rx_chunk_count": 188,
+    "rx_total_bytes": 293,
+    "parser_buffer_bytes": 0,
+    "wake_sent": false,
+    "queries": 0,
+    "cleanup": "RELEASED",
+    "duration_seconds": 5.922,
+    "root_cause": "not-inferred"
+  }
+}
