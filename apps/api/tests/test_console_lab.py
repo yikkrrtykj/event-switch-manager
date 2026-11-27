@@ -2539,6 +2539,45 @@ def test_gui_passive_diagnostic_entry_is_separate_and_receive_only() -> None:
         app.on_close()
 
 
+def test_gui_passive_cleanup_failure_keeps_window_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk display unavailable")
+    from event_switch_manager.lab_runner import gui as gui_module
+    from event_switch_manager.lab_runner.passive import PassiveDiagnosticResult
+
+    root.withdraw()
+    app = gui_module.ConsoleLabGui(root, smoke=True)
+    app.artifact_ok = True
+    app.self_ok = True
+    app._closing = True
+    monkeypatch.setattr("tkinter.messagebox.showwarning", lambda *_a, **_k: None)
+    result = PassiveDiagnosticResult(
+        status="CLEANUP_REQUIRED",
+        output_dir=tmp_path,
+        zip_path=None,
+        report_path=tmp_path / "report.json",
+        summary_path=tmp_path / "summary.txt",
+        events_path=tmp_path / "events.jsonl",
+        transport_opened=True,
+        bytes_written=0,
+        cleanup_status="CLEANUP_REQUIRED",
+    )
+    try:
+        app._finish_passive(result)
+        assert app._closing is False
+        assert str(app.cleanup_button.cget("state")) == "normal"
+        assert str(app.connect_button.cget("state")) == "disabled"
+    finally:
+        app._closing = False
+        app.on_close()
+
+
 def test_gui_profile_switch_refreshes_auth_summary_and_progress() -> None:
     tk = pytest.importorskip("tkinter")
     try:

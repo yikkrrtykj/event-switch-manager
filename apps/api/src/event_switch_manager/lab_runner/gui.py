@@ -782,6 +782,7 @@ class ConsoleLabGui:
             state="normal" if result.zip_path is not None else "disabled",
         )
         if result.cleanup_status != "RELEASED":
+            self._closing = False
             self.connect_button.configure(state="disabled")
             self.passive_button.configure(state="disabled")
             self.cleanup_button.configure(state="normal")

@@ -135,8 +135,10 @@ class _LineRedactor:
     def flush(self) -> str:
         if not self._pending:
             return ""
+        # End-of-run/cancel may leave an incomplete line.  Never publish its
+        # letters/digits: a trailing fragment could be an identity prefix.
         pending, self._pending = self._pending, ""
-        return self._safe(pending)
+        return _structure_preview(pending)
 
 
 def _structure_preview(text: str) -> str:
@@ -282,7 +284,7 @@ def run_passive_diagnostics(
     *,
     callbacks: PassiveCallbacks | None = None,
     cancel_event: threading.Event | None = None,
-    discovery: SerialDiscovery | None = None,
+    discovery_factory: Callable[[], SerialDiscovery] | None = None,
     serial_factory: Callable[[str, SerialParameters], Any] | None = None,
     lease_manager: ConsoleLeaseManager | None = None,
 ) -> PassiveDiagnosticResult:
@@ -301,7 +303,8 @@ def run_passive_diagnostics(
     manual_bt = bool(getattr(args, "manual_bluetooth_binding", False))
     duration = float(getattr(args, "duration_seconds", 10.0))
     duration = min(MAX_DURATION_SECONDS, max(1.0, duration))
-    discovery = discovery or discover_serial_ports()
+    enumerate_ports = discovery_factory or discover_serial_ports
+    discovery = enumerate_ports()
     port = _select_passive_port(
         discovery,
         str(args.com),
@@ -329,7 +332,9 @@ def run_passive_diagnostics(
     transport = AuthorizedSerialTransport(
         authorization,
         parameters=SerialParameters(),
-        discovery=lambda: discovery,
+        # transport.open() must re-enumerate immediately before opening and
+        # validate the authorization against the fresh device identity.
+        discovery=enumerate_ports,
         serial_factory=serial_factory,
     )
     output_dir = output_root / f"passive-{authorization.experiment_id[:12]}"

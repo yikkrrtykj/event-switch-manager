@@ -97,7 +97,7 @@ def test_passive_mode_receives_and_never_writes(
     )
     result = run_passive_diagnostics(
         _args(tmp_path),
-        discovery=_discovery(),
+        discovery_factory=_discovery,
         serial_factory=lambda _port, _params: serial,
     )
     assert result.transport_opened is True
@@ -142,7 +142,7 @@ def test_passive_auth_prompt_stops_without_sending(
     )
     result = run_passive_diagnostics(
         _args(tmp_path, duration=0.5),
-        discovery=_discovery(),
+        discovery_factory=_discovery,
         serial_factory=lambda _port, _params: serial,
     )
     assert result.status == "AUTH_PROMPT_OBSERVED"
@@ -170,7 +170,7 @@ def test_passive_reuses_application_lease_gate(
     try:
         result = run_passive_diagnostics(
             _args(tmp_path, duration=0.2),
-            discovery=_discovery(),
+            discovery_factory=_discovery,
             serial_factory=lambda _port, _params: serial,
             lease_manager=manager,
         )
@@ -199,7 +199,7 @@ def test_known_identity_is_redacted_across_chunk_boundaries(
     )
     result = run_passive_diagnostics(
         _args(tmp_path, duration=0.4),
-        discovery=_discovery(port),
+        discovery_factory=lambda: _discovery(port),
         serial_factory=lambda _port, _params: serial,
     )
     combined = (
@@ -240,7 +240,7 @@ def test_live_preview_withholds_split_identity_prefix(
     result = run_passive_diagnostics(
         _args(tmp_path, duration=0.4),
         callbacks=PassiveCallbacks(on_event=seen.append),
-        discovery=_discovery(port),
+        discovery_factory=lambda: _discovery(port),
         serial_factory=lambda _port, _params: serial,
     )
     live = "\n".join(seen)
@@ -266,7 +266,7 @@ def test_passive_close_failure_retains_lease_until_retry(
     )
     result = run_passive_diagnostics(
         _args(tmp_path, duration=0.2),
-        discovery=_discovery(),
+        discovery_factory=_discovery,
         serial_factory=lambda _port, _params: serial,
         lease_manager=manager,
     )
@@ -279,7 +279,7 @@ def test_passive_close_failure_retains_lease_until_retry(
     with pytest.raises(PermissionError):
         run_passive_diagnostics(
             _args(tmp_path, duration=0.1),
-            discovery=_discovery(),
+            discovery_factory=_discovery,
             serial_factory=lambda _port, _params: serial,
             lease_manager=manager,
         )
@@ -288,6 +288,63 @@ def test_passive_close_failure_retains_lease_until_retry(
     assert lab_cli.cleanup_required() is False
     assert serial.closed is True
     assert manager.active_owner("COM3") is None
+
+
+def test_passive_flush_does_not_publish_unterminated_identity_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "test-live-value"
+    port = _port(serial_number=secret)
+    serial = PassiveSerial([secret[:7]])
+    seen: list[str] = []
+    monkeypatch.setattr(
+        LabBuildMetadata, "load", classmethod(lambda _cls: _metadata()),
+    )
+    from event_switch_manager.lab_runner.passive import PassiveCallbacks
+
+    run_passive_diagnostics(
+        _args(tmp_path, duration=0.2),
+        callbacks=PassiveCallbacks(on_event=seen.append),
+        discovery_factory=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    live = "\n".join(seen)
+    assert secret[:7] not in live
+    assert serial.writes == []
+
+
+def test_passive_reenumerates_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = _port()
+    changed = SerialPortInfo(
+        port="COM3",
+        description="USB Serial",
+        adapter_identity="usb:0403:6001:CHANGED",
+        identity_quality=IdentityQuality.STABLE,
+    )
+    calls: list[int] = []
+    serial = PassiveSerial(["\r\nR1#\r\n"])
+
+    def factory() -> SerialDiscovery:
+        calls.append(len(calls) + 1)
+        return _discovery(initial if len(calls) == 1 else changed)
+
+    monkeypatch.setattr(
+        LabBuildMetadata, "load", classmethod(lambda _cls: _metadata()),
+    )
+    result = run_passive_diagnostics(
+        _args(tmp_path, duration=0.2),
+        discovery_factory=factory,
+        serial_factory=lambda _port, _params: serial,
+    )
+    assert len(calls) >= 2
+    assert result.transport_opened is False
+    assert result.status == "OPEN_FAILED"
+    assert serial.writes == []
+    assert serial.closed is False
 
 
 def test_passive_export_is_bounded_and_checksummed(
@@ -300,7 +357,7 @@ def test_passive_export_is_bounded_and_checksummed(
     )
     result = run_passive_diagnostics(
         _args(tmp_path, duration=0.3),
-        discovery=_discovery(),
+        discovery_factory=_discovery,
         serial_factory=lambda _port, _params: serial,
     )
     assert result.bytes_written == 0
