@@ -152,6 +152,35 @@ def test_passive_auth_prompt_stops_without_sending(
     assert payload["terminal"]["parser_event_counts"].get("auth-prompt", 0) >= 1
 
 
+def test_passive_reuses_application_lease_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.console.lease import ConsoleLeaseManager
+
+    manager = ConsoleLeaseManager()
+    held = manager.acquire(
+        "usb:0403:6001:TEST", "other-owner", endpoint="COM3",
+    )
+    serial = PassiveSerial([])
+    monkeypatch.setattr(
+        LabBuildMetadata, "load", classmethod(lambda _cls: _metadata()),
+    )
+    try:
+        result = run_passive_diagnostics(
+            _args(tmp_path, duration=0.2),
+            discovery=_discovery(),
+            serial_factory=lambda _port, _params: serial,
+            lease_manager=manager,
+        )
+    finally:
+        held.release()
+    assert result.transport_opened is False
+    assert serial.writes == []
+    assert result.status == "OPEN_FAILED"
+    assert manager.active_owner("COM3") is None
+
+
 def test_passive_export_is_bounded_and_checksummed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

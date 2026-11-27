@@ -27,5 +27,6 @@ a delivery archive; the single-extraction checks ignore that internal file and
 reject any root/user-visible build ZIP.
 
 The user runtime is verified by a CI job that downloads the uploaded artifact
-once, checks that no `.zip` remains inside it, runs the GUI/CLI smoke, and checks
-the package checksum manifest.
+once, rejects any user-visible/build ZIP outside PyInstaller's
+`_internal/base_library.zip` runtime component, runs the GUI/CLI smoke, and
+checks the package checksum manifest.

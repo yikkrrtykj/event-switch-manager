@@ -25,6 +25,10 @@ from event_switch_manager.console.discovery import (
     SerialPortInfo,
     discover_serial_ports,
 )
+from event_switch_manager.console.lease import (
+    ConsoleLeaseManager,
+    default_lease_manager,
+)
 from event_switch_manager.console.parser import (
     ConsolePromptParser,
     ParserEvent,
@@ -156,6 +160,7 @@ def run_passive_diagnostics(
     cancel_event: threading.Event | None = None,
     discovery: SerialDiscovery | None = None,
     serial_factory: Callable[[str, SerialParameters], Any] | None = None,
+    lease_manager: ConsoleLeaseManager | None = None,
 ) -> PassiveDiagnosticResult:
     """Receive terminal bytes only; the only serial methods used are open/read/close."""
     if not bool(getattr(args, "operator_confirmed", False)):
@@ -206,6 +211,7 @@ def run_passive_diagnostics(
     chunks: list[dict[str, Any]] = []
     transport_opened = False
     cleanup_status = "NOT_ATTEMPTED"
+    lease = None
     primary_failure: dict[str, Any] | None = None
     error: str | None = None
     status = "COMPLETED"
@@ -221,6 +227,12 @@ def run_passive_diagnostics(
             callbacks.on_status(message)
 
     try:
+        manager = lease_manager or default_lease_manager()
+        lease = manager.acquire(
+            port.adapter_identity,
+            "passive-terminal-diagnostic",
+            endpoint=port.port,
+        )
         authorization.authorize_open(transport)
         transport.open()
         transport_opened = True
@@ -355,6 +367,17 @@ def run_passive_diagnostics(
             }
             status = "CLEANUP_REQUIRED"
         authorization.cancel()
+        if lease is not None:
+            try:
+                lease.release()
+            except Exception as exc:
+                cleanup_status = "CLEANUP_REQUIRED"
+                primary_failure = primary_failure or {
+                    "stage": "cleanup",
+                    "code": "lease-release-failed",
+                    "exception_type": type(exc).__name__,
+                }
+                status = "CLEANUP_REQUIRED"
         duration_actual = round(time.monotonic() - opened_at, 6)
 
     preview_budget = MAX_PASSIVE_PREVIEW_TOTAL
