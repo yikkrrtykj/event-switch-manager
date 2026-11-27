@@ -64,6 +64,7 @@ class SessionState(StrEnum):
     DISCONNECTED = "DISCONNECTED"
     CONNECTING = "CONNECTING"
     AWAITING_PROMPT = "AWAITING_PROMPT"
+    AWAITING_RETURN = "AWAITING_RETURN"
     AUTHENTICATING = "AUTHENTICATING"
     USER_EXEC = "USER_EXEC"
     PRIVILEGED_EXEC = "PRIVILEGED_EXEC"
@@ -201,6 +202,9 @@ class _PromptRead:
     mode: PromptMode | None
     auth: AuthPromptKind | None
     prompt: str | None = None
+    startup_ready: bool = False
+    startup_reason: str | None = None
+    startup_host_token: str | None = None
 
 
 class ConsoleSession:
@@ -271,6 +275,8 @@ class ConsoleSession:
         self._write_token = object()
         self._last_failure: dict[str, object] | None = None
         self._cleanup_error: dict[str, object] | None = None
+        self._startup_readiness_seen = False
+        self._startup_host_token: str | None = None
         self._terminal_diag_started = time.monotonic()
         self._terminal_rx_chunks = 0
         self._terminal_rx_bytes = 0
@@ -294,6 +300,10 @@ class ConsoleSession:
     def last_results(self) -> tuple[ConsoleQueryResult, ...]:
         with self._state_lock:
             return tuple(self._last_results)
+
+    @property
+    def startup_readiness_seen(self) -> bool:
+        return self._startup_readiness_seen
 
     @property
     def authentication_prompt_seen(self) -> bool:
@@ -323,6 +333,8 @@ class ConsoleSession:
             ),
             "authentication_prompt_seen": self._auth_prompt_seen,
             "authentication_completed": self._authentication_completed,
+            "startup_readiness_seen": self._startup_readiness_seen,
+            "startup_host_token": self._startup_host_token,
         }
 
     def _record_terminal_chunk(self, chunk: str) -> None:
@@ -561,7 +573,14 @@ class ConsoleSession:
                 )
             self._state = SessionState.AWAITING_PROMPT
             try:
-                read = self._read_for_prompt(timeout=initial_timeout)
+                read = self._read_for_prompt(
+                    timeout=initial_timeout,
+                    allow_startup_readiness=True,
+                )
+                if read.startup_ready:
+                    self._startup_readiness_seen = True
+                    self._state = SessionState.AWAITING_RETURN
+                    return
             except ConsoleTimeout:
                 if allow_silent and not self._last_prompt_read_saw_data:
                     # True silence can be offered an explicit, operator-
@@ -712,8 +731,11 @@ class ConsoleSession:
     ) -> None:
         """Complete a passive attach after an explicit wake/resume decision."""
         with self._state_lock:
-            if self._state is not SessionState.AWAITING_PROMPT:
-                raise SessionStateError("console session is not awaiting a prompt")
+            if self._state not in {
+                SessionState.AWAITING_PROMPT,
+                SessionState.AWAITING_RETURN,
+            }:
+                raise SessionStateError("console session is not awaiting attach")
             try:
                 read = self._read_for_prompt(
                     timeout=min(
@@ -736,8 +758,11 @@ class ConsoleSession:
     def wake_once(self) -> None:
         """Send at most one operator-authorized CR to a silent device."""
         with self._state_lock:
-            if self._state is not SessionState.AWAITING_PROMPT:
-                raise SessionStateError("console session is not awaiting a prompt")
+            if self._state not in {
+                SessionState.AWAITING_PROMPT,
+                SessionState.AWAITING_RETURN,
+            }:
+                raise SessionStateError("console session is not awaiting attach")
             if self._lab_gate is None:
                 raise LiveDeviceDisabled("wake is only available to the lab runner")
             if self._wake_sent:
@@ -1019,6 +1044,7 @@ class ConsoleSession:
         self,
         *,
         allow_pagination: bool = False,
+        allow_startup_readiness: bool = False,
         timeout: float | None = None,
     ) -> _PromptRead:
         deadline = self._read_deadline(timeout=timeout)
@@ -1075,6 +1101,24 @@ class ConsoleSession:
                     self._total_response_bytes += len(event.output.encode("utf-8"))
                     if self._total_response_bytes > self._max_total_response_bytes:
                         raise ConsoleOutputLimit("console session output limit exceeded")
+                elif event.kind is ParserEventKind.STARTUP_READY:
+                    if not allow_startup_readiness:
+                        raise UnsafeConsoleState(
+                            "unexpected startup readiness text",
+                        )
+                    if candidate is not None:
+                        raise AmbiguousConsoleOutput(
+                            "startup readiness after a prompt candidate",
+                        )
+                    self._startup_host_token = event.startup_host_token
+                    return _PromptRead(
+                        output,
+                        None,
+                        None,
+                        startup_ready=True,
+                        startup_reason=event.reason,
+                        startup_host_token=event.startup_host_token,
+                    )
                 elif event.kind is ParserEventKind.AUTH_PROMPT:
                     self._auth_prompt_seen = True
                     if candidate is not None:

@@ -1,4 +1,4 @@
-Event Switch Manager — Windows Console Lab Runner（R91）
+Event Switch Manager — Windows Console Lab Runner（R92）
 =========================================================
 
 默认双击：
@@ -17,6 +17,24 @@ CLI 诊断使用独立 console 入口：
 
   EventSwitchManager-ConsoleLab.exe      windowed GUI
   EventSwitchManager-ConsoleLab-CLI.exe  console diagnostics
+
+--- R92 Cisco startup readiness ---
+
+ConsoleLab 现在区分以下启动状态，并在 GUI 状态栏明确显示：
+
+- 等待设备响应（CONNECTING）。
+- 设备提示按 Enter 开始（AWAITING_RETURN）：只接受严格的
+  `Press RETURN to get started.`，可选前置
+  `<hostname> con0 is now available`。
+- 设备静默、等待人工唤醒确认（AWAITING_PROMPT）。
+- 等待认证/已认证。
+- 已进入 User EXEC / Privileged EXEC。
+- 开始只读查询。
+- 失败及具体原因。
+
+Cisco startup readiness 只允许在初始 attach 阶段触发人工确认；确认后最多发送
+一次 CR。普通 banner、命令响应或其他未知输出不会触发自动唤醒。已有可靠
+EXEC Prompt 不额外发送 CR；不会自动重发或重连。
 
 --- R91 被动终端诊断 ---
 

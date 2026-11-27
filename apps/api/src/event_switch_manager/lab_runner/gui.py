@@ -841,6 +841,19 @@ class ConsoleLabGui:
         if status_var is None:
             return
         for line in text.splitlines():
+            marker = "DEVICE-STATE="
+            if marker in line:
+                state = line.split(marker, 1)[1].split(None, 1)[0].strip()
+                labels = {
+                    "CONNECTING": "等待设备响应",
+                    "AWAITING_RETURN": "设备提示按 Enter 开始 / 等待人工唤醒确认",
+                    "AWAITING_PROMPT": "设备静默 / 等待人工唤醒确认",
+                    "USER_EXEC": "已进入 User EXEC",
+                    "PRIVILEGED_EXEC": "已进入 Privileged EXEC",
+                    "READONLY_QUERIES": "开始只读查询",
+                }
+                status_var.set(f"状态: {labels.get(state, state)}")
+                break
             if "查询:" in line:
                 status_var.set(f"状态: {line.strip()}")
                 break

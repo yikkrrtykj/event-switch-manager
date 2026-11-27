@@ -141,7 +141,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="EventSwitchManager-ConsoleLab",
         description="受控 Cisco Console 只读实验工具（本地、离线、operator-assisted）",
     )
-    parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R91")
+    parser.add_argument("--version", action="version", version="EventSwitchManager-ConsoleLab R92")
     parser.add_argument("--self-test", action="store_true", help="离线自检；不枚举也不打开串口")
     parser.add_argument(
         "--artifact-check", action="store_true",
@@ -685,6 +685,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
     authentication_status = "NOT_ATTEMPTED"
     query_status = "NOT_ATTEMPTED"
     attachment_established = False
+    startup_readiness = False
     error: str | None = None
     cancelled = False
     wake_sent = False
@@ -735,17 +736,48 @@ def _run_experiment(args: argparse.Namespace) -> int:
         phase = "transport-open"
         transport_status = "OPENING"
         attachment_status = "ATTACHING"
+        print("DEVICE-STATE=CONNECTING 等待设备响应。")
         session.open(None, initial_timeout=10.0, allow_silent=True)
         connection_state = "OPENED"
         transport_status = "OPENED"
         attachment_status = (
-            "ATTACHED" if session.is_attached else "AWAITING_PROMPT"
+            "ATTACHED"
+            if session.is_attached
+            else (
+                "AWAITING_RETURN"
+                if session.state is SessionState.AWAITING_RETURN
+                else "AWAITING_PROMPT"
+            )
         )
         attachment_established = session.is_attached
         _check_cancel()
-        if session.state is SessionState.AWAITING_PROMPT:
+        if session.state is SessionState.AWAITING_RETURN:
+            startup_readiness = True
+            phase = "startup-readiness"
+            print(
+                "DEVICE-STATE=AWAITING_RETURN "
+                "设备提示 Press RETURN to get started.; 等待人工唤醒确认。",
+            )
+            if not _confirm(
+                "设备显示 Press RETURN to get started.。"
+                "确认该设备处于安全、非生产实验状态且无未提交命令；"
+                "输入 YES 后最多发送一次 CR 唤醒: ",
+            ):
+                raise ConsoleOperatorAbort(
+                    "operator declined the startup-readiness wake",
+                )
+            if not _confirm("再次确认发送唯一一次 CR 唤醒？输入 y 继续: "):
+                raise ConsoleOperatorAbort("operator did not confirm wake")
+            _check_cancel()
+            phase = "startup-readiness-wake"
+            session.wake_once()
+            wake_sent = True
+            wake_confirmed = True
+            phase = "post-wake-attach"
+            session.finish_attach(None, timeout=30.0)
+        elif session.state is SessionState.AWAITING_PROMPT:
             phase = "passive-attach"
-            print("设备当前静默，未返回任何已确认的 EXEC prompt。")
+            print("DEVICE-STATE=AWAITING_PROMPT 设备当前静默，未返回任何已确认的 EXEC prompt。")
             if not _confirm(
                 "确认该设备处于安全、非生产实验状态且无未提交命令；"
                 "输入 YES 后最多发送一次 CR 唤醒: ",
@@ -764,12 +796,18 @@ def _run_experiment(args: argparse.Namespace) -> int:
             raise SessionError("no reliable EXEC prompt after passive attach/wake")
         attachment_established = True
         attachment_status = "ATTACHED"
-        if session.state is SessionState.USER_EXEC and _confirm(
-            "当前为 USER EXEC；是否需要发送 enable 进入 privileged EXEC？"
-            "密码仅在出现提示时安全读取。输入 y 继续: ",
-        ):
-            session.enable_with_operator()
-        print("已获得可靠 EXEC/auth prompt；开始 operator-assisted 只读查询。")
+        if session.state is SessionState.USER_EXEC:
+            print("DEVICE-STATE=USER_EXEC 已进入 User EXEC；等待认证/查询决策。")
+            if _confirm(
+                "当前为 USER EXEC；是否需要发送 enable 进入 privileged EXEC？"
+                "密码仅在出现提示时安全读取。输入 y 继续: ",
+            ):
+                session.enable_with_operator()
+        if session.state is SessionState.PRIVILEGED_EXEC:
+            print("DEVICE-STATE=PRIVILEGED_EXEC 已进入 Privileged EXEC。")
+        else:
+            print("DEVICE-STATE=USER_EXEC 当前为 User EXEC。")
+        print("DEVICE-STATE=READONLY_QUERIES 开始 operator-assisted 只读查询。")
         base_provenance = _lab_provenance(
             authorization,
             target,
@@ -1054,6 +1092,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
         "transport_open_attempted": transport_status != "NOT_ATTEMPTED",
         "wake_sent": wake_sent,
         "wake_confirmed": wake_confirmed,
+        "startup_readiness": startup_readiness,
         "terminal": session.terminal_diagnostics,
     }
     experiment_verdict = (
@@ -1078,6 +1117,7 @@ def _run_experiment(args: argparse.Namespace) -> int:
         "cleanup_status": cleanup_status,
         "wake_sent": wake_sent,
         "wake_confirmed": wake_confirmed,
+        "startup_readiness": startup_readiness,
         "operator_confirmations": confirmations[0],
         "operator_final_review": final_review_confirmed,
         "readonly_queries_completed": queries_complete,

@@ -808,6 +808,72 @@ def test_partial_response_bytes_counted_without_final_prompt() -> None:
         session.close()
 
 
+def test_startup_readiness_requires_explicit_single_wake() -> None:
+    transport = _ScriptedTransport(
+        "lab-c1000 con0 is now available\r\n"
+        "Press RETURN to get started.\r\n",
+        {"": "lab-c1000>\r\n"},
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    session.open(None, allow_silent=True)
+    try:
+        assert session.state is SessionState.AWAITING_RETURN
+        assert session.startup_readiness_seen is True
+        assert transport.writes == []
+        # Single operator-controlled wake is exercised end-to-end in
+        # test_startup_readiness_to_c1000_queries_complete.
+    finally:
+        session.close()
+
+
+def test_existing_exec_prompt_does_not_send_extra_cr() -> None:
+    transport = _ScriptedTransport("R1#\r\n", {})
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    session.open(None)
+    try:
+        assert session.state is SessionState.PRIVILEGED_EXEC
+        assert session.startup_readiness_seen is False
+        assert transport.writes == []
+    finally:
+        session.close()
+
+
+def test_ordinary_banner_is_not_startup_readiness() -> None:
+    transport = _ScriptedTransport("Cisco IOS Software\r\n", {})
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=0.2,
+    )
+    with pytest.raises(SessionError):
+        session.open(None, allow_silent=True)
+    assert session.state is SessionState.FAILED
+    assert transport.writes == []
+
+
+def test_startup_readiness_text_in_query_output_fails_closed() -> None:
+    transport = _ScriptedTransport(
+        "R1#\r\n",
+        {
+            "show version": (
+                "Press RETURN to get started.\r\nR1#\r\n",
+            ),
+        },
+    )
+    session = ConsoleSession(
+        transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
+    )
+    session.open(None)
+    try:
+        with pytest.raises(SessionError):
+            session.query_result(ConsoleQuery.VERSION)
+        assert session.state is SessionState.FAILED
+    finally:
+        session.close()
+
+
 def test_transport_read_failure_retains_lease_when_close_fails() -> None:
     manager = ConsoleLeaseManager()
     session = ConsoleSession(

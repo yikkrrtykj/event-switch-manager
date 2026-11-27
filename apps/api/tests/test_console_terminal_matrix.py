@@ -48,6 +48,108 @@ def _all_split_variants(text: str) -> list[list[str]]:
     return variants
 
 
+STARTUP_STREAMS = (
+    "lab-c1000 con0 is now available\r\nPress RETURN to get started.\r\n",
+    "lab-c9300  con0 is now available \r\nPress RETURN to get started. \r\n",
+    "Press RETURN to get started.\r\n",
+    "banner\r\nPress RETURN to get started.\r\n",
+)
+
+
+@pytest.mark.parametrize("stream", STARTUP_STREAMS)
+def test_startup_readiness_parser_is_chunk_invariant(stream: str) -> None:
+    outcomes = []
+    for variants in _all_split_variants(stream):
+        parser, events = _feed(variants)
+        startup = [
+            event for event in events
+            if event.kind is ParserEventKind.STARTUP_READY
+        ]
+        outcomes.append((
+            len(startup),
+            startup[0].startup_host_token if startup else None,
+            parser.startup_readiness,
+        ))
+    assert len(set(outcomes)) == 1
+    assert outcomes[0][0] == 1
+    assert outcomes[0][2] is True
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        "Press RETURN to get started!\r\n",
+        "press return to get started.\r\n",
+        "Press RETURN to get start.\r\n",
+        "Press RETURN to get started. extra\r\n",
+        "banner only\r\n",
+    ],
+)
+def test_startup_readiness_requires_strict_known_text(stream: str) -> None:
+    parser, events = _feed([stream])
+    assert parser.startup_readiness is False
+    assert not any(
+        event.kind is ParserEventKind.STARTUP_READY for event in events
+    )
+
+
+def test_startup_readiness_optional_hostname_is_anonymous() -> None:
+    parser = ConsolePromptParser()
+    events = parser.feed(
+        "lab-c1000 con0 is now available\r\n"
+        "Press RETURN to get started.\r\n",
+    )
+    startup = next(
+        event for event in events
+        if event.kind is ParserEventKind.STARTUP_READY
+    )
+    assert startup.startup_host_token is not None
+    assert "lab-c1000" not in str(startup)
+
+
+def test_startup_readiness_all_five_profiles() -> None:
+    for profile in profiles():
+        stream = (
+            f"{profile.hostname} con0 is now available\r\n"
+            "Press RETURN to get started.\r\n"
+        )
+        for variants in _all_split_variants(stream):
+            parser, events = _feed(variants)
+            startup = [
+                event for event in events
+                if event.kind is ParserEventKind.STARTUP_READY
+            ]
+            assert len(startup) == 1
+            assert startup[0].startup_host_token is not None
+            assert parser.startup_readiness is True
+
+
+def test_startup_readiness_random_splits_all_profiles() -> None:
+    import random
+
+    rng = random.Random(9200)
+    for profile in profiles():
+        stream = (
+            f"{profile.hostname} con0 is now available\r\n"
+            "Press RETURN to get started.\r\n"
+        )
+        for _ in range(40):
+            chunks: list[str] = []
+            index = 0
+            while index < len(stream):
+                width = rng.randint(1, 11)
+                chunks.append(stream[index:index + width])
+                index += width
+            parser, events = _feed(chunks)
+            startup = [
+                event for event in events
+                if event.kind is ParserEventKind.STARTUP_READY
+            ]
+            assert len(startup) == 1
+            assert startup[0].startup_host_token is not None
+            assert parser.startup_readiness is True
+
+
 @pytest.mark.parametrize(
     "stream",
     [

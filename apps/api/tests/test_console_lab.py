@@ -2234,6 +2234,102 @@ def test_run_experiment_bluetooth_manual_binding_happy_path(
     assert payload["evidence"]["source"] == "AUTHORIZED_LIVE_LAB"
 
 
+def test_startup_readiness_to_c1000_queries_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from event_switch_manager.lab_runner import cli as lab_cli
+
+    class StartupSerial(FakeSerial):
+        def write(self, data: bytes) -> int:
+            self.writes.append(data)
+            if data == b"\r":
+                self.buffer += "lab-c1000>\r\n"
+            elif data == b"enable\r":
+                self.buffer += "lab-c1000#\r\n"
+            else:
+                self.buffer += "synthetic output\r\nlab-c1000>\r\n"
+            return len(data)
+
+    class CompleteAdapter:
+        def observe(
+            self,
+            session: ConsoleSession,
+            *,
+            expected_pid: str,
+            expected_release: str,
+            query_hook: Any,
+            lab_provenance: LabProvenance,
+            deadline_seconds: float,
+            partial_evidence_callback: Any = None,
+        ) -> ConsoleEvidence:
+            _ = (
+                expected_pid, expected_release, query_hook, deadline_seconds,
+                partial_evidence_callback,
+            )
+            target = get_target("c1000")
+            session.set_profile(target.profile)
+            results = tuple(
+                session.query_result(query) for query in target.allowed_queries
+            )
+            observation = ConsoleObservation(
+                source=ConsoleSource.AUTHORIZED_LIVE_LAB,
+                session_identity="startup-c1000",
+                exact_pid=target.expected_pid,
+                software_version=target.expected_release,
+                completeness=ObservationCompleteness.COMPLETE,
+            )
+            return build_evidence(
+                observation, results, lab_provenance=lab_provenance,
+            )
+
+    port = _port()
+    discovery = _discovery(port)
+    serial = StartupSerial(
+        initial=(
+            "lab-c1000 con0 is now available\r\n"
+            "Press RETURN to get started.\r\n"
+        ),
+    )
+    metadata = LabBuildMetadata("a" * 40, "b" * 64, "test", True, True)
+    monkeypatch.setattr(LabBuildMetadata, "load", classmethod(lambda _cls: metadata))
+    monkeypatch.setattr(lab_cli, "discover_serial_ports", lambda: discovery)
+    monkeypatch.setattr(
+        lab_cli,
+        "_confirm",
+        lambda prompt, **_kwargs: "enable" not in prompt.casefold(),
+    )
+    monkeypatch.setattr(lab_cli, "CiscoObservationAdapter", CompleteAdapter)
+    monkeypatch.setattr(
+        lab_cli,
+        "AuthorizedSerialTransport",
+        lambda auth, parameters=None: AuthorizedSerialTransport(
+            auth,
+            discovery=lambda: discovery,
+            serial_factory=lambda _port, _params: serial,
+        ),
+    )
+    exit_code = lab_cli.run_experiment(argparse.Namespace(
+        target="c1000",
+        com="COM3",
+        ttl_minutes=5.0,
+        output_dir=str(tmp_path),
+    ))
+    assert exit_code == 0
+    assert serial.writes[0] == b"\r"
+    assert serial.writes.count(b"\r") == 1
+    report = next(tmp_path.glob("experiment-*/console-lab-report.json"))
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    connection = payload["connection"]
+    assert payload["diagnostics"]["startup_readiness"] is True
+    assert connection["startup_readiness"] is True
+    assert connection["wake_sent"] is True
+    assert connection["status"] == "RELEASED"
+    assert connection["readonly_queries_completed"] is True
+    assert len(payload["queries"]) == len(get_target("c1000").allowed_queries)
+    assert payload["outcome"]["experiment_verdict"] == "READONLY_QUERIES_COMPLETED"
+
+
 def test_run_experiment_records_open_failure_truthfully(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2535,6 +2631,31 @@ def test_gui_passive_diagnostic_entry_is_separate_and_receive_only() -> None:
         assert "只收不发" in str(app.passive_button.cget("text"))
         assert str(app.export_button.cget("state")) == "disabled"
         assert "连接并开始实验" in str(app.connect_button.cget("text"))
+    finally:
+        app.on_close()
+
+
+def test_gui_device_state_markers_are_visible() -> None:
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tk display unavailable")
+    from event_switch_manager.lab_runner import gui as gui_module
+
+    root.withdraw()
+    app = gui_module.ConsoleLabGui(root, smoke=True)
+    try:
+        app._append_log("DEVICE-STATE=AWAITING_RETURN startup\n")
+        assert "按 Enter 开始" in app.connection_status_var.get()
+        app._append_log("DEVICE-STATE=AWAITING_PROMPT silent\n")
+        assert "等待人工唤醒确认" in app.connection_status_var.get()
+        app._append_log("DEVICE-STATE=USER_EXEC ready\n")
+        assert "User EXEC" in app.connection_status_var.get()
+        app._append_log("DEVICE-STATE=PRIVILEGED_EXEC ready\n")
+        assert "Privileged EXEC" in app.connection_status_var.get()
+        app._append_log("DEVICE-STATE=READONLY_QUERIES start\n")
+        assert "只读查询" in app.connection_status_var.get()
     finally:
         app.on_close()
 

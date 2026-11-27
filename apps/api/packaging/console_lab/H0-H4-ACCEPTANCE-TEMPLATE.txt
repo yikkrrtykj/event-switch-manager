@@ -43,6 +43,10 @@ H0-GUI — 独立 GUI
 [ ] 用户 Artifact 只解压一次即可运行；包内无嵌套 build ZIP
 [ ] “被动终端诊断”模式不发送任何应用层字节（CR/认证/分页/查询）
 [ ] 被动诊断事件无完整 transcript、密码或凭据，且可一键导出诊断 ZIP
+[ ] Cisco `Press RETURN to get started.` 触发 AWAITING_RETURN，
+    经人工确认后最多发送一次 CR
+[ ] 普通 Banner / 命令响应 / 未知输出不得触发 startup 唤醒
+[ ] GUI 明确显示等待响应/按 Enter/等待人工确认/认证/User/Privileged/查询状态
 [ ] 连接前安全授权区域显示端口/identity/PID/release/命令/有效期
 [ ] 密码输入遮挡且不保存
 [ ] 关闭窗口/取消触发安全清理；cleanup failure 可见

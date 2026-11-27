@@ -24,6 +24,11 @@ _CONFIG_PROMPT = re.compile(
 _ROMMON_PROMPT = re.compile(r"(?mi)^rommon(?:\s+\d+)?\s*>\s*$")
 _SWITCH_PROMPT = re.compile(r"(?mi)^switch:\s*$")
 _INITIAL_DIALOG = re.compile(r"(?i)initial configuration dialog.*\[yes/no\]")
+_STARTUP_AVAILABLE = re.compile(
+    r"(?i)^(?P<host>[A-Za-z0-9][A-Za-z0-9._-]{0,63})"
+    r"\s+con0\s+is\s+now\s+available\.?\s*$",
+)
+_STARTUP_RETURN = re.compile(r"(?m)^\s*Press RETURN to get started\.[ \t]*$")
 _AUTH_PROMPT = re.compile(
     r"(?im)^(?P<label>username|password|enable password|enter password)\s*:\s*$",
 )
@@ -49,6 +54,7 @@ class ParserEventKind(StrEnum):
     AUTH_PROMPT = "auth-prompt"
     PAGINATION = "pagination"
     UNSAFE_STATE = "unsafe-state"
+    STARTUP_READY = "startup-ready"
 
 
 class PromptMode(StrEnum):
@@ -71,6 +77,7 @@ class ParserEvent:
     auth_prompt: AuthPromptKind | None = None
     reason: str | None = None
     line_terminated: bool = False
+    startup_host_token: str | None = None
 
 
 class ConsoleOutputLimit(RuntimeError):
@@ -193,6 +200,7 @@ class ConsolePromptParser:
         self._last_prompt_identity: str | None = None
         self._last_prompt_text: str | None = None
         self._last_prompt_mode: PromptMode | None = None
+        self._startup_readiness = False
         self.parser_version = CONSOLE_PARSER_VERSION
 
     @property
@@ -206,6 +214,10 @@ class ConsolePromptParser:
     @property
     def prompt_collision_reason(self) -> str | None:
         return self._prompt_collision_reason
+
+    @property
+    def startup_readiness(self) -> bool:
+        return self._startup_readiness
 
     @property
     def prompt_candidates(self) -> int:
@@ -242,6 +254,7 @@ class ConsolePromptParser:
         self._last_prompt_identity = None
         self._last_prompt_text = None
         self._last_prompt_mode = None
+        self._startup_readiness = False
 
     def _prompt_collision_for_prefix(
         self,
@@ -311,6 +324,37 @@ class ConsolePromptParser:
                 continue
 
             last_line = stripped.rsplit("\n", 1)[-1]
+
+            startup_match = _STARTUP_RETURN.search(self._buffer)
+            if startup_match is not None:
+                line_start = self._buffer.rfind(
+                    "\n", 0, startup_match.start(),
+                ) + 1
+                output = self._buffer[:line_start]
+                line_terminated = self._buffer[startup_match.end():].startswith(
+                    "\n",
+                )
+                self._buffer = ""
+                host_token: str | None = None
+                prior_lines = output.rstrip().splitlines()
+                if prior_lines:
+                    available = _STARTUP_AVAILABLE.fullmatch(
+                        prior_lines[-1].strip(),
+                    )
+                    if available is not None:
+                        host_token = prompt_identity_token(
+                            available.group("host"), None,
+                        )
+                if output:
+                    events.append(ParserEvent(ParserEventKind.OUTPUT, output=output))
+                self._startup_readiness = True
+                events.append(ParserEvent(
+                    ParserEventKind.STARTUP_READY,
+                    reason="press-return",
+                    startup_host_token=host_token,
+                    line_terminated=line_terminated,
+                ))
+                continue
 
             auth = _AUTH_PROMPT.fullmatch(last_line.strip())
             if auth is not None:
@@ -423,6 +467,7 @@ __all__ = [
     "ConsoleOutputLimit",
     "ConsolePaginationLimit",
     "ConsolePromptParser",
+    "ParserEventKind",
     "MAX_PAGINATION_PAGES",
     "MAX_PROMPT_CANDIDATES",
     "MAX_PROMPT_REPEATS",
