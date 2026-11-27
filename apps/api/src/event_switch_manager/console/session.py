@@ -495,7 +495,11 @@ class ConsoleSession:
             self._transport.open()
             bind_token = getattr(self._transport, "bind_write_token", None)
             if callable(bind_token):
-                bind_token(self._write_token, lambda: self._state)
+                bind_token(
+                    self._write_token,
+                    lambda: self._state,
+                    self._cancel_event.is_set,
+                )
             self._state = SessionState.AWAITING_PROMPT
             try:
                 read = self._read_for_prompt(timeout=initial_timeout)

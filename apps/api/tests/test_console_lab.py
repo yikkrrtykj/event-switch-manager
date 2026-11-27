@@ -359,6 +359,39 @@ def test_partial_write_stops_when_authorization_is_cancelled() -> None:
     transport.close()
 
 
+def test_partial_session_write_stops_after_session_cancel() -> None:
+    port = _port()
+    auth = _auth(port=port)
+    holder: dict[str, ConsoleSession] = {}
+
+    class CancelOnFirstChunkSerial(FakeSerial):
+        def write(self, data: bytes) -> int:
+            self.writes.append(data[:1])
+            holder["session"].cancel()
+            return 1
+
+    serial = CancelOnFirstChunkSerial(initial="R1>\n")
+    transport = AuthorizedSerialTransport(
+        auth,
+        discovery=lambda: _discovery(port),
+        serial_factory=lambda _port, _params: serial,
+    )
+    session = ConsoleSession(
+        transport,
+        lab_gate=auth,
+        completion_policy=LiveCompletionPolicy(quiet_seconds=0.01),
+        timeout=1.0,
+    )
+    holder["session"] = session
+    session.open(None)
+    try:
+        with pytest.raises(SessionError):
+            session.query_result(ConsoleQuery.VERSION)
+        assert b"".join(serial.writes) == b"s"
+    finally:
+        session.close()
+
+
 def test_authorization_immutability_and_forged_target_rejection() -> None:
     auth = _auth()
     with pytest.raises(AttributeError):

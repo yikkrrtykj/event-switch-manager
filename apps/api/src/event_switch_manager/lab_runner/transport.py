@@ -99,6 +99,7 @@ class AuthorizedSerialTransport:
         self._ever_opened = False
         self._write_token: object | None = None
         self._write_state_provider: object | None = None
+        self._write_cancel_probe: Callable[[], bool] | None = None
         self._last_write_bytes = 0
 
     @property
@@ -136,9 +137,15 @@ class AuthorizedSerialTransport:
     def reset_write_accounting(self) -> None:
         self._last_write_bytes = 0
 
-    def bind_write_token(self, token: object, state_provider: object | None = None) -> None:
+    def bind_write_token(
+        self,
+        token: object,
+        state_provider: object | None = None,
+        cancel_probe: Callable[[], bool] | None = None,
+    ) -> None:
         self._write_token = token
         self._write_state_provider = state_provider
+        self._write_cancel_probe = cancel_probe
 
     @property
     def cleanup_required(self) -> bool:
@@ -242,6 +249,9 @@ class AuthorizedSerialTransport:
             # Expiry/cancellation is re-checked before every partial chunk so
             # no remaining bytes are written after authorization is revoked.
             self._authorization.check_active()
+            cancel_probe = self._write_cancel_probe
+            if callable(cancel_probe) and cancel_probe():
+                raise TransportError("lab-serial-write-cancelled")
             if time.monotonic() >= deadline:
                 raise TransportError("lab-serial-write-timeout")
             try:
