@@ -232,7 +232,10 @@ class ConsoleSession:
         completion_policy: PromptCompletionPolicy | None = None,
         credential_provider: Callable[[AuthPromptKind], str] | None = None,
         auth_timeout: float = 30.0,
+        startup_quiet_seconds: float = 0.25,
     ) -> None:
+        if not 0.05 <= startup_quiet_seconds <= 2.0:
+            raise ValueError("startup quiet window must be in [0.05, 2.0]")
         validate_family(family)
         if not 0 < timeout <= 120:
             raise ValueError("session timeout must be in (0, 120] seconds")
@@ -266,6 +269,7 @@ class ConsoleSession:
         self._completion_policy = completion_policy
         self._credential_provider = credential_provider
         self._auth_timeout = auth_timeout
+        self._startup_quiet_seconds = startup_quiet_seconds
         self._active_query: ConsoleQuery | None = None
         self._wake_sent = False
         self._cancel_event = threading.Event()
@@ -767,6 +771,20 @@ class ConsoleSession:
                 raise LiveDeviceDisabled("wake is only available to the lab runner")
             if self._wake_sent:
                 raise UnsafeConsoleState("a wake CR was already sent")
+            # The operator confirmation may have taken time.  Re-check the
+            # terminal immediately before the only CR: tolerate bounded late
+            # CR/LF/whitespace, but never write over unknown data.
+            wake_deadline = time.monotonic() + max(
+                0.05, self._startup_quiet_seconds,
+            )
+            if not self._drain_pending_whitespace(wake_deadline):
+                raise AmbiguousConsoleOutput(
+                    "unknown terminal data before wake CR",
+                )
+            if self._parser.has_unconsumed_non_whitespace:
+                raise AmbiguousConsoleOutput(
+                    "unknown parser data before wake CR",
+                )
             self._send("\r", ConsoleSendOperation.WAKE)
             self._wake_sent = True
             self._state = SessionState.AWAITING_PROMPT
@@ -1052,10 +1070,27 @@ class ConsoleSession:
         self._last_prompt_raw_bytes = 0
         output = ""
         candidate: _PromptRead | None = None
+        startup_candidate: _PromptRead | None = None
+        startup_candidate_at = 0.0
         while time.monotonic() < deadline:
             self._check_discovery_budget()
             pending_fn = getattr(self._transport, "pending_data", None)
             pending = bool(pending_fn()) if callable(pending_fn) else False
+            if startup_candidate is not None:
+                if self._parser.prompt_collision:
+                    raise AmbiguousConsoleOutput(
+                        "prompt collision after startup candidate",
+                    )
+                if self._parser.has_unconsumed_non_whitespace:
+                    raise AmbiguousConsoleOutput(
+                        "unknown terminal data after startup candidate",
+                    )
+                if (
+                    not pending
+                    and time.monotonic() - startup_candidate_at
+                    >= self._startup_quiet_seconds
+                ):
+                    return startup_candidate
             if candidate is not None and not pending:
                 policy_ready = (
                     self._completion_policy is None
@@ -1074,6 +1109,15 @@ class ConsoleSession:
                         )
                     return candidate
             read_limit = max(0.001, deadline - time.monotonic())
+            if startup_candidate is not None:
+                read_limit = min(
+                    read_limit,
+                    max(
+                        0.001,
+                        self._startup_quiet_seconds
+                        - (time.monotonic() - startup_candidate_at),
+                    ),
+                )
             if self._lab_gate is not None:
                 # Poll cancellation/expiry without ever using the full command
                 # deadline for one blocking pySerial read.
@@ -1097,25 +1141,32 @@ class ConsoleSession:
             for event in self._parser.feed(chunk):
                 self._record_terminal_event(event.kind)
                 if event.kind is ParserEventKind.OUTPUT:
+                    if (
+                        startup_candidate is not None
+                        and event.output.strip()
+                    ):
+                        raise AmbiguousConsoleOutput(
+                            "unknown output after startup candidate",
+                        )
                     output += event.output
                     self._total_response_bytes += len(event.output.encode("utf-8"))
                     if self._total_response_bytes > self._max_total_response_bytes:
                         raise ConsoleOutputLimit("console session output limit exceeded")
                 elif event.kind is ParserEventKind.STARTUP_READY:
-                    if event.reason != "press-return":
-                        raise AmbiguousConsoleOutput(
-                            "startup readiness context is ambiguous",
-                        )
                     if not allow_startup_readiness:
                         raise UnsafeConsoleState(
                             "unexpected startup readiness text",
+                        )
+                    if startup_candidate is not None:
+                        raise AmbiguousConsoleOutput(
+                            "duplicate startup readiness candidate",
                         )
                     if candidate is not None:
                         raise AmbiguousConsoleOutput(
                             "startup readiness after a prompt candidate",
                         )
                     self._startup_host_token = event.startup_host_token
-                    return _PromptRead(
+                    startup_candidate = _PromptRead(
                         output,
                         None,
                         None,
@@ -1123,12 +1174,21 @@ class ConsoleSession:
                         startup_reason=event.reason,
                         startup_host_token=event.startup_host_token,
                     )
+                    startup_candidate_at = time.monotonic()
                 elif event.kind is ParserEventKind.AUTH_PROMPT:
+                    if startup_candidate is not None:
+                        raise AmbiguousConsoleOutput(
+                            "authentication prompt after startup candidate",
+                        )
                     self._auth_prompt_seen = True
                     if candidate is not None:
                         raise AmbiguousConsoleOutput("duplicate terminal response")
                     return _PromptRead(output, None, event.auth_prompt)
                 elif event.kind is ParserEventKind.PAGINATION:
+                    if startup_candidate is not None:
+                        raise AmbiguousConsoleOutput(
+                            "pagination after startup candidate",
+                        )
                     if candidate is not None:
                         raise AmbiguousConsoleOutput("pagination after prompt")
                     if not allow_pagination:
@@ -1143,6 +1203,10 @@ class ConsoleSession:
                         query=self._active_query,
                     )
                 elif event.kind is ParserEventKind.PROMPT:
+                    if startup_candidate is not None:
+                        raise AmbiguousConsoleOutput(
+                            "EXEC prompt after startup candidate",
+                        )
                     self._last_prompt_read_saw_data = True
                     if candidate is not None:
                         if (
@@ -1179,6 +1243,16 @@ class ConsoleSession:
                         self._completion_policy.candidate_seen()
                 elif event.kind is ParserEventKind.UNSAFE_STATE:
                     raise UnsafeConsoleState(event.reason or "unsafe console state")
+            if startup_candidate is not None:
+                startup_candidate_at = time.monotonic()
+                if self._parser.prompt_collision:
+                    raise AmbiguousConsoleOutput(
+                        "prompt collision after startup candidate",
+                    )
+                if self._parser.has_unconsumed_non_whitespace:
+                    raise AmbiguousConsoleOutput(
+                        "unknown terminal data after startup candidate",
+                    )
             if candidate is not None and self._parser.prompt_collision:
                 self._terminal_collision_reason = (
                     self._parser.prompt_collision_reason or "prompt-collision"

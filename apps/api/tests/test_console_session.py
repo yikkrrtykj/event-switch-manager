@@ -34,6 +34,7 @@ from event_switch_manager.console.session import (
     SessionState,
     UnexpectedAuthPrompt,
     UnexpectedConsolePrompt,
+    UnsafeConsoleState,
 )
 from event_switch_manager.console.simulator import (
     SimulatedConsoleTransport,
@@ -299,10 +300,12 @@ class _ScriptedTransport:
 
     def __init__(
         self,
-        initial: str,
+        initial: str | list[str],
         responses: dict[str, str | tuple[str, ...]],
     ) -> None:
-        self._queue: list[str] = [initial]
+        self._queue: list[str] = (
+            list(initial) if isinstance(initial, list) else [initial]
+        )
         self._responses = responses
         self._open = False
         self.writes: list[str] = []
@@ -861,10 +864,102 @@ def test_startup_readiness_with_existing_prompt_fails_closed() -> None:
     session = ConsoleSession(
         transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
     )
-    with pytest.raises(AmbiguousConsoleOutput):
+    with pytest.raises((AmbiguousConsoleOutput, UnsafeConsoleState)):
         session.open(None, allow_silent=True)
     assert session.state is SessionState.FAILED
     assert transport.writes == []
+
+
+def test_delayed_startup_whitespace_is_confirmed_after_quiet_window() -> None:
+    transport = _ScriptedTransport(
+        [
+            "lab-c1000 con0 is now available\r\n"
+            "Press RETURN to get started.",
+            "\r\n",
+        ],
+        {"": "lab-c1000>\r\n"},
+    )
+    session = ConsoleSession(
+        transport,
+        lease_manager=ConsoleLeaseManager(),
+        timeout=1.0,
+        startup_quiet_seconds=0.05,
+    )
+    session.open(None, allow_silent=True)
+    try:
+        assert session.state is SessionState.AWAITING_RETURN
+        assert transport.writes == []
+        assert transport._queue == []
+    finally:
+        session.close()
+
+
+def test_unknown_suffix_after_startup_candidate_fails_closed() -> None:
+    transport = _ScriptedTransport(
+        [
+            "Press RETURN to get started.\r\n",
+            "banner\r\n",
+        ],
+        {},
+    )
+    session = ConsoleSession(
+        transport,
+        lease_manager=ConsoleLeaseManager(),
+        timeout=1.0,
+        startup_quiet_seconds=0.05,
+    )
+    with pytest.raises((AmbiguousConsoleOutput, UnsafeConsoleState)):
+        session.open(None, allow_silent=True)
+    assert session.state is SessionState.FAILED
+    assert transport.writes == []
+
+
+class _SimulatorLabGate:
+    authorization = object()
+
+    def authorize_open(self, transport: object) -> None:
+        _ = transport
+
+    def authorize_query(self, query: object) -> None:
+        _ = query
+
+    def authorize_send(
+        self,
+        operation: object,
+        text: str,
+        query: object = None,
+    ) -> None:
+        _ = (operation, text, query)
+
+    def check_active(self) -> None:
+        return None
+
+    def remaining_seconds(self) -> float:
+        return 60.0
+
+
+def test_unknown_data_before_wake_cr_fails_closed() -> None:
+    transport = _ScriptedTransport(
+        "Press RETURN to get started.\r\n",
+        {},
+    )
+    session = ConsoleSession(
+        transport,
+        lease_manager=ConsoleLeaseManager(),
+        lab_gate=_SimulatorLabGate(),
+        timeout=1.0,
+        startup_quiet_seconds=0.05,
+    )
+    session.open(None, allow_silent=True)
+    try:
+        assert session.state is SessionState.AWAITING_RETURN
+        transport._queue.append("banner\r\n")
+        with pytest.raises((AmbiguousConsoleOutput, UnsafeConsoleState)):
+            session.wake_once()
+        assert transport.writes == []
+        assert session.state is SessionState.AWAITING_RETURN
+    finally:
+        session.close()
 
 
 def test_prompt_before_startup_readiness_fails_closed() -> None:
@@ -875,7 +970,7 @@ def test_prompt_before_startup_readiness_fails_closed() -> None:
     session = ConsoleSession(
         transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
     )
-    with pytest.raises(AmbiguousConsoleOutput):
+    with pytest.raises((AmbiguousConsoleOutput, UnsafeConsoleState)):
         session.open(None, allow_silent=True)
     assert session.state is SessionState.FAILED
     assert transport.writes == []
@@ -898,7 +993,7 @@ def test_unsafe_prefix_before_startup_readiness_fails_closed(prefix: str) -> Non
     session = ConsoleSession(
         transport, lease_manager=ConsoleLeaseManager(), timeout=1.0,
     )
-    with pytest.raises(AmbiguousConsoleOutput):
+    with pytest.raises((AmbiguousConsoleOutput, UnsafeConsoleState)):
         session.open(None, allow_silent=True)
     assert session.state is SessionState.FAILED
     assert transport.writes == []

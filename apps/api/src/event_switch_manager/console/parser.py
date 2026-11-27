@@ -170,15 +170,21 @@ def sanitize_console_text(text: str) -> str:
     return "".join(output)
 
 
-def _startup_context_unsafe(text: str) -> bool:
-    return any(pattern.search(text) is not None for pattern in (
-        _PROMPT,
-        _CONFIG_PROMPT,
-        _ROMMON_PROMPT,
-        _SWITCH_PROMPT,
-        _AUTH_PROMPT,
-        _INITIAL_DIALOG,
-    ))
+def _startup_prefix(
+    output: str,
+) -> tuple[bool, str | None]:
+    """Accept only blank lines or one exact con0-available host line."""
+    nonempty = [
+        line.strip() for line in output.splitlines() if line.strip()
+    ]
+    if not nonempty:
+        return True, None
+    if len(nonempty) != 1:
+        return False, None
+    available = _STARTUP_AVAILABLE.fullmatch(nonempty[0])
+    if available is None:
+        return False, None
+    return True, prompt_identity_token(available.group("host"), None)
 
 
 def _auth_kind(label: str) -> AuthPromptKind:
@@ -344,30 +350,21 @@ class ConsolePromptParser:
                 output = self._buffer[:line_start]
                 startup_remainder = self._buffer[startup_match.end():]
                 line_terminated = startup_remainder.startswith("\n")
-                host_token: str | None = None
-                ambiguous_context = (
-                    _startup_context_unsafe(output)
-                    or _startup_context_unsafe(startup_remainder)
-                )
+                prefix_ok, host_token = _startup_prefix(output)
+                suffix_ok = startup_remainder.strip() == ""
                 self._buffer = ""
-                prior_lines = output.rstrip().splitlines()
-                if prior_lines:
-                    available = _STARTUP_AVAILABLE.fullmatch(
-                        prior_lines[-1].strip(),
-                    )
-                    if available is not None:
-                        host_token = prompt_identity_token(
-                            available.group("host"), None,
-                        )
+                if not prefix_ok or not suffix_ok:
+                    events.append(ParserEvent(
+                        ParserEventKind.UNSAFE_STATE,
+                        reason="startup-context-unrecognized",
+                    ))
+                    continue
                 if output:
                     events.append(ParserEvent(ParserEventKind.OUTPUT, output=output))
                 self._startup_readiness = True
                 events.append(ParserEvent(
                     ParserEventKind.STARTUP_READY,
-                    reason=(
-                        "press-return-with-context"
-                        if ambiguous_context else "press-return"
-                    ),
+                    reason="press-return",
                     startup_host_token=host_token,
                     line_terminated=line_terminated,
                 ))

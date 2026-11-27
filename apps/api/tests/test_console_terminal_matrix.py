@@ -51,8 +51,8 @@ def _all_split_variants(text: str) -> list[list[str]]:
 STARTUP_STREAMS = (
     "lab-c1000 con0 is now available\r\nPress RETURN to get started.\r\n",
     "lab-c9300  con0 is now available \r\nPress RETURN to get started. \r\n",
-    "Press RETURN to get started.\r\n",
-    "banner\r\nPress RETURN to get started.\r\n",
+    "\r\nPress RETURN to get started.\r\n",
+    "lab-c1000 con0 is now available\r\n\r\nPress RETURN to get started.\r\n\r\n",
 )
 
 
@@ -90,6 +90,30 @@ def test_startup_readiness_requires_strict_known_text(stream: str) -> None:
     assert parser.startup_readiness is False
     assert not any(
         event.kind is ParserEventKind.STARTUP_READY for event in events
+    )
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        ["banner\r\nPress RETURN to get started.\r\n"],
+        ["Press RETURN to get started.\r\nbanner\r\n"],
+        ["Press RETURN to get started.\r\n\r\nbanner\r\n"],
+        ["banner\r\n", "Press RETURN to get started.\r\n"],
+        [
+            "lab-c1000 con0 is now available\r\n"
+            "banner\r\nPress RETURN to get started.\r\n",
+        ],
+    ],
+)
+def test_startup_readiness_rejects_unknown_context(chunks: list[str]) -> None:
+    parser, events = _feed(chunks)
+    assert parser.startup_readiness is False
+    assert not any(
+        event.kind is ParserEventKind.STARTUP_READY for event in events
+    )
+    assert any(
+        event.kind is ParserEventKind.UNSAFE_STATE for event in events
     )
 
 
